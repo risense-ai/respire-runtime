@@ -1,0 +1,21 @@
+[package]
+name = "respire_protocol"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "respire wire protocol and serde-only domain types"
+license-file = "LICENSE"
+repository = "https://github.com/risense-ai/respire-cli"
+readme = "README.md"
+include = ["Cargo.toml", "src/**", "README.md", "LICENSE"]
+publish = ["crates-io"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
