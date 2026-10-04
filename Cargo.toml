@@ -1,0 +1,14 @@
+[package]
+name = "respire_spawn"
+version = "1.0.8"
+edition = "2021"
+rust-version = "1.88"
+description = "Start the respire runtime without inheriting the caller's pipes"
+license-file = "../LICENSE"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
