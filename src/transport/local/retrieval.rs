@@ -7,6 +7,19 @@ use rusqlite::{params, OptionalExtension};
 
 fn generation_key(model: &str) -> Result<String> { respire_core_sdk::generation_key(model) }
 
+#[derive(Debug)]
+pub struct IndexSourceChanged {
+    pub pending: i64,
+}
+
+impl std::fmt::Display for IndexSourceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "index source changed during rebuild; rerun to resume ({} pending)", self.pending)
+    }
+}
+
+impl std::error::Error for IndexSourceChanged {}
+
 impl LocalStore {
     pub(super) fn attach_retrieval_index(
         &self,
@@ -14,16 +27,16 @@ impl LocalStore {
     ) -> Result<()> {
         let model = self.retrieval_model()?;
         let mut stmt = self.connection.prepare(
-            "SELECT a.memory_id,a.artifact FROM core_artifacts a
+            "SELECT a.memory_id,a.source,a.artifact FROM core_artifacts a
              JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source
              WHERE a.model=?1 AND m.deleted=0",
         )?;
         let rows = stmt.query_map(params![generation_key(&model)?], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, Vec<u8>>(2)?))
         })?;
         let artifacts = rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
         for memory in out.iter_mut() {
-            if let Some(artifact) = artifacts.get(&memory.id) {
+            if let Some(artifact) = artifacts.get(&(memory.id.clone(), memory.ciphertext.clone())) {
                 memory.local_artifact = artifact.clone();
             }
         }
@@ -31,18 +44,44 @@ impl LocalStore {
     }
 
     pub(super) fn store_artifact(&self, memory: &crate::StoredMemory, model: &str) -> Result<()> {
-        self.connection.execute(
-            "DELETE FROM core_artifacts WHERE memory_id=?1 AND (source<>?2 OR ?3=1)",
-            params![memory.id, memory.ciphertext, memory.deleted as i64],
-        )?;
-        if !memory.deleted && !memory.local_artifact.is_empty() {
+        let generation = generation_key(model)?;
+        // The source guard also protects a newer artifact from an older prepared snapshot.
+        self.connection.execute_batch("SAVEPOINT core_artifact_publish")?;
+        let result = (|| -> Result<()> {
             self.connection.execute(
-                "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
-                 SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
-                params![memory.id, generation_key(model)?, memory.ciphertext, memory.local_artifact],
+                "DELETE FROM core_artifacts WHERE memory_id=?1 AND (source<>?2 OR ?3=1)
+                 AND EXISTS(SELECT 1 FROM memories m WHERE m.id=?1 AND m.ciphertext=?2 AND m.deleted=?3)",
+                params![memory.id, memory.ciphertext, memory.deleted as i64],
             )?;
+            if !memory.deleted && !memory.local_artifact.is_empty() {
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
+                     SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
+                    params![memory.id, generation, memory.ciphertext, memory.local_artifact],
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.connection.execute_batch("ROLLBACK TO core_artifact_publish")?;
         }
-        Ok(())
+        self.connection.execute_batch("RELEASE core_artifact_publish")?;
+        result
+    }
+
+    /// Check the actual candidate snapshot before semantic retrieval, without a separate database read.
+    pub fn candidates_index_ready(&self, candidates: &[crate::StoredMemory]) -> Result<bool> {
+        let mut artifacts = Vec::new();
+        for memory in candidates.iter().filter(|memory| !memory.deleted) {
+            if memory.local_artifact.is_empty() {
+                return Ok(false);
+            }
+            artifacts.push(memory.local_artifact.clone());
+        }
+        if artifacts.is_empty() {
+            return Ok(true);
+        }
+        respire_core_sdk::index_ready(&artifacts)
     }
 
     pub fn index_pending(&self, model: &str) -> Result<bool> {
@@ -103,6 +142,7 @@ impl LocalStore {
             }
             let entry = crate::memory::MemoryEngine::open(keys, stored)?;
             let prepared = embedder.prepare(&entry)?;
+            progress(index, candidates.len())?;
             let mut derived = stored.clone();
             derived.local_artifact = prepared.artifact;
             self.store_artifact(&derived, model)?;
@@ -114,10 +154,9 @@ impl LocalStore {
             "SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)",
             params![generation_key(&model)?], |r| r.get(0))?;
-        anyhow::ensure!(
-            missing == 0,
-            "index source changed during rebuild; rerun to resume ({missing} pending)"
-        );
+        if missing != 0 {
+            return Err(IndexSourceChanged { pending: missing }.into());
+        }
         tx.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)",
             params![model],

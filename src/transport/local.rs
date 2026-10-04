@@ -20,6 +20,7 @@ mod grants;
 mod retrieval;
 mod sync;
 pub use grants::AccessGrant;
+pub use retrieval::IndexSourceChanged;
 
 /// Query-log row (query-log command output). candidates=search candidates; adopted=used on a write (weak signal);
 /// good/bad=model self-grade (main post-train signal: useful / misleading).
