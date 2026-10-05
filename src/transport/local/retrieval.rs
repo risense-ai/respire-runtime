@@ -120,7 +120,7 @@ impl LocalStore {
         model: &str,
         mut progress: impl FnMut(usize, usize) -> Result<()>,
     ) -> Result<usize> {
-        anyhow::ensure!(matches!(model, "legacy" | "m3"), "unknown index model");
+        anyhow::ensure!(model == "m3", "unknown index model");
         progress(0, 0)?;
         if self.meta_get("retrieval_model")?.as_deref() == Some(model)
             && !self.index_pending(model)?
@@ -166,8 +166,6 @@ impl LocalStore {
     }
 
     pub fn retrieval_model(&self) -> Result<String> {
-        Ok(self
-            .meta_get("retrieval_model")?
-            .unwrap_or_else(|| "legacy".to_owned()))
+        Ok("m3".to_owned())
     }
 }
