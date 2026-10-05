@@ -68,6 +68,12 @@ impl Kind {
 /// Plaintext form of one memory (client memory/display only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub supersedes: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub superseded_by: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub see_also: Vec<String>,
     pub id: String,
     pub kind: Kind,
     pub tags: Vec<String>,
@@ -96,6 +102,12 @@ pub struct MemoryEntry {
 /// Ciphertext payload v2 (AES-256-GCM of the whole object; decrypting on a client yields this struct).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayloadV2 {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub supersedes: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub superseded_by: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub see_also: Vec<String>,
     pub kind: String,
     pub tags: String, // comma-separated
     pub title: String,
@@ -320,4 +332,30 @@ mod tests {
         assert_eq!(p.modified_by, "");
         Ok(())
     }
+}
+
+/// Final association result; no intermediate vector or ranking details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelatedMemory {
+    pub id: String,
+    pub title: String,
+    pub source_id: String,
+    pub relation: RelationKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationKind { NewVersion, OldVersion, SeeAlso, CoRecall, Neighbor }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallPair {
+    pub a: String,
+    pub b: String,
+    pub n: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelatedResult {
+    pub related: Vec<RelatedMemory>,
+    pub superseded: std::collections::BTreeMap<String, String>,
 }

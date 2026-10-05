@@ -1,6 +1,6 @@
 [package]
 name = "respire_protocol"
-version = "1.0.0"
+version = "2.0.0-dev.1"
 edition = "2021"
 rust-version = "1.88"
 description = "respire wire protocol and serde-only domain types"
