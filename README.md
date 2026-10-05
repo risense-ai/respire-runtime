@@ -53,3 +53,8 @@ Consumers must package the manifest's `runtime/` libraries and `notices/` files 
 the executable. The CLI provides `scripts/stage-core-runtime.mjs` for this step.
 The wrapper license applies to the wrapper only; native SDK and model files
 retain their separate distribution terms and notices.
+
+Association writes require `related_business` capability and association contract 1.
+All supported targets use the matching pinned seven-platform SDK release. The
+2.0 development Rust binding depends on the corresponding 2.0 development
+protocol API; the C ABI remains 1. See [association compatibility](../../docs/associations.md).

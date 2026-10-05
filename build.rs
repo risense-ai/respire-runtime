@@ -11,6 +11,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_path = directory.join("manifest.json");
     let manifest_bytes = fs::read(&manifest_path)?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    if manifest["association_contract"].as_u64() != Some(1) {
+        return Err("Core SDK lacks association contract 1; rebuild and pin a matching SDK".into());
+    }
     let target = env::var("TARGET")?;
     let lock_path =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");

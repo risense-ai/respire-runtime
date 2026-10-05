@@ -2,12 +2,13 @@
   "schema_version": 1,
   "targets": {
     "x86_64-pc-windows-msvc": {
-      "sdk_version": "1.0.1",
-      "manifest_sha256": "8c53d8c2aae0942353e12f6273473fa39fce3baf51ce001d63f6f1ca934e3a04",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.1/respire-core-sdk-x86_64-pc-windows-msvc.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.1/respire-core-sdk-x86_64-pc-windows-msvc.tar.gz",
-      "archive_sha256": "0c386f583222a9e70f238345471d8bf16ad372f1b53034dae9edde5c68d42f4f",
-      "redistribution": "approved"
+      "sdk_version": "1.0.2-local.association",
+      "manifest_sha256": "4ef1d2ed7b2612fc32ea2f3e576b24fd290a0e025c4ae651635d151453d6cdc2",
+      "url": null,
+      "archive_url": null,
+      "archive_sha256": null,
+      "redistribution": "not-approved",
+      "association_contract": 1
     },
     "aarch64-pc-windows-msvc": {
       "sdk_version": "1.0.1",

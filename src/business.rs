@@ -21,7 +21,7 @@ pub fn set_index_root(root: &std::path::Path) -> Result<()> {
 }
 
 pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Result<T> {
-    if matches!(operation, "prepare" | "query" | "query_business" | "remember_candidates" | "candidate_report" | "analyze_duplicates" | "tree_cure" | "deepen_plan" | "tree_float" | "index_status") { INDEX_ROOT.with(|slot| {
+    if matches!(operation, "prepare" | "query" | "query_business" | "related_business" | "remember_candidates" | "candidate_report" | "analyze_duplicates" | "tree_cure" | "deepen_plan" | "tree_float" | "index_status") { INDEX_ROOT.with(|slot| {
         if let (Some(root), Some(fields)) = (slot.borrow().as_ref(), payload.as_object_mut()) {
             fields.insert("index_root".to_owned(), json!(root));
         }
@@ -35,6 +35,15 @@ pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Resu
         let result = core.call(operation, payload)?;
         serde_json::from_value(result).context("invalid Core business response")
     })
+}
+
+/// Reject an older binary SDK before writing fields it cannot round-trip.
+pub fn require_associations() -> Result<()> {
+    let capabilities: Value = execute("capabilities",json!({}))?;
+    anyhow::ensure!(capabilities["operations"].as_array().is_some_and(|ops|
+        ops.iter().any(|op| op.as_str() == Some("related_business"))),
+        "Core SDK does not support associations; install a matching SDK");
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

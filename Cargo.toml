@@ -1,6 +1,6 @@
 [package]
 name = "respire_core_sdk"
-version = "1.0.0"
+version = "2.0.0-dev.1"
 edition = "2021"
 rust-version = "1.95"
 license-file = "LICENSE"
@@ -13,7 +13,7 @@ publish = ["crates-io"]
 
 [dependencies]
 anyhow = "1.0"
-respire_protocol = { path = "../protocol", version = "=1.0.0" }
+respire_protocol = { path = "../protocol", version = "=2.0.0-dev.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
