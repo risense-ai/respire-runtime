@@ -42,6 +42,12 @@ pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
     }
 }
 
+#[cfg(unix)]
+pub fn effective_user_id() -> u32 {
+    // geteuid has no arguments or failure path.
+    unsafe { libc::geteuid() }
+}
+
 #[cfg(windows)]
 fn without_inherited_stdio<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     let saved = [
