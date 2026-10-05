@@ -94,6 +94,9 @@ impl MemoryEngine {
     ) -> Result<StoredMemory> {
         // v2 payload: metadata and content encrypted as a whole (including parent_id — the causal parent travels with ciphertext so the tree restores across devices)
         let payload = PayloadV2 {
+            supersedes: entry.supersedes.clone(),
+            superseded_by: entry.superseded_by.clone(),
+            see_also: entry.see_also.clone(),
             kind: entry.kind.as_str().to_owned(),
             tags: entry.tags.join(","),
             title: entry.title.clone(),
@@ -209,6 +212,29 @@ impl MemoryEngine {
         hydrate_local(keys, stored)
     }
 
+    /// Change only encrypted relationships and retain the existing derived index.
+    pub fn reseal_edges(keys: &SessionKeys, stored: &StoredMemory, stamp: &str,
+        edit: impl FnOnce(&mut PayloadV2)) -> Result<StoredMemory> {
+        let plaintext = crypto::decrypt_item(&keys.data_key, &stored.ciphertext, &stored.nonce)?;
+        let mut payload: PayloadV2 = serde_json::from_str(&plaintext).context("payload parse failed")?;
+        let mut expected = payload.clone();
+        edit(&mut payload);
+        expected.supersedes = payload.supersedes.clone();
+        expected.superseded_by = payload.superseded_by.clone();
+        expected.see_also = payload.see_also.clone();
+        expected.modified_by = payload.modified_by.clone();
+        anyhow::ensure!(serde_json::to_value(&payload)? == serde_json::to_value(&expected)?,
+            "relationship edit must not change embedding source metadata");
+        payload.updated_at = stamp.to_owned();
+        let (nonce,ciphertext) = crypto::encrypt_item(&keys.data_key, &serde_json::to_string(&payload)?)?;
+        let mut result = stored.clone();
+        result.nonce = nonce;
+        result.ciphertext = ciphertext;
+        result.updated_at = stamp.to_owned();
+        result.local_modified_by = payload.modified_by;
+        Ok(result)
+    }
+
     pub fn reseal_parent(
         keys: &SessionKeys,
         stored: &StoredMemory,
@@ -235,6 +261,9 @@ impl MemoryEngine {
         let payload: PayloadV2 =
             serde_json::from_str(&payload_json).context("payload parse failed")?;
         Ok(MemoryEntry {
+            supersedes: payload.supersedes,
+            superseded_by: payload.superseded_by,
+            see_also: payload.see_also,
             id: stored.id.clone(),
             kind: Kind::from_str(&payload.kind),
             tags: payload
