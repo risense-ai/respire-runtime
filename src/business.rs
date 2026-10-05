@@ -151,7 +151,7 @@ pub mod bge {
     #[derive(Clone)]
     pub struct BgeEmbedder { model: String, dims: usize }
     impl BgeEmbedder {
-        pub fn load() -> Result<Self> { Self::load_model("legacy") }
+        pub fn load() -> Result<Self> { Self::load_model("m3") }
         pub fn load_model(model: &str) -> Result<Self> {
             let value: Value = execute("model_status", json!({"model":model}))?;
             let dims = value["dimensions"].as_u64().context("missing model dimensions")? as usize;
@@ -168,11 +168,11 @@ pub mod bge {
     pub fn default_user_model_dir() -> PathBuf {
         std::env::var("ONEMEMORY_DATA_DIR").ok()
             .filter(|value| !value.trim().is_empty())
-            .map(|value| expand_home(value.trim()).join("models/bge-base-zh-v1.5"))
-            .unwrap_or_else(|| expand_home("~/.respire/models/bge-base-zh-v1.5"))
+            .map(|value| expand_home(value.trim()).join("models/bge-m3"))
+            .unwrap_or_else(|| expand_home("~/.respire/models/bge-m3"))
     }
-    pub fn m3_model_dir() -> PathBuf { std::env::var_os("ONEMEMORY_M3_DIR").map(PathBuf::from).unwrap_or_else(|| default_user_model_dir().with_file_name("bge-m3")) }
-    pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model.onnx").is_file() }
+    pub fn m3_model_dir() -> PathBuf { std::env::var("ONEMEMORY_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
+    pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_fp16.onnx").is_file() }
     pub fn expand_home(value: &str) -> PathBuf {
         match value.strip_prefix("~/") {
             Some(rest) => dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from)).map(|base| base.join(rest)).unwrap_or_else(|| PathBuf::from(value)),
@@ -199,13 +199,6 @@ pub mod onnx {
     pub fn install_accelerators() -> Result<Vec<String>> { execute("engine_control", json!({"action":"install_accelerators"})) }
     pub fn enable_worker(executable: PathBuf) -> Result<()> { execute("engine_control", json!({"action":"enable_worker","executable":executable})) }
     pub fn run_worker() -> Result<()> { execute("engine_control", json!({"action":"run_worker"})) }
-}
-
-pub mod rerank {
-    use super::*;
-    use std::path::PathBuf;
-    pub const RERANKER_DIR_NAME: &str = "bge-reranker-base";
-    pub fn resolve_reranker_dir() -> Result<PathBuf> { execute("model_paths", json!({"model":"reranker"})) }
 }
 
 pub mod defrag {
