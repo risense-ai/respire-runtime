@@ -18,6 +18,7 @@ use crate::memory::model::StoredMemory;
 mod conflicts;
 mod grants;
 mod retrieval;
+mod related;
 mod sync;
 pub use grants::AccessGrant;
 pub use retrieval::IndexSourceChanged;
@@ -704,6 +705,7 @@ pub fn validate_migration_snapshot(path: &Path) -> Result<()> {
 fn migrate(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     migrate_schema(&transaction)?;
+    transaction.execute_batch("CREATE TABLE IF NOT EXISTS recall_pairs(a TEXT NOT NULL,b TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(a,b),CHECK(a<b)); CREATE INDEX IF NOT EXISTS recall_pairs_b ON recall_pairs(b);")?;
     transaction.commit()?;
     Ok(())
 }
