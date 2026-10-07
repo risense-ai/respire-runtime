@@ -1,12 +1,13 @@
 //! memory::crypto — end-to-end encryption key hierarchy
 //!
 //!   Auth domain (separate from crypto): password → PBKDF2 hash → server verify; token is auth only
-//!   Crypto domain (**v4 live**, frozen 2026-09-16):
+//!   Current namespace (version marker `rsrs:v1:`); unmarked old values retain
+//!   their frozen decryptors until the user explicitly migrates the library.
 //!     Secret Key      A3- code (144-bit entropy), **the only root credential**, in the OS keyring
-//!     KEK             HKDF(Secret Key entropy, kdf_salt, info="onememory:kek:v4") — wraps URK only, never on disk
+//!     KEK             HKDF(Secret Key entropy, kdf_salt, info="rsrs:kek:v4") — wraps URK only, never on disk
 //!     URK             random 256-bit at first register; uploaded wrapped only (vault table)
-//!     data_key        HKDF(URK, "onememory:data:v1") — **one per library**, encrypts every entry
-//!     embedding_key   HKDF(URK, "onememory:embedding:v1") — encrypts vectors
+//!     data_key        HKDF(URK, "rsrs:data:v1") — **one per library**, encrypts every entry
+//!     embedding_key   HKDF(URK, "rsrs:embedding:v1") — encrypts vectors
 //!     data            AES-256-GCM, **independent random nonce per item** (nonce stored beside ciphertext)
 //!
 //!   Rotation:
@@ -30,6 +31,8 @@ use sha2::Sha256;
 
 pub const KEY_BYTES: usize = 32;
 pub const NONCE_BYTES: usize = 12;
+/// Explicit envelope marker; unmarked ciphertext is the frozen legacy format.
+pub const RSRS_PREFIX: &str = "rsrs:v1:";
 /// Account Secret length in hex characters.
 pub const SECRET_HEX_CHARS: usize = 64;
 
@@ -62,6 +65,14 @@ pub fn generate_key() -> [u8; KEY_BYTES] {
 /// Argon2id(password, kdf_salt) → intermediate; HKDF mixes in Account Secret → KEK.
 /// KEK only wraps/unwraps URK; stays in memory after unlock, never on disk.
 pub fn derive_kek(password: &str, account_secret: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+    derive_password_kek(password, account_secret, kdf_salt_hex, b"onememory:kek:v1")
+}
+
+pub fn derive_rsrs_password_kek(password: &str, account_secret: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+    derive_password_kek(password, account_secret, kdf_salt_hex, b"rsrs:kek:v1")
+}
+
+fn derive_password_kek(password: &str, account_secret: &str, kdf_salt_hex: &str, info: &[u8]) -> AnyResult<[u8; KEY_BYTES]> {
     let salt_bytes = hex::decode(kdf_salt_hex).map_err(|e| anyhow::anyhow!("KDF salt hex decode failed: {e}"))?;
     let argon2 = Argon2::default();
     let mut intermediate = [0u8; KEY_BYTES];
@@ -70,7 +81,7 @@ pub fn derive_kek(password: &str, account_secret: &str, kdf_salt_hex: &str) -> A
         .map_err(|e| anyhow::anyhow!("Argon2id derive failed: {e}"))?;
     let hk = Hkdf::<Sha256>::new(Some(account_secret.as_bytes()), &intermediate);
     let mut kek = [0u8; KEY_BYTES];
-    hk.expand(b"onememory:kek:v1", &mut kek)
+    hk.expand(info, &mut kek)
         .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
     Ok(kek)
 }
@@ -125,6 +136,17 @@ pub fn derive_kek_v4(secret_key: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY
     Ok(kek)
 }
 
+/// Current namespace. Legacy v4 wraps retain derive_kek_v4 for read compatibility.
+pub fn derive_rsrs_kek(secret_key: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+    let ikm = secret_key_bytes(secret_key)?;
+    let salt = hex::decode(kdf_salt_hex)?;
+    let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
+    let mut kek = [0u8; KEY_BYTES];
+    hk.expand(b"rsrs:kek:v4", &mut kek)
+        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
+    Ok(kek)
+}
+
 /// Secret Key string (A3-xxxx-… hyphenated) → 18 bytes of raw entropy.
 pub fn secret_key_bytes(secret_key: &str) -> AnyResult<[u8; 18]> {
     // Strip the A3- prefix before filtering hex — "A3" itself is valid hex and would add a byte
@@ -154,10 +176,18 @@ pub fn generate_secret_key() -> String {
 }
 
 pub fn derive_vault_kek(super_pass: &str, secret_key: &str, salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+    derive_two_factor_kek(super_pass, secret_key, salt_hex, b"onememory:kek:v1")
+}
+
+pub fn derive_rsrs_vault_kek(super_pass: &str, secret_key: &str, salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+    derive_two_factor_kek(super_pass, secret_key, salt_hex, b"rsrs:kek:v1")
+}
+
+fn derive_two_factor_kek(super_pass: &str, secret_key: &str, salt_hex: &str, info: &[u8]) -> AnyResult<[u8; KEY_BYTES]> {
     let intermediate = derive_super_kek(super_pass, salt_hex)?;
     let hk = Hkdf::<Sha256>::new(Some(secret_key.as_bytes()), &intermediate);
     let mut kek = [0u8; KEY_BYTES];
-    hk.expand(b"onememory:kek:v1", &mut kek)
+    hk.expand(info, &mut kek)
         .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
     Ok(kek)
 }
@@ -165,7 +195,8 @@ pub fn derive_vault_kek(super_pass: &str, secret_key: &str, salt_hex: &str) -> A
 /// PBKDF2-SHA256 password hash. Server stores only this hash, never the plaintext password.
 /// 100k iterations (OWASP-recommended class).
 pub fn derive_pass_hash(password: &str, salt_hex: &str) -> AnyResult<String> {
-    let salt = hex::decode(salt_hex).map_err(|e| anyhow::anyhow!("salt hex decode failed: {e}"))?;
+    let salt = hex::decode(salt_hex.strip_prefix(RSRS_PREFIX).unwrap_or(salt_hex))
+        .map_err(|e| anyhow::anyhow!("salt hex decode failed: {e}"))?;
     let mut out = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, 100_000, &mut out);
     Ok(hex::encode(out))
@@ -174,6 +205,15 @@ pub fn derive_pass_hash(password: &str, salt_hex: &str) -> AnyResult<String> {
 /// Auth salt: deterministic, domain-separated derivation from user. Any device can recompute it.
 /// Server stores only pass_hash; every client device hashes with the same salt for login.
 pub fn derive_auth_salt(user: &str) -> AnyResult<String> {
+    let hk = Hkdf::<Sha256>::new(None, user.trim().to_lowercase().as_bytes());
+    let mut salt = [0u8; 16];
+    hk.expand(b"rsrs:auth-salt:v1", &mut salt)
+        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
+    Ok(format!("{}{}", RSRS_PREFIX, hex::encode(salt)))
+}
+
+/// Existing password hashes are verified with their stored salt, never renamed.
+pub fn derive_legacy_auth_salt(user: &str) -> AnyResult<String> {
     let hk = Hkdf::<Sha256>::new(None, user.trim().to_lowercase().as_bytes());
     let mut salt = [0u8; 16];
     hk.expand(b"onememory:auth-salt:v1", &mut salt)
