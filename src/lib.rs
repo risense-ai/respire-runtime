@@ -9,7 +9,7 @@ use std::{marker::PhantomData, rc::Rc};
 mod business;
 pub use business::*;
 
-pub const ABI_VERSION: u32 = 0x0001_0000;
+pub const ABI_VERSION: u32 = 0x0001_0001;
 
 /// Confined to its owner thread; calls cannot race destruction or one another.
 pub struct Core {
@@ -34,6 +34,17 @@ impl Core {
     }
 
     pub fn call(&mut self, operation: &str, payload: Value) -> Result<Value> {
+        self.call_inner(operation, payload, None)
+    }
+
+    /// Host performs external requests. Credentials must remain in the closure.
+    pub fn call_with_transport(&mut self, operation: &str, payload: Value,
+        transport: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<Value> {
+        self.call_inner(operation, payload, Some(transport))
+    }
+
+    fn call_inner(&mut self, operation: &str, payload: Value,
+        transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<Value> {
         if self.poisoned {
             bail!("Core handle is poisoned; recreate it");
         }
@@ -46,7 +57,10 @@ impl Core {
             "schema_version": 1, "request_id": request_id,
             "operation": operation, "payload": payload,
         }))?;
-        let (code, bytes) = self.handle.call(&request)?;
+        let (code, bytes) = match transport {
+            Some(transport) => self.handle.call_with_transport(&request, transport)?,
+            None => self.handle.call(&request)?,
+        };
         if code == 7 {
             self.poisoned = true;
         }
@@ -125,6 +139,12 @@ mod ffi {
             output: *mut Buffer,
         ) -> i32;
         fn rs_core_buffer_free(buffer: *mut Buffer);
+        fn rs_core_call_with_transport(
+            core: *mut c_void, input: *const u8, len: usize, context: *mut c_void,
+            request: unsafe extern "C" fn(*mut c_void, *const u8, usize, *mut HostBuffer) -> i32,
+            release: unsafe extern "C" fn(*mut c_void, *mut HostBuffer),
+            output: *mut Buffer,
+        ) -> i32;
         fn rs_core_destroy(core: *mut c_void);
     }
 
@@ -134,6 +154,39 @@ mod ffi {
 
     pub(super) struct Handle {
         pointer: ptr::NonNull<c_void>,
+    }
+
+    // Host allocations must never enter Buffer, whose Drop uses the Core allocator.
+    #[repr(C)]
+    struct HostBuffer { data: *mut u8, len: usize }
+
+    struct TransportContext<'a> {
+        callback: &'a mut dyn FnMut(&Value) -> Result<Value>,
+        response: Vec<u8>,
+    }
+
+    unsafe extern "C" fn host_request(context: *mut c_void, input: *const u8,
+        len: usize, output: *mut HostBuffer) -> i32 {
+        let context = unsafe { &mut *context.cast::<TransportContext<'_>>() };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<u8>> {
+            anyhow::ensure!(!input.is_null() && len <= isize::MAX as usize, "invalid host request buffer");
+            let request: Value = serde_json::from_slice(unsafe { slice::from_raw_parts(input, len) })?;
+            serde_json::to_vec(&(context.callback)(&request)?).map_err(Into::into)
+        }));
+        let (status, bytes) = match result {
+            Ok(Ok(bytes)) => (0, bytes),
+            Ok(Err(error)) => (6, json!({"error":error.to_string()}).to_string().into_bytes()),
+            Err(_) => (7, Vec::new()),
+        };
+        context.response = bytes;
+        unsafe { ptr::write(output, HostBuffer { data: context.response.as_mut_ptr(), len: context.response.len() }) };
+        status
+    }
+
+    unsafe extern "C" fn host_release(context: *mut c_void, output: *mut HostBuffer) {
+        let context = unsafe { &mut *context.cast::<TransportContext<'_>>() };
+        context.response.clear();
+        unsafe { ptr::write(output, HostBuffer { data: ptr::null_mut(), len: 0 }) };
     }
 
     impl Handle {
@@ -164,6 +217,15 @@ mod ffi {
                     &mut output,
                 )
             };
+            Ok((code, output.bytes()?))
+        }
+
+        pub(super) fn call_with_transport(&mut self, input: &[u8],
+            callback: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<(i32, Vec<u8>)> {
+            let mut context = TransportContext { callback, response: Vec::new() };
+            let mut output = Buffer::empty();
+            let code = unsafe { rs_core_call_with_transport(self.pointer.as_ptr(), input.as_ptr(),
+                input.len(), ptr::from_mut(&mut context).cast(), host_request, host_release, &mut output) };
             Ok((code, output.bytes()?))
         }
     }

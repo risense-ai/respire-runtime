@@ -15,6 +15,7 @@ flowchart LR
 | `rs_core_abi_version` | Report the ABI epoch |
 | `rs_core_create` | Create a thread-confined opaque handle |
 | `rs_core_call` | Execute a versioned business request |
+| `rs_core_call_with_transport` | Execute using borrowed synchronous host transport callbacks |
 | `rs_core_buffer_free` | Release Core-allocated output |
 | `rs_core_destroy` | Release the handle |
 
@@ -27,7 +28,7 @@ explicit. The binding owns buffer/handle cleanup, and handles cannot cross threa
 | SDK location | `RESPIRE_CORE_SDK_DIR` |
 | Integrity | Pinned manifest SHA-256 and individual file SHA-256 |
 | Platform and Rust | Exact Cargo target, compiler release and commit |
-| ABI | `0x00010000`, request schema `1` |
+| ABI | `0x00010001`, request schema `1` |
 | Panic and CRT | `unwind`; dynamic MSVC CRT on Windows, static CRT on musl |
 | Runtime | SDK libraries copied beside executable and test binaries |
 

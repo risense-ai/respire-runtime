@@ -21,6 +21,16 @@ pub fn set_index_root(root: &std::path::Path) -> Result<()> {
 }
 
 pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Result<T> {
+    execute_inner(operation, &mut payload, None)
+}
+
+pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload: Value,
+    transport: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<T> {
+    execute_inner(operation, &mut payload, Some(transport))
+}
+
+fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
+    transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<T> {
     if matches!(operation, "prepare" | "query" | "query_business" | "related_business" | "remember_candidates" | "candidate_report" | "analyze_duplicates" | "tree_cure" | "deepen_plan" | "tree_float" | "index_status") { INDEX_ROOT.with(|slot| {
         if let (Some(root), Some(fields)) = (slot.borrow().as_ref(), payload.as_object_mut()) {
             fields.insert("index_root".to_owned(), json!(root));
@@ -32,7 +42,11 @@ pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Resu
             *slot = Some(crate::Core::new()?);
         }
         let core = slot.as_mut().context("Core not initialized")?;
-        let result = core.call(operation, payload)?;
+        let payload = payload.take();
+        let result = match transport {
+            Some(transport) => core.call_with_transport(operation, payload, transport)?,
+            None => core.call(operation, payload)?,
+        };
         serde_json::from_value(result).context("invalid Core business response")
     })
 }
@@ -181,7 +195,7 @@ pub mod bge {
             .unwrap_or_else(|| expand_home("~/.respire/models/bge-m3"))
     }
     pub fn m3_model_dir() -> PathBuf { std::env::var("ONEMEMORY_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
-    pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_fp16.onnx").is_file() }
+    pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file() }
     pub fn expand_home(value: &str) -> PathBuf {
         match value.strip_prefix("~/") {
             Some(rest) => dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from)).map(|base| base.join(rest)).unwrap_or_else(|| PathBuf::from(value)),
@@ -201,10 +215,12 @@ pub mod onnx {
         }
     }
     pub fn configured_engine() -> Result<Engine> { execute("engine_control", json!({"action":"get"})) }
+    pub fn inference_status() -> Result<Value> { execute("engine_control", json!({"action":"inference_status"})) }
     pub fn save_engine(engine: Engine) -> Result<()> { execute("engine_control", json!({"action":"set","engine":engine})) }
     pub fn reset_sessions() -> Result<()> { execute("engine_control", json!({"action":"reset"})) }
     pub fn reset_cpu_config() -> Result<()> { execute("engine_control", json!({"action":"reset_cpu"})) }
-    pub fn install_accelerators() -> Result<Vec<String>> { execute("engine_control", json!({"action":"install_accelerators"})) }
+    pub fn accelerator_catalog_path() -> Result<Option<std::path::PathBuf>> { execute("engine_control", json!({"action":"accelerator_catalog"})) }
+    pub fn install_accelerators() -> Result<Vec<String>> { bail!("accelerator installation is host-managed; run rsrs model install-engines from the host CLI") }
 }
 
 pub mod defrag {

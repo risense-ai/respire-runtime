@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if target.contains("musl") && !static_crt {
         return Err("musl Core SDK requires the static CRT (+crt-static)".into());
     }
-    if manifest["abi_version"].as_u64() != Some(0x0001_0000) {
+    if manifest["abi_version"].as_u64() != Some(0x0001_0001) {
         return Err("Core SDK ABI version mismatch".into());
     }
     let compiler = std::process::Command::new(env::var_os("RUSTC").ok_or("missing RUSTC")?)
