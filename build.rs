@@ -5,7 +5,11 @@ use std::{env, error::Error, fs, path::PathBuf};
 #[path = "src/env.rs"]
 mod compatibility_env;
 
+#[path = "host-winml-build.rs"]
+mod host_winml_build;
+
 fn main() -> Result<(), Box<dyn Error>> {
+    host_winml_build::prepare()?;
     println!("cargo:rerun-if-env-changed=RSRS_CORE_SDK_DIR");
     println!("cargo:rerun-if-env-changed=ONEMEMORY_CORE_SDK_DIR");
     println!("cargo:rerun-if-env-changed=RESPIRE_CORE_SDK_DIR");
@@ -43,7 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if target.contains("musl") && !static_crt {
         return Err("musl Core SDK requires the static CRT (+crt-static)".into());
     }
-    if manifest["abi_version"].as_u64() != Some(0x0001_0001) {
+    if manifest["abi_version"].as_u64() != Some(0x0001_0002) {
         return Err("Core SDK ABI version mismatch".into());
     }
     let compiler = std::process::Command::new(env::var_os("RUSTC").ok_or("missing RUSTC")?)

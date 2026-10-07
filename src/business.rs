@@ -31,24 +31,38 @@ pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload:
 
 fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
     transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<T> {
-    if matches!(operation, "prepare" | "query" | "query_business" | "related_business" | "remember_candidates" | "candidate_report" | "analyze_duplicates" | "tree_cure" | "deepen_plan" | "tree_float" | "index_status") { INDEX_ROOT.with(|slot| {
-        if let (Some(root), Some(fields)) = (slot.borrow().as_ref(), payload.as_object_mut()) {
-            fields.insert("index_root".to_owned(), json!(root));
+    if let Err(error) = crate::host::resolve_artifacts(payload) {
+        if operation == "index_status" && error.chain().any(|cause|
+            cause.downcast_ref::<crate::host::CorruptArtifact>().is_some() || cause.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)) {
+            return serde_json::from_value(json!(false)).map_err(Into::into);
         }
-    }); }
+        return Err(error);
+    }
+    if matches!(operation, "query" | "query_business" | "related_business" | "remember_candidates" | "candidate_report" | "analyze_duplicates" | "tree_cure" | "deepen_plan" | "tree_float") {
+        crate::host::request_settings(payload)?;
+    }
     CORE.with(|cell| {
         let mut slot = cell.try_borrow_mut().context("recursive Core call")?;
         if slot.is_none() {
             *slot = Some(crate::Core::new()?);
         }
         let core = slot.as_mut().context("Core not initialized")?;
+        if payload["model"].as_str() == Some("m3") && !matches!(operation, "index_generation" | "index_status") {
+            crate::host::initialize_model(core)?;
+        }
         let payload = payload.take();
-        let result = match transport {
+        let mut result = match transport {
             Some(transport) => core.call_with_transport(operation, payload, transport)?,
             None => core.call(operation, payload)?,
         };
+        if operation == "prepare" { crate::host::persist_prepared(&mut result)?; }
         serde_json::from_value(result).context("invalid Core business response")
     })
+}
+
+pub(crate) fn index_root() -> Result<std::path::PathBuf> {
+    INDEX_ROOT.with(|slot| slot.borrow().clone().context("missing selected profile index root"))
 }
 
 /// Reject an older binary SDK before writing fields it cannot round-trip.
@@ -62,7 +76,7 @@ pub fn require_associations() -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prepared {
-    /// Local-only Core index locator; no intermediate features cross this API.
+    /// Host-owned local index locator. Its contents remain opaque to the host.
     #[serde(default, with = "bytes")]
     pub artifact: Vec<u8>,
 }
@@ -196,6 +210,26 @@ pub mod bge {
     }
     pub fn m3_model_dir() -> PathBuf { crate::env::var("RSRS_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
     pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file() }
+    pub fn resolve_model_dir() -> Result<PathBuf> {
+        let explicit = crate::env::var("RSRS_M3_DIR").ok().filter(|value| !value.trim().is_empty());
+        let user = m3_model_dir();
+        if explicit.is_some() {
+            anyhow::ensure!(model_files_present(&user), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3", user.display());
+            return Ok(user);
+        }
+        let mut candidates = vec![user.clone()];
+        if crate::env::var_os("RSRS_DATA_DIR").is_none() {
+            if let Some(home) = dirs::home_dir() {
+                candidates.extend([home.join(".respire/models/bge-m3"), home.join(".onememory/models/bge-m3")]);
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() { candidates.insert(0, parent.join("models/bge-m3")); }
+        }
+        candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        for directory in candidates { if model_files_present(&directory) { return Ok(directory); } }
+        bail!("BGE-M3 quantized files missing; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR (expected {})", user.display())
+    }
     pub fn expand_home(value: &str) -> PathBuf {
         match value.strip_prefix("~/") {
             Some(rest) => dirs::home_dir().or_else(|| crate::env::var_os("HOME").map(PathBuf::from)).or_else(|| crate::env::var_os("USERPROFILE").map(PathBuf::from)).map(|base| base.join(rest)).unwrap_or_else(|| PathBuf::from(value)),
@@ -214,12 +248,74 @@ pub mod onnx {
             match value { "cpu" => Ok(Self::Cpu), "gpu" => Ok(Self::Gpu), "npu" => Ok(Self::Npu), _ => bail!("engine must be npu, gpu, or cpu; automatic mode is no longer supported") }
         }
     }
-    pub fn configured_engine() -> Result<Engine> { execute("engine_control", json!({"action":"get"})) }
-    pub fn inference_status() -> Result<Value> { execute("engine_control", json!({"action":"inference_status"})) }
-    pub fn save_engine(engine: Engine) -> Result<()> { execute("engine_control", json!({"action":"set","engine":engine})) }
-    pub fn reset_sessions() -> Result<()> { execute("engine_control", json!({"action":"reset"})) }
-    pub fn reset_cpu_config() -> Result<()> { execute("engine_control", json!({"action":"reset_cpu"})) }
-    pub fn accelerator_catalog_path() -> Result<Option<std::path::PathBuf>> { execute("engine_control", json!({"action":"accelerator_catalog"})) }
+    fn settings_dir() -> std::path::PathBuf {
+        crate::env::var_os("RSRS_DATA_DIR").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| bge::expand_home("~/.rsrs"))
+    }
+    pub(crate) fn host_cache_dir() -> std::path::PathBuf { settings_dir().join("engines/openvino-cache") }
+    pub fn configured_engine() -> Result<Engine> {
+        let mut path = settings_dir().join("inference.json");
+        if !path.exists() && crate::env::var_os("RSRS_DATA_DIR").is_none() {
+            if let Some(home) = dirs::home_dir() {
+                for legacy in [".respire", ".onememory"] {
+                    let candidate = home.join(legacy).join("inference.json");
+                    if candidate.exists() { path = candidate; break; }
+                }
+            }
+        }
+        let value = if path.exists() { serde_json::from_slice::<Value>(&std::fs::read(path)?)? }
+            else { json!({"engine":"cpu"}) };
+        if value["force_cpu"].as_bool() == Some(true) { return Ok(Engine::Cpu); }
+        if let Ok(value) = crate::env::var("RSRS_ENGINE") { return Engine::parse(&value); }
+        match value["engine"].as_str().context("inference.json missing engine")? {
+            "auto" => Ok(Engine::Cpu), value => Engine::parse(value),
+        }
+    }
+    pub fn inference_status() -> Result<Value> {
+        let mut status: Value = execute("engine_control", json!({"action":"inference_status"}))?;
+        let diagnostics = crate::host::provider_diagnostics()?;
+        if !diagnostics.is_empty() { status["provider_registration_errors"] = json!(diagnostics); }
+        Ok(status)
+    }
+    fn write_engine(engine: Engine, force_cpu: bool) -> Result<()> {
+        let directory = settings_dir();
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(directory.join("inference.json"), serde_json::to_vec_pretty(&json!({"engine":engine,"force_cpu":force_cpu}))?)?;
+        Ok(())
+    }
+    pub fn save_engine(engine: Engine) -> Result<()> {
+        reset_sessions()?;
+        write_engine(engine, false)
+    }
+    pub fn reset_sessions() -> Result<()> {
+        execute::<()>("engine_control", json!({"action":"reset"}))?;
+        crate::host::reset_model_cache()
+    }
+    pub fn reset_cpu_config() -> Result<()> { write_engine(Engine::Cpu, true) }
+    pub fn accelerator_catalog_path() -> Result<Option<std::path::PathBuf>> {
+        #[cfg(windows)] {
+            let directory = settings_dir().join("engines/winml-2.4.89");
+            let dll = directory.join("Microsoft.Windows.AI.MachineLearning.dll");
+            if !dll.exists() {
+                std::fs::create_dir_all(&directory)?;
+                std::fs::write(&dll, crate::host_winml::DLL)?;
+                std::fs::write(directory.join("license.txt"), crate::host_winml::LICENSE)?;
+            }
+            Ok(Some(dll))
+        }
+        #[cfg(not(windows))] { Ok(None) }
+    }
+    #[cfg(windows)]
+    pub(crate) fn host_providers() -> Result<Vec<crate::host_winml::Provider>> {
+        let dll = accelerator_catalog_path()?.context("Windows ML catalog path missing")?;
+        let mut providers = crate::host_winml::Catalog::open(&dll)?.providers()?;
+        let manifest = settings_dir().join("engines/providers.json");
+        if manifest.exists() {
+            let saved: std::collections::BTreeMap<String, std::path::PathBuf> = serde_json::from_slice(&std::fs::read(manifest)?)?;
+            for (name, path) in saved { providers.push(crate::host_winml::Provider { name, ready:path.is_file(), path:Some(path) }); }
+        }
+        Ok(providers)
+    }
     pub fn install_accelerators() -> Result<Vec<String>> { bail!("accelerator installation is host-managed; run rsrs model install-engines from the host CLI") }
 }
 

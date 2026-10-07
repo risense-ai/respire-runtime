@@ -1,13 +1,13 @@
 [package]
 name = "respire_core_sdk"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 edition = "2021"
 rust-version = "1.95"
 license-file = "LICENSE"
 description = "Safe Rust binding to the separately distributed Respire Core SDK"
 repository = "https://github.com/risense-ai/respire-cli"
 readme = "README.md"
-include = ["Cargo.toml", "src/**", "build.rs", "README.md", "LICENSE", "core-sdk.lock.json", "prepare-sdk.mjs"]
+include = ["Cargo.toml", "src/**", "notices/**", "build.rs", "host-winml-build.rs", "README.md", "LICENSE", "core-sdk.lock.json", "prepare-sdk.mjs"]
 links = "respire_core_ffi"
 publish = ["crates-io"]
 
@@ -18,11 +18,18 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
 dirs = "6.0"
+sha2 = "0.10"
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["disable-linking", "api-24"] }
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
 
 [build-dependencies]
 serde_json = "1.0"
 sha2 = "0.10"
 hex = "0.4"
+ureq = { version = "2.12", features = ["socks-proxy"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints.rust]
 unsafe_code = "deny"
