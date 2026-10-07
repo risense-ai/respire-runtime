@@ -192,7 +192,6 @@ pub mod bge {
 
 pub mod onnx {
     use super::*;
-    use std::path::PathBuf;
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all="lowercase")]
     pub enum Engine { Npu, Gpu, #[default] Cpu }
@@ -206,8 +205,6 @@ pub mod onnx {
     pub fn reset_sessions() -> Result<()> { execute("engine_control", json!({"action":"reset"})) }
     pub fn reset_cpu_config() -> Result<()> { execute("engine_control", json!({"action":"reset_cpu"})) }
     pub fn install_accelerators() -> Result<Vec<String>> { execute("engine_control", json!({"action":"install_accelerators"})) }
-    pub fn enable_worker(executable: PathBuf) -> Result<()> { execute("engine_control", json!({"action":"enable_worker","executable":executable})) }
-    pub fn run_worker() -> Result<()> { execute("engine_control", json!({"action":"run_worker"})) }
 }
 
 pub mod defrag {
