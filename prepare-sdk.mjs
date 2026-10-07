@@ -35,7 +35,7 @@ const download = async value => {
 const verify = (directory, bytes, entry, target) => {
   if (hash(bytes) !== entry.manifest_sha256) throw new Error('SDK manifest does not match the pinned SHA-256');
   const manifest = JSON.parse(bytes);
-  if (manifest.target !== target || manifest.abi_version !== 0x00010001 || !Array.isArray(manifest.files)) throw new Error('SDK target, ABI or file manifest mismatch');
+  if (manifest.target !== target || manifest.abi_version !== 0x00010002 || !Array.isArray(manifest.files)) throw new Error('SDK target, ABI or file manifest mismatch');
   const seen = new Set();
   for (const file of manifest.files) {
     const full = checkedPath(directory, file.path);
