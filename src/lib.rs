@@ -11,6 +11,11 @@ use std::process::{Command, Stdio};
 mod confinement;
 pub use confinement::is_restricted;
 
+#[cfg(windows)]
+mod winml;
+#[cfg(windows)]
+pub use winml::{install_accelerators, replace_provider_manifest};
+
 pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
     command
