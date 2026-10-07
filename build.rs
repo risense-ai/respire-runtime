@@ -7,6 +7,7 @@ mod compatibility_env;
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=RSRS_CORE_SDK_DIR");
+    println!("cargo:rerun-if-env-changed=ONEMEMORY_CORE_SDK_DIR");
     println!("cargo:rerun-if-env-changed=RESPIRE_CORE_SDK_DIR");
     let directory = PathBuf::from(
         compatibility_env::var_os("RSRS_CORE_SDK_DIR")
