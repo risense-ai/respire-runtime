@@ -2,11 +2,15 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{env, error::Error, fs, path::PathBuf};
 
+#[path = "src/env.rs"]
+mod compatibility_env;
+
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-env-changed=RSRS_CORE_SDK_DIR");
     println!("cargo:rerun-if-env-changed=RESPIRE_CORE_SDK_DIR");
     let directory = PathBuf::from(
-        env::var_os("RESPIRE_CORE_SDK_DIR")
-            .ok_or("prepare the Core SDK with prepare-sdk.mjs and set RESPIRE_CORE_SDK_DIR")?,
+        compatibility_env::var_os("RSRS_CORE_SDK_DIR")
+            .ok_or("prepare the Core SDK with prepare-sdk.mjs and set RSRS_CORE_SDK_DIR")?,
     );
     let manifest_path = directory.join("manifest.json");
     let manifest_bytes = fs::read(&manifest_path)?;

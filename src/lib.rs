@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
+
 //! Safe ownership wrapper. No private Rust engine crate is a dependency.
+
+pub mod env;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

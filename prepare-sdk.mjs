@@ -90,13 +90,14 @@ export async function prepareSdk(target, destination, lockPath = join(root, 'cor
   const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
   const entry = lock.targets[target];
   if (!entry) throw new Error(`No validated Core SDK is pinned for ${target}`);
-  const output = resolve(process.env.RESPIRE_CORE_SDK_DIR || destination || join(dirname(lockPath), '.sdk', target));
+  const configured = process.env.RSRS_CORE_SDK_DIR ?? process.env.ONEMEMORY_CORE_SDK_DIR ?? process.env.RESPIRE_CORE_SDK_DIR;
+  const output = resolve(configured ?? destination ?? join(dirname(lockPath), '.sdk', target));
   const manifestPath = join(output, 'manifest.json');
   if (existsSync(manifestPath)) {
     verify(output, readFileSync(manifestPath), entry, target);
   } else {
     if (existsSync(output)) throw new Error('SDK destination already exists without a manifest; use a fresh directory');
-    if (!entry.url) throw new Error(`No approved SDK download URL for ${target}; provide a validated local RESPIRE_CORE_SDK_DIR`);
+    if (!entry.url) throw new Error(`No approved SDK download URL for ${target}; provide a validated local RSRS_CORE_SDK_DIR`);
     const bytes = await download(entry.url);
     if (hash(bytes) !== entry.manifest_sha256) throw new Error('SDK manifest does not match the pinned SHA-256');
     mkdirSync(dirname(output), { recursive: true });
@@ -132,7 +133,7 @@ export async function prepareSdk(target, destination, lockPath = join(root, 'cor
       rmSync(temporary, { recursive: true, force: true });
     }
   }
-  if (process.env.GITHUB_ENV) appendFileSync(process.env.GITHUB_ENV, `RESPIRE_CORE_SDK_DIR=${output}\n`, 'utf8');
+  if (process.env.GITHUB_ENV) appendFileSync(process.env.GITHUB_ENV, `RSRS_CORE_SDK_DIR=${output}\n`, 'utf8');
   console.log(`Validated Core SDK: ${output}`);
   return output;
 }

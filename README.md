@@ -25,7 +25,7 @@ explicit. The binding owns buffer/handle cleanup, and handles cannot cross threa
 
 | Build check | Requirement |
 | --- | --- |
-| SDK location | `RESPIRE_CORE_SDK_DIR` |
+| SDK location | `RSRS_CORE_SDK_DIR` |
 | Integrity | Pinned manifest SHA-256 and individual file SHA-256 |
 | Platform and Rust | Exact Cargo target, compiler release and commit |
 | ABI | `0x00010001`, request schema `1` |
@@ -38,11 +38,11 @@ With Node.js 22 or later, prepare an SDK from the crate directory:
 
 ```sh
 node prepare-sdk.mjs x86_64-pc-windows-msvc /absolute/path/to/sdk
-export RESPIRE_CORE_SDK_DIR=/absolute/path/to/sdk
+export RSRS_CORE_SDK_DIR=/absolute/path/to/sdk
 cargo build
 ```
 
-On PowerShell, set `$env:RESPIRE_CORE_SDK_DIR` instead of using `export`.
+On PowerShell, set `$env:RSRS_CORE_SDK_DIR` instead of using `export`.
 If a target has no download URL, supply an already prepared matching SDK at that
 directory. The lock defines supported artifacts and download URLs. Flat release
 assets are supported: `url` identifies a standalone manifest and

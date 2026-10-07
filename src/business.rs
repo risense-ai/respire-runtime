@@ -157,7 +157,7 @@ pub mod search {
         fn dims(&self) -> usize { (**self).dims() }
         fn prepare(&self, entry: &MemoryEntry) -> Result<Prepared> { (**self).prepare(entry) }
     }
-    /// Explicit existing-test provider; the Core also requires RESPIRE_CORE_TEST_MODE=1.
+    /// Explicit existing-test provider; the Core also requires RSRS_CORE_TEST_MODE=1.
     #[derive(Clone)]
     pub struct HashingEmbedder { name: String, dims: usize }
     impl HashingEmbedder { pub fn new(dims: usize) -> Self { Self { name:format!("test-hash:{dims}"), dims } } }
@@ -189,16 +189,16 @@ pub mod bge {
     }
     // Installation paths are public infrastructure and use the Respire profile.
     pub fn default_user_model_dir() -> PathBuf {
-        std::env::var("ONEMEMORY_DATA_DIR").ok()
+        crate::env::var("RSRS_DATA_DIR").ok()
             .filter(|value| !value.trim().is_empty())
             .map(|value| expand_home(value.trim()).join("models/bge-m3"))
-            .unwrap_or_else(|| expand_home("~/.respire/models/bge-m3"))
+            .unwrap_or_else(|| expand_home("~/.rsrs/models/bge-m3"))
     }
-    pub fn m3_model_dir() -> PathBuf { std::env::var("ONEMEMORY_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
+    pub fn m3_model_dir() -> PathBuf { crate::env::var("RSRS_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
     pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file() }
     pub fn expand_home(value: &str) -> PathBuf {
         match value.strip_prefix("~/") {
-            Some(rest) => dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from)).map(|base| base.join(rest)).unwrap_or_else(|| PathBuf::from(value)),
+            Some(rest) => dirs::home_dir().or_else(|| crate::env::var_os("HOME").map(PathBuf::from)).or_else(|| crate::env::var_os("USERPROFILE").map(PathBuf::from)).map(|base| base.join(rest)).unwrap_or_else(|| PathBuf::from(value)),
             None => PathBuf::from(value),
         }
     }
