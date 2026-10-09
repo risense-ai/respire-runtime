@@ -109,6 +109,19 @@ impl LocalStore {
         Ok(Self { connection })
     }
 
+    /// Benchmark an initialized library without migrations or database writes.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ).with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
+        connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        Ok(Self { connection })
+    }
+
     /// Write (dirty semantics same as put, mark dirty=1).
     pub fn put_inner(&self, memory: &StoredMemory, dirty: bool) -> Result<bool> {
         self.put_inner_policy(memory, dirty, false)
