@@ -139,6 +139,16 @@ pub(crate) fn request_settings(payload: &mut Value) -> Result<()> {
     if let Some(fields) = payload.as_object_mut() {
         if !fields.contains_key("query_settings") {
             let mut settings = serde_json::Map::new();
+            match crate::env::var("RSRS_ROUTE") {
+                Ok(value) => { settings.insert("route_on".to_owned(), json!(value != "0")); }
+                Err(std::env::VarError::NotPresent) => {}
+                Err(error) => return Err(error.into()),
+            }
+            match crate::env::var("RSRS_ABLATE") {
+                Ok(value) => { settings.insert("ablate".to_owned(), json!(value)); }
+                Err(std::env::VarError::NotPresent) => {}
+                Err(error) => return Err(error.into()),
+            }
             explicit_setting::<f32>(&mut settings, "recall_min_score", "RSRS_RECALL_MIN_SCORE")?;
             explicit_setting::<f32>(&mut settings, "mmr_lambda", "RSRS_MMR_LAMBDA")?;
             explicit_setting::<usize>(&mut settings, "ancestor_budget", "RSRS_ANCESTOR_BUDGET")?;
