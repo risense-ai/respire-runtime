@@ -10,6 +10,28 @@ use serde::{Deserialize, Serialize};
 
 pub const VERSION_TAG: &str = env!("CARGO_PKG_VERSION");
 
+/// Recall routing receipt; no intermediate ranking features are exposed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallRouting {
+    pub temporal: bool,
+    pub route_on: bool,
+    pub ablate: String,
+}
+
+fn de_see_also<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum HistoricalLinks {
+        Text(String),
+        Links(Vec<String>),
+    }
+    match HistoricalLinks::deserialize(deserializer)? {
+        HistoricalLinks::Text(text) => Ok(text.split(',').map(str::trim)
+            .filter(|id| !id.is_empty()).map(str::to_owned).collect()),
+        HistoricalLinks::Links(links) => Ok(links),
+    }
+}
+
 /// Memory kind (seven classes + knowledge; software-agnostic semantics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
@@ -72,7 +94,7 @@ pub struct MemoryEntry {
     pub supersedes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub superseded_by: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "de_see_also", skip_serializing_if = "Vec::is_empty")]
     pub see_also: Vec<String>,
     pub id: String,
     pub kind: Kind,
@@ -106,7 +128,7 @@ pub struct PayloadV2 {
     pub supersedes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub superseded_by: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "de_see_also", skip_serializing_if = "Vec::is_empty")]
     pub see_also: Vec<String>,
     pub kind: String,
     pub tags: String, // comma-separated
