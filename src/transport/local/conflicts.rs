@@ -3,7 +3,7 @@ use super::LocalStore;
 use crate::transport::protocol::*;
 use crate::{MemoryEngine, SessionKeys, StoredMemory};
 use anyhow::{bail, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
 impl LocalStore {
     fn conflict_head(&self, epoch: &str, id: &str) -> Result<Option<(i64, StoredMemory)>> {
@@ -29,7 +29,8 @@ impl LocalStore {
         can_resolve: bool,
         after: i64,
     ) -> Result<Option<i64>> {
-        let tx = self.connection.unchecked_transaction()?;
+        // Acquire the writer before snapshot reads; a later promotion can fail with SQLITE_BUSY_SNAPSHOT.
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let epoch = self.meta_get("sync_v2_epoch")?.unwrap_or_default();
         let mut stmt=self.connection.prepare("SELECT i.rev,i.status,i.wire FROM sync_inbox i LEFT JOIN sync_resolutions r ON r.epoch=i.epoch AND r.conflict_rev=i.rev
             WHERE i.rev>?2 AND i.epoch=?1 AND i.status IN ('conflict_saved','legacy_rejected') AND r.conflict_rev IS NULL ORDER BY i.rev LIMIT ?3")?;
@@ -228,7 +229,8 @@ impl LocalStore {
         if (action == "merge") != content.is_some() {
             bail!("only merge needs --content");
         }
-        let tx = self.connection.unchecked_transaction()?;
+        // Keep the inspected state and its resolution in one reserved write transaction.
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let processed: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sync_resolutions WHERE epoch=?1 AND conflict_rev=?2)",
             params![epoch, rev],

@@ -3,7 +3,7 @@ use super::LocalStore;
 use crate::transport::protocol::*;
 use crate::{hydrate_local, SessionKeys, StoredMemory};
 use anyhow::{bail, Result};
-use rusqlite::params;
+use rusqlite::{params, Transaction, TransactionBehavior};
 
 impl LocalStore {
     /// Read a bounded immutable batch; the same op_id always carries the same bytes.
@@ -198,7 +198,8 @@ impl LocalStore {
         keys: &SessionKeys,
         after: &str,
     ) -> Result<Option<String>> {
-        let tx = self.connection.unchecked_transaction()?;
+        // Materialization reads before writing; reserve the writer before establishing its snapshot.
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let mut stmt=self.connection.prepare("SELECT i.id,i.wire,i.rev FROM sync_inbox i JOIN sync_remote_heads b ON b.id=i.id AND b.rev=i.rev
             LEFT JOIN sync_base e ON e.id=i.id
             WHERE i.id>?2 AND i.epoch=?1 AND i.status='applied' AND i.decode_error='' AND (e.rev IS NULL OR e.rev<>i.rev) AND NOT EXISTS (
