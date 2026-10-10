@@ -514,7 +514,15 @@ pub fn run() -> Result<()> {
                 return;
             };
             loop {
-                let status = core.call("engine_control", json!({"action":"inference_status"}));
+                let status = core
+                    .call("engine_control", json!({"action":"inference_status"}))
+                    .and_then(|mut status| {
+                        let diagnostics = crate::host::provider_diagnostics()?;
+                        if !diagnostics.is_empty() {
+                            status["provider_registration_errors"] = json!(diagnostics);
+                        }
+                        Ok(status)
+                    });
                 match (status, heartbeat_output.lock()) {
                     (Ok(status), Ok(mut output)) => {
                         if write_frame(&mut *output, &json!({"heartbeat":status})).is_err() {
