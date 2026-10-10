@@ -9,16 +9,21 @@ thread_local! {
     static DEFER_INDEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub struct ResidentLease { key: String, lexical_only: bool }
+pub struct ResidentLease { key: String, lexical_only: bool, generation: u64 }
 
 impl ResidentLease {
     pub fn publish(key: String, base: Option<&Self>, model: &str,
         snapshots: &[crate::Snapshot], removed: &[String]) -> Result<Arc<Self>> {
+        let generation = crate::worker::generation();
+        anyhow::ensure!(base.is_none_or(|base| base.generation == generation), "Core worker changed; rebuild resident view");
         let mut payload = json!({"key":key,"model":model,"snapshots":snapshots,"removed":removed});
         if let Some(base) = base { payload["base_key"] = json!(base.key); }
         let result: Value = crate::execute("resident_publish", payload)?;
-        Ok(Arc::new(Self { key, lexical_only:result["indexed"].as_u64() == Some(0) }))
+        anyhow::ensure!(generation == crate::worker::generation(), "Core worker changed during resident publication");
+        Ok(Arc::new(Self { key, generation, lexical_only:result["indexed"].as_u64() == Some(0) }))
     }
+
+    pub fn current(&self) -> bool { self.generation == crate::worker::generation() }
 
     pub fn enter(&self) -> ResidentScope {
         ResidentScope(CURRENT.with(|slot| slot.replace(Some((self.key.clone(), self.lexical_only)))))
@@ -27,6 +32,7 @@ impl ResidentLease {
 
 impl Drop for ResidentLease {
     fn drop(&mut self) {
+        if !self.current() { return; }
         if let Err(error) = crate::execute::<Value>("resident_release", json!({"key":self.key})) {
             eprintln!("resident view release failed: {error:#}");
         }

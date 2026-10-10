@@ -20,6 +20,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_path = directory.join("manifest.json");
     let manifest_bytes = fs::read(&manifest_path)?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    if manifest.get("test_only").is_some() && env::var_os("CARGO_FEATURE_NATIVE_FAULT_TESTS").is_none() {
+        return Err("Test-only SDK requires the non-default native-fault-tests feature".into());
+    }
     if manifest["association_contract"].as_u64() != Some(1) {
         return Err("Core SDK lacks association contract 1; rebuild and pin a matching SDK".into());
     }

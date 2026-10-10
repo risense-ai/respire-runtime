@@ -5,6 +5,7 @@
 
 pub mod env;
 mod host;
+pub mod worker;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod host_winml;
