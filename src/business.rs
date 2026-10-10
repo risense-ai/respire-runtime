@@ -31,6 +31,7 @@ pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload:
 
 fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
     transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<T> {
+    crate::resident::apply_scope(operation, payload);
     if let Err(error) = crate::host::resolve_artifacts(payload) {
         if operation == "index_status" && error.chain().any(|cause|
             cause.downcast_ref::<crate::host::CorruptArtifact>().is_some() || cause.downcast_ref::<std::io::Error>()
@@ -48,7 +49,9 @@ fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
             *slot = Some(crate::Core::new()?);
         }
         let core = slot.as_mut().context("Core not initialized")?;
-        if payload["model"].as_str() == Some("m3") && !matches!(operation, "index_generation" | "index_status") {
+        if payload["model"].as_str() == Some("m3")
+            && matches!(operation, "prepare" | "query" | "query_business" | "remember_candidates" | "candidate_report" | "taxonomy_classify" | "model_probe" | "model_status")
+            && payload["lexical_only"].as_bool() != Some(true) {
             crate::host::initialize_model(core)?;
         }
         let payload = payload.take();
@@ -190,6 +193,10 @@ pub mod bge {
     impl BgeEmbedder {
         pub fn load() -> Result<Self> { Self::load_model("m3") }
         pub fn load_model(model: &str) -> Result<Self> {
+            if crate::indexing_deferred() || crate::resident::resident_lexical_only() {
+                anyhow::ensure!(model == "m3", "only BGE-M3 is supported");
+                return Ok(Self { model:model.to_owned(), dims:1024 });
+            }
             let value: Value = execute("model_status", json!({"model":model}))?;
             let dims = value["dimensions"].as_u64().context("missing model dimensions")? as usize;
             Ok(Self { model:model.to_owned(), dims })
