@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,13 @@ static STOPPING: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static PROCESS: Mutex<Option<Arc<Process>>> = Mutex::new(None);
+static ACTIVE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "native-fault-tests")]
+static TEST_START_FAILURE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(feature = "native-fault-tests")]
+static TEST_CLEANUP_FAILURE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(feature = "native-fault-tests")]
+static TEST_RETIRE_QUEUED_CALLBACK: AtomicBool = AtomicBool::new(false);
 
 struct Pending {
     sender: mpsc::Sender<Value>,
@@ -35,6 +42,15 @@ struct Process {
     reaped: AtomicBool,
     pid: u32,
     generation: u64,
+    active_callbacks: AtomicUsize,
+}
+
+struct CallbackGuard<'a>(&'a Process);
+impl Drop for CallbackGuard<'_> {
+    fn drop(&mut self) {
+        self.0.active_callbacks.fetch_sub(1, Ordering::AcqRel);
+        ACTIVE_CALLBACKS.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Call only in the resident host after acquiring its library lock.
@@ -55,7 +71,8 @@ pub fn status() -> Result<Value> {
         .clone();
     let Some(process) = process else {
         return Ok(
-            json!({"phase":"idle", "host_recovery_required":false, "worker_generation":generation()}),
+            json!({"phase":"idle", "host_recovery_required":false, "worker_generation":generation(),
+                "host_transport_callbacks_active":ACTIVE_CALLBACKS.load(Ordering::Acquire)}),
         );
     };
     let mut status = process
@@ -65,6 +82,9 @@ pub fn status() -> Result<Value> {
         .1
         .clone();
     status["worker_generation"] = json!(process.generation);
+    status["host_transport_callbacks_active"] = json!(ACTIVE_CALLBACKS.load(Ordering::Acquire));
+    status["worker_host_callbacks_active"] =
+        json!(process.active_callbacks.load(Ordering::Acquire));
     status["worker_pending_calls"] = json!(process
         .pending
         .lock()
@@ -81,6 +101,7 @@ pub fn status() -> Result<Value> {
     if process.reaped.load(Ordering::Acquire) {
         let previous = status.clone();
         status = json!({"phase":"worker_recovery_pending", "host_recovery_required":false,
+            "host_transport_callbacks_active":ACTIVE_CALLBACKS.load(Ordering::Acquire),
             "worker_generation":generation(),"retired_worker":previous});
     }
     Ok(status)
@@ -110,6 +131,21 @@ fn write_frame(output: &mut impl Write, value: &Value) -> Result<()> {
 }
 
 impl Process {
+    fn begin_callback(&self) -> Result<CallbackGuard<'_>> {
+        // Linearize callback dispatch with retirement. Once admitted, a host
+        // transport remains observable until its own timeout/result; no replay.
+        let _pending = self
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Core worker pending poisoned"))?;
+        anyhow::ensure!(
+            !self.retired.load(Ordering::Acquire) && self.generation == generation(),
+            "retired Core callback discarded before host transport; not replayed"
+        );
+        self.active_callbacks.fetch_add(1, Ordering::AcqRel);
+        ACTIVE_CALLBACKS.fetch_add(1, Ordering::AcqRel);
+        Ok(CallbackGuard(self))
+    }
     fn send(&self, value: &Value) -> Result<()> {
         anyhow::ensure!(
             !self.retired.load(Ordering::Acquire),
@@ -124,14 +160,16 @@ impl Process {
 
     fn retire(&self, reason: &str) -> Result<()> {
         // The Child handle, rather than an endpoint PID, identifies the owned process.
-        if !self.retired.swap(true, Ordering::AcqRel) {
-            GENERATION.fetch_add(1, Ordering::AcqRel);
+        {
             let mut pending = self
                 .pending
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Core worker pending poisoned"))?;
-            for (id, pending) in pending.drain() {
-                let _ = pending.sender.send(json!({"id":id,"error":format!("Core worker retired: {reason}; command was not replayed")}));
+            if !self.retired.swap(true, Ordering::AcqRel) {
+                GENERATION.fetch_add(1, Ordering::AcqRel);
+                for (id, pending) in pending.drain() {
+                    let _ = pending.sender.send(json!({"id":id,"error":format!("Core worker retired: {reason}; command was not replayed")}));
+                }
             }
         }
         let mut child = self
@@ -141,10 +179,18 @@ impl Process {
         if self.reaped.load(Ordering::Acquire) {
             return Ok(());
         }
+        #[cfg(feature = "native-fault-tests")]
+        if TEST_CLEANUP_FAILURE.load(Ordering::Acquire) == 1 {
+            bail!("test-only injected owned-child kill failure");
+        }
         if child.try_wait()?.is_none() {
             child
                 .kill()
                 .context("terminate unresponsive owned Core worker")?;
+        }
+        #[cfg(feature = "native-fault-tests")]
+        if TEST_CLEANUP_FAILURE.load(Ordering::Acquire) == 2 {
+            bail!("test-only injected owned-child reap confirmation failure");
         }
         let started = Instant::now();
         while child.try_wait()?.is_none() {
@@ -161,6 +207,25 @@ impl Process {
             .take();
         Ok(())
     }
+}
+
+fn spawn_control_thread(
+    name: &'static str,
+    run: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(feature = "native-fault-tests")]
+    {
+        let kind = if name == "respire-core-replies" { 1 } else { 2 };
+        if TEST_START_FAILURE
+            .compare_exchange(kind, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Err(std::io::Error::other(
+                "test-only injected control thread start failure",
+            ));
+        }
+    }
+    std::thread::Builder::new().name(name.into()).spawn(run)
 }
 
 fn process() -> Result<Arc<Process>> {
@@ -245,91 +310,93 @@ fn process() -> Result<Arc<Process>> {
         reaped: AtomicBool::new(false),
         pid,
         generation: generation(),
+        active_callbacks: AtomicUsize::new(0),
     });
+    // Publish ownership before any subsequent fallible thread initialization.
+    *slot = Some(Arc::clone(&process));
     let reader = Arc::clone(&process);
-    std::thread::Builder::new()
-        .name("respire-core-replies".into())
-        .spawn(move || loop {
-            let frame = match read_frame(&mut output) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    if let Err(retire) = reader.retire(&format!("IPC closed: {error:#}")) {
-                        eprintln!("Core recovery failed: {retire:#}");
-                    }
-                    break;
+    spawn_control_thread("respire-core-replies", move || loop {
+        let frame = match read_frame(&mut output) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Err(retire) = reader.retire(&format!("IPC closed: {error:#}")) {
+                    eprintln!("Core recovery failed: {retire:#}");
                 }
-            };
-            if reader.retired.load(Ordering::Acquire) {
                 break;
             }
-            if let Some(status) = frame.get("heartbeat") {
-                if let Ok(mut heartbeat) = reader.heartbeat.lock() {
-                    let stalled = status["host_recovery_required"].as_bool() == Some(true);
-                    heartbeat.0 = Instant::now();
-                    heartbeat.1 = status.clone();
-                    heartbeat.2 = if stalled {
-                        heartbeat.2.or(Some(Instant::now()))
-                    } else {
-                        None
-                    };
-                }
-            } else if let Some(id) = frame["id"].as_u64() {
-                if let Ok(mut pending) = reader.pending.lock() {
-                    if let Some(pending) = pending.get(&id) {
-                        let _ = pending.sender.send(frame.clone());
-                    }
-                    if frame.get("callback").is_none() {
-                        pending.remove(&id);
-                    }
-                }
-            }
-        })
-        .map_err(|error| {
-            let _ = process.retire("reply reader could not start");
-            error
-        })?;
-    let supervisor = Arc::clone(&process);
-    std::thread::Builder::new()
-        .name("respire-core-supervisor".into())
-        .spawn(move || {
-            while !supervisor.retired.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(100));
-                let expired = match supervisor.pending.lock() {
-                    Ok(pending) => pending
-                        .values()
-                        .any(|pending| pending.started.elapsed() >= CALL_LIMIT),
-                    Err(_) => true,
-                };
-                let reason = if expired {
-                    Some("Core call deadline exceeded")
+        };
+        if reader.retired.load(Ordering::Acquire) {
+            break;
+        }
+        if let Some(status) = frame.get("heartbeat") {
+            if let Ok(mut heartbeat) = reader.heartbeat.lock() {
+                let stalled = status["host_recovery_required"].as_bool() == Some(true);
+                heartbeat.0 = Instant::now();
+                heartbeat.1 = status.clone();
+                heartbeat.2 = if stalled {
+                    heartbeat.2.or(Some(Instant::now()))
                 } else {
-                    match supervisor.heartbeat.lock() {
-                        Ok(heartbeat) if heartbeat.0.elapsed() > HEARTBEAT_LIMIT => {
-                            Some("worker heartbeat timed out")
-                        }
-                        Ok(heartbeat)
-                            if heartbeat
-                                .2
-                                .is_some_and(|since| since.elapsed() >= CANCEL_GRACE) =>
-                        {
-                            Some("native call did not return after cancellation")
-                        }
-                        Ok(_) => None,
-                        Err(_) => Some("worker heartbeat poisoned"),
-                    }
+                    None
                 };
-                if let Some(reason) = reason {
-                    if let Err(error) = supervisor.retire(reason) {
-                        eprintln!("Core recovery failed: {error:#}");
-                    }
+            }
+        } else if let Some(id) = frame["id"].as_u64() {
+            if let Ok(mut pending) = reader.pending.lock() {
+                if let Some(pending) = pending.get(&id) {
+                    let _ = pending.sender.send(frame.clone());
+                }
+                if frame.get("callback").is_none() {
+                    pending.remove(&id);
                 }
             }
-        })
-        .map_err(|error| {
-            let _ = process.retire("supervisor could not start");
-            error
-        })?;
-    *slot = Some(Arc::clone(&process));
+        }
+    })
+    .map_err(|error| {
+        let cleanup = process.retire("reply reader could not start");
+        anyhow::anyhow!(
+            "reply reader start failed: {error}; cleanup: {cleanup:?}; worker ownership retained"
+        )
+    })?;
+    let supervisor = Arc::clone(&process);
+    spawn_control_thread("respire-core-supervisor", move || {
+        while !supervisor.retired.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(100));
+            let expired = match supervisor.pending.lock() {
+                Ok(pending) => pending
+                    .values()
+                    .any(|pending| pending.started.elapsed() >= CALL_LIMIT),
+                Err(_) => true,
+            };
+            let reason = if expired {
+                Some("Core call deadline exceeded")
+            } else {
+                match supervisor.heartbeat.lock() {
+                    Ok(heartbeat) if heartbeat.0.elapsed() > HEARTBEAT_LIMIT => {
+                        Some("worker heartbeat timed out")
+                    }
+                    Ok(heartbeat)
+                        if heartbeat
+                            .2
+                            .is_some_and(|since| since.elapsed() >= CANCEL_GRACE) =>
+                    {
+                        Some("native call did not return after cancellation")
+                    }
+                    Ok(_) => None,
+                    Err(_) => Some("worker heartbeat poisoned"),
+                }
+            };
+            if let Some(reason) = reason {
+                if let Err(error) = supervisor.retire(reason) {
+                    eprintln!("Core recovery failed: {error:#}");
+                }
+            }
+        }
+    })
+    .map_err(|error| {
+        let cleanup = process.retire("supervisor could not start");
+        anyhow::anyhow!(
+            "supervisor start failed: {error}; cleanup: {cleanup:?}; worker ownership retained"
+        )
+    })?;
     Ok(process)
 }
 
@@ -370,10 +437,17 @@ pub(crate) fn execute(
             .recv()
             .context("Core worker reply unavailable; command was not replayed")?;
         if let Some(request) = frame.get("callback") {
+            #[cfg(feature = "native-fault-tests")]
+            if TEST_RETIRE_QUEUED_CALLBACK.swap(false, Ordering::AcqRel) {
+                process.retire("test-only retire callback queued before dispatch")?;
+            }
+            let _callback = process.begin_callback()?;
             let result = match transport.as_mut() {
                 Some(transport) => transport(request),
                 None => Err(anyhow::anyhow!("unexpected Core worker transport callback")),
             };
+            anyhow::ensure!(!process.retired.load(Ordering::Acquire) && process.generation == generation(),
+                "host transport already started and was not cancelled; its result was discarded after Core retirement; business outcome unavailable; not replayed");
             let frame = match result {
                 Ok(value) => json!({"id":id,"callback_result":value}),
                 Err(error) => json!({"id":id,"callback_error":format!("{error:#}")}),
@@ -408,6 +482,77 @@ pub fn shutdown() -> Result<()> {
         process.retire("host shutdown")?;
     }
     Ok(())
+}
+
+/// Non-default, non-releasable fixture controls. Never calls an external API.
+#[cfg(feature = "native-fault-tests")]
+pub fn fixture_control(action: &str) -> Result<Value> {
+    let owned = || -> Result<Option<Arc<Process>>> {
+        Ok(PROCESS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("worker state poisoned"))?
+            .clone())
+    };
+    match action {
+        "clear" => {
+            TEST_START_FAILURE.store(0, Ordering::Release);
+            TEST_CLEANUP_FAILURE.store(0, Ordering::Release);
+            if let Some(worker) = owned()? {
+                worker.retire("fixture clear")?;
+            }
+        }
+        "retire" => {
+            if let Some(worker) = owned()? {
+                worker.retire("fixture retire")?;
+            }
+        }
+        "fail-cleanup-kill" => TEST_CLEANUP_FAILURE.store(1, Ordering::Release),
+        "fail-cleanup-reap" => TEST_CLEANUP_FAILURE.store(2, Ordering::Release),
+        "spawn" => {
+            process()?;
+        }
+        "spawn-reader-kill"
+        | "spawn-reader-reap"
+        | "spawn-supervisor-kill"
+        | "spawn-supervisor-reap" => {
+            if let Some(worker) = owned()? {
+                worker.retire("fixture before start failure")?;
+            }
+            TEST_START_FAILURE.store(
+                if action.contains("reader") { 1 } else { 2 },
+                Ordering::Release,
+            );
+            TEST_CLEANUP_FAILURE.store(
+                if action.ends_with("kill") { 1 } else { 2 },
+                Ordering::Release,
+            );
+            let error = process()
+                .err()
+                .context("fixture start failure was not injected")?;
+            return Ok(json!({"injected_error":format!("{error:#}"),"worker":status()?}));
+        }
+        "callback-queued" | "callback-started" => {
+            let mut calls = 0usize;
+            let mut observed_active = 0usize;
+            TEST_RETIRE_QUEUED_CALLBACK.store(action == "callback-queued", Ordering::Release);
+            let mut callback = |_request: &Value| -> Result<Value> {
+                calls += 1;
+                observed_active = ACTIVE_CALLBACKS.load(Ordering::Acquire);
+                if let Some(worker) = owned()? {
+                    worker.retire("fixture started host callback")?;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(json!({"synthetic":true}))
+            };
+            let error = execute("test_worker_callback", &json!({}), Some(&mut callback))
+                .err()
+                .context("fixture callback retirement did not fail")?;
+            return Ok(json!({"calls":calls,"observed_active":observed_active,
+                "error":format!("{error:#}"),"worker":status()?}));
+        }
+        _ => bail!("unknown worker fixture action"),
+    }
+    status()
 }
 
 type CallbackMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>;
@@ -480,6 +625,10 @@ pub fn run() -> Result<()> {
                             .cloned()
                             .context("host transport callback result missing")
                     };
+                    #[cfg(feature = "native-fault-tests")]
+                    if operation == "test_worker_callback" {
+                        return callback(&json!({"synthetic_fixture":true}));
+                    }
                     let result = if frame["transport"].as_bool() == Some(true) {
                         crate::business::execute_with_transport::<Value>(
                             operation,
