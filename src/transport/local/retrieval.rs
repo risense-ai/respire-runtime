@@ -84,6 +84,13 @@ impl LocalStore {
         respire_core_sdk::index_ready(&artifacts)
     }
 
+    pub fn index_missing(&self, model: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.deleted=0 AND NOT EXISTS
+             (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext))",
+            params![generation_key(model)?], |row| row.get(0))?)
+    }
+
     pub fn index_pending(&self, model: &str) -> Result<bool> {
         let missing: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.deleted=0 AND NOT EXISTS
@@ -122,14 +129,29 @@ impl LocalStore {
     ) -> Result<usize> {
         anyhow::ensure!(model == "m3", "unknown index model");
         progress(0, 0)?;
-        if self.meta_get("retrieval_model")?.as_deref() == Some(model)
+        let missing = self.index_missing(model)?;
+        if !missing && self.meta_get("retrieval_model")?.as_deref() == Some(model)
             && !self.index_pending(model)?
         {
             progress(0, 0)?;
             return Ok(0);
         }
         progress(0, 0)?;
-        let candidates = self.all(false)?;
+        let candidates = if missing {
+            // Ordinary background work reads only current missing sources, with recent local writes first.
+            let mut statement = self.connection.prepare(
+                "SELECT id,user,ciphertext,nonce,embedding_enc,updated_at,deleted,
+                 kind,tags,title,project,computer,embedding,created_at,parent_id,content_head,recall_count,importance,device,modified_by
+                 FROM memories m WHERE deleted=0 AND NOT EXISTS
+                 (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)
+                 ORDER BY dirty DESC,updated_at DESC")?;
+            let rows = statement.query_map([generation_key(model)?], Self::row_to_memory)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        } else {
+            // An explicit repair still validates existing artifacts when none are missing.
+            self.all(false)?
+        };
         progress(0, candidates.len())?;
         let mut completed = 0;
         for (index, stored) in candidates.iter().enumerate() {
@@ -149,7 +171,7 @@ impl LocalStore {
             completed += 1;
         }
         progress(candidates.len(), candidates.len())?;
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         let missing: i64 = tx.query_row(
             "SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)",

@@ -18,6 +18,8 @@ use crate::memory::model::StoredMemory;
 mod conflicts;
 mod grants;
 mod retrieval;
+mod resident;
+pub use resident::MemorySourceChanged;
 mod related;
 mod sync;
 pub use grants::AccessGrant;
@@ -87,6 +89,7 @@ impl LocalStore {
         )?;
         migrate(&connection)?;
         connection.execute_batch(include_str!("local/sync_schema.sql"))?;
+        connection.execute_batch(include_str!("local/resident_schema.sql"))?;
         Ok(Self { connection })
     }
 
@@ -133,6 +136,8 @@ impl LocalStore {
         dirty: bool,
         authoritative: bool,
     ) -> Result<bool> {
+        let immediate = self.connection.is_autocommit().then(||
+            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
         self.connection
             .execute_batch("SAVEPOINT memory_with_chunks")?;
         let result = self.put_memory_and_chunks(memory, dirty, authoritative);
@@ -142,6 +147,7 @@ impl LocalStore {
         }
         self.connection
             .execute_batch("RELEASE memory_with_chunks")?;
+        if result.is_ok() { if let Some(immediate) = immediate { immediate.commit()?; } }
         result
     }
 
@@ -219,7 +225,7 @@ impl LocalStore {
 
     /// Import already-sealed new rows: the whole batch commits or rolls back, so a partial backup cannot remain.
     pub fn import_batch(&self, memories: &[StoredMemory]) -> Result<()> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         for memory in memories {
             if !self.put_inner(memory, true)? {
                 anyhow::bail!("import conflict: {}", memory.id);
@@ -231,7 +237,7 @@ impl LocalStore {
 
     /// Keep a compound local edit atomic, including any reads used to plan it.
     pub fn write_transaction<T>(&self, edit: impl FnOnce() -> Result<T>) -> Result<T> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         let result = edit()?;
         transaction.commit()?;
         Ok(result)

@@ -29,7 +29,7 @@ impl LocalStore {
         if label.trim().is_empty() || label.len() > 128 {
             bail!("grant label must be 1–128 bytes of non-empty text");
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         let exists = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1 AND deleted = 0)",
             params![root], |row| row.get::<_, bool>(0),

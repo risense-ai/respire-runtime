@@ -105,7 +105,7 @@ impl LocalStore {
         {
             bail!("invalid resolution page cursor");
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let mut last = previous;
         for r in &page.resolutions {
             if r.seq <= last || r.seq > page.cursor {
@@ -158,7 +158,7 @@ impl LocalStore {
         if sent.len() != reply.results.len() {
             bail!("resolution receipt length mismatch");
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         for (decision, result) in sent.iter().zip(&reply.results) {
             if decision.conflict_rev != result.conflict_rev {
                 bail!("resolution receipt identity mismatch");

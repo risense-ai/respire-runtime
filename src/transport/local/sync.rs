@@ -73,7 +73,7 @@ impl LocalStore {
                 );
             }
         } else {
-            let tx = self.connection.unchecked_transaction()?;
+            let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
             let legacy_parent:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox p JOIN sync_outbox c ON c.parent_op_id=p.op_id WHERE p.state='legacy' AND c.state='pending')",[],|r|r.get(0))?;
             if legacy_parent {
                 self.requeue_pending()?;
@@ -370,7 +370,7 @@ impl LocalStore {
         if b.ciphertext.is_empty() {
             bail!("this version has no restorable content");
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let stamp = self.edit_stamp(&b.id)?;
         crate::MemoryEngine::restore_version(keys, &mut b, &stamp)?;
         if !self.put_inner(&b, true)? {
@@ -391,7 +391,7 @@ impl LocalStore {
         blobs: Vec<StoredMemory>,
         cursor: u64,
     ) -> Result<usize> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let mut changed = 0;
         for mut b in blobs {
             b.embedding_enc.clear();
