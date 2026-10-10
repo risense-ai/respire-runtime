@@ -169,7 +169,9 @@ impl MemoryEngine {
         let payload_json = serde_json::to_string(&payload).context("payload serialize failed")?;
         let (nonce, ciphertext) = keys.encrypt_content(&payload_json)?;
 
-        let prepared = embedder.prepare(entry)?;
+        let prepared = if respire_core_sdk::indexing_deferred() {
+            respire_core_sdk::Prepared { artifact:Vec::new() }
+        } else { embedder.prepare(entry)? };
 
         Ok(StoredMemory {
             id: entry.id.clone(),
@@ -397,6 +399,7 @@ pub fn hydrate_local(keys: &SessionKeys, stored: &mut StoredMemory) -> Result<()
 }
 
 pub fn snapshots(keys: &SessionKeys, stored: &[StoredMemory]) -> Vec<respire_core_sdk::Snapshot> {
+    if respire_core_sdk::resident_scope_active() { return Vec::new(); }
     stored.iter().map(|memory| {
         let entry = if memory.deleted { None } else { MemoryEngine::open(keys, memory).ok() };
         respire_core_sdk::Snapshot::new(memory, entry)
