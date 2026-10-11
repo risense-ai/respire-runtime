@@ -304,7 +304,10 @@ mod ffi {
             let mut options = SessionOptionsContext { profiling:crate::env::var_os("RSRS_ORT_PROFILE").map(std::path::PathBuf::from),
                 device_options, cache:crate::onnx::host_cache_dir(), error:None };
             // Borrowed slices and host option callback remain alive through this call.
-            let code = if options.profiling.is_some() || options.device_options {
+            let options_required = options.profiling.is_some() || options.device_options;
+            #[cfg(test)]
+            let options_required = options_required || test_option_failure_armed();
+            let code = if options_required {
                 unsafe { rs_core_model_load_with_host(self.pointer.as_ptr(), config.as_ptr(), config.len(),
                     model.as_ptr(), model.len(), tokenizer.as_ptr(), tokenizer.len(),
                     ptr::from_mut(&mut options).cast(), configure_session_options, &mut output) }
@@ -339,11 +342,36 @@ mod ffi {
     struct SessionOptionsContext { profiling: Option<std::path::PathBuf>, device_options:bool,
         cache:std::path::PathBuf, error: Option<anyhow::Error> }
 
+    #[cfg(test)]
+    thread_local! {
+        static TEST_OPTION_FAILURE: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+    }
+    #[cfg(test)]
+    pub(super) fn set_test_option_failure(at: Option<usize>) {
+        TEST_OPTION_FAILURE.with(|failure| failure.set(at.map(|at| (at, 0))));
+    }
+    #[cfg(test)]
+    pub(super) fn test_option_failure_armed() -> bool { TEST_OPTION_FAILURE.with(|failure| failure.get().is_some()) }
+    #[cfg(test)]
+    pub(super) fn test_option_callback_count() -> usize { TEST_OPTION_FAILURE.with(|failure| failure.get().map_or(0, |(_, count)| count)) }
+    #[cfg(test)]
+    fn fail_options_for_test() -> Result<()> {
+        TEST_OPTION_FAILURE.with(|failure| {
+            if let Some((at, count)) = failure.get() {
+                failure.set(Some((at, count + 1)));
+                anyhow::ensure!(count + 1 != at, "intentional native options callback failure");
+            }
+            Ok(())
+        })
+    }
+
     unsafe extern "C" fn configure_session_options(context: *mut c_void, options: *mut c_void, api: *const c_void,
         environment: *mut c_void, device: *const c_void) -> i32 {
         let context = unsafe { &mut *context.cast::<SessionOptionsContext>() };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
             anyhow::ensure!(!options.is_null() && !api.is_null(), "invalid Core native session options");
+            #[cfg(test)]
+            fail_options_for_test()?;
             let api = unsafe { &*api.cast::<ort_sys::OrtApi>() };
             if !device.is_null() {
                 anyhow::ensure!(!environment.is_null(), "invalid Core native environment");

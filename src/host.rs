@@ -5,6 +5,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::PathBuf, sync::Mutex};
 
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;
+
 pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -244,6 +248,10 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         )
         .as_bytes(),
     );
+    #[cfg(test)]
+    let session_options_id = if crate::ffi::test_option_failure_armed() {
+        format!("test-failing-options:{session_options_id}")
+    } else { session_options_id };
     let stamp = ModelStamp {
         directory,
         engine,
@@ -253,9 +261,12 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     };
     let mut loaded = model_cache()?;
     if let Some(existing) = loaded.as_ref().filter(|existing| existing.stamp == stamp) {
-        core.load_model(json!({"model":"m3", "asset_id":existing.asset_id,"engine":engine,
-            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":true}), &[], &[])?;
-        return Ok(());
+        let reused = core.load_model(json!({"model":"m3", "asset_id":existing.asset_id,"engine":engine,
+            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":true}), &[], &[]);
+        if reused.is_ok() { return Ok(()); }
+        // A reset or failed replacement may have retired the canonical group.
+        // Cached reuse is initialization, not a replay of a business operation.
+        *loaded = None;
     }
     let model = std::fs::read(&model_path).context("read host BGE-M3 model")?;
     let tokenizer = std::fs::read(&tokenizer_path).context("read host BGE-M3 tokenizer")?;
@@ -288,6 +299,9 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         .lock()
         .map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? =
         registration_errors.clone();
+    // Core retires the old group before constructing a replacement. Its failure
+    // leaves no usable canonical group; never preserve an apparently live stamp.
+    *loaded = None;
     let loaded_model = core.load_model(json!({"model":"m3", "asset_id":asset_id,"engine":engine,
         "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":false}), &model, &tokenizer);
     if registration_errors.is_empty() {
