@@ -130,18 +130,7 @@ impl LocalStore {
         self.put_inner_policy(memory, dirty, false)
     }
 
-    /// Authoritative local write: replace an existing row even when its
-    /// timestamp is unchanged or it has unpushed edits (explicit re-import).
-    pub fn put_authoritative(&self, memory: &StoredMemory) -> Result<bool> {
-        self.put_inner_policy(memory, true, true)
-    }
-
-    fn put_inner_policy(
-        &self,
-        memory: &StoredMemory,
-        dirty: bool,
-        authoritative: bool,
-    ) -> Result<bool> {
+    fn put_inner_policy(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
         let immediate = self.connection.is_autocommit().then(||
             rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
         self.connection
@@ -157,12 +146,7 @@ impl LocalStore {
         result
     }
 
-    fn put_memory_and_chunks(
-        &self,
-        memory: &StoredMemory,
-        dirty: bool,
-        authoritative: bool,
-    ) -> Result<bool> {
+    fn put_memory_and_chunks(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
         // last-write-wins: same id and existing updated_at is newer → drop this write;
         // a tie (same updated_at) and local dirty=1 → also refuse — unpushed local edits (attach/delete) must not be overwritten by a sync loop
         // (hit 2026-09-08: after batch attach, sync reconcile pulled a same-stamp remote and wiped the unpushed attach).
