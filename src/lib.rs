@@ -5,6 +5,7 @@
 
 pub mod env;
 mod host;
+mod cpu_model;
 pub mod worker;
 #[cfg(windows)]
 #[allow(unsafe_code)]

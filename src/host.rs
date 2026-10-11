@@ -230,13 +230,7 @@ pub(crate) fn reset_model_cache() -> Result<()> {
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let directory = crate::bge::resolve_model_dir()?;
     let engine = crate::onnx::configured_engine()?;
-    let cpu_owned_experiment = match crate::env::var("RSRS_CPU_OWNED_ORT_EXPERIMENT").as_deref() {
-        Ok("1") => true,
-        Ok("0") => false, // Explicit diagnostic legacy path, never an automatic fallback.
-        Ok(_) => anyhow::bail!("CPU owned ORT setting must be 0 or 1"),
-        Err(_) => cfg!(feature = "cpu-owned-ort-experiment")
-            && engine == crate::onnx::Engine::Cpu && crate::env::var_os("RSRS_ORT_PROFILE").is_none(),
-    };
+    let cpu_owned_experiment = crate::bge::cpu_owned_mode(engine)?;
     anyhow::ensure!(!cpu_owned_experiment || cfg!(feature = "cpu-owned-ort-experiment"), "CPU owned ORT experiment requires an experimental SDK build");
     anyhow::ensure!(!cpu_owned_experiment || engine == crate::onnx::Engine::Cpu, "CPU owned ORT experiment requires CPU; GPU/NPU remain legacy");
     anyhow::ensure!(!cpu_owned_experiment || crate::env::var_os("RSRS_ORT_PROFILE").is_none(),

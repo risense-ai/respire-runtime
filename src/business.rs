@@ -215,21 +215,7 @@ pub mod bge {
         fn model_name(&self) -> &str { &self.model }
         fn dims(&self) -> usize { self.dims }
     }
-    /// Same quantized weights and token IDs; version only identifies the CPU container.
-    pub const CPU_ORT_REVISION: &str = "bge-m3-cpu-ort-v1";
-    pub const CPU_ORT_NAME: &str = "model_quantized.cpu-v1.ort";
-    pub const CPU_ORT_SHA256: &str = "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff";
-    pub const CPU_ORT_SIZE: u64 = 569654128;
-    pub const CPU_ORT_URL: &str = "https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort";
-    pub fn cpu_ort_cache_path() -> PathBuf { default_user_model_dir().join("onnx").join(CPU_ORT_NAME) }
-    pub fn cpu_ort_path(directory: &Path) -> PathBuf {
-        let installed = directory.join("onnx").join(CPU_ORT_NAME);
-        let cached = cpu_ort_cache_path();
-        if cached.is_file() { cached } else { installed }
-    }
-    pub fn cpu_ort_present(directory: &Path) -> bool {
-        std::fs::metadata(cpu_ort_path(directory)).is_ok_and(|m| m.is_file() && m.len() == CPU_ORT_SIZE)
-    }
+    pub use crate::cpu_model::{CPU_ORT_REVISION, CPU_ORT_NAME, CPU_ORT_SHA256, CPU_ORT_SIZE, CPU_ORT_URL, cpu_owned_mode, cpu_ort_cache_path, cpu_ort_path, cpu_ort_present, invalidate_cpu_ort_validation};
     // Installation paths are public infrastructure and use the Respire profile.
     pub fn default_user_model_dir() -> PathBuf {
         crate::env::var("RSRS_DATA_DIR").ok()
