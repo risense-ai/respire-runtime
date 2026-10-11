@@ -230,13 +230,27 @@ pub(crate) fn reset_model_cache() -> Result<()> {
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let directory = crate::bge::resolve_model_dir()?;
     let engine = crate::onnx::configured_engine()?;
-    let model_path = directory.join("onnx/model_quantized.onnx");
+    let cpu_owned_experiment = match crate::env::var("RSRS_CPU_OWNED_ORT_EXPERIMENT").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false, // Explicit diagnostic legacy path, never an automatic fallback.
+        Ok(_) => anyhow::bail!("CPU owned ORT setting must be 0 or 1"),
+        Err(_) => cfg!(feature = "cpu-owned-ort-experiment")
+            && engine == crate::onnx::Engine::Cpu && crate::env::var_os("RSRS_ORT_PROFILE").is_none(),
+    };
+    anyhow::ensure!(!cpu_owned_experiment || cfg!(feature = "cpu-owned-ort-experiment"), "CPU owned ORT experiment requires an experimental SDK build");
+    anyhow::ensure!(!cpu_owned_experiment || engine == crate::onnx::Engine::Cpu, "CPU owned ORT experiment requires CPU; GPU/NPU remain legacy");
+    anyhow::ensure!(!cpu_owned_experiment || crate::env::var_os("RSRS_ORT_PROFILE").is_none(),
+        "CPU owned ORT experiment does not support host profiling callbacks; disable the experiment for legacy profiling");
+    let model_path = if cpu_owned_experiment {
+        crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::bge::cpu_ort_path(&directory))
+    } else { directory.join("onnx/model_quantized.onnx") };
     let tokenizer_path = directory.join("tokenizer.json");
     let metadata = |path: &std::path::Path| -> Result<_> {
         let metadata = std::fs::metadata(path)?;
         Ok((metadata.len(), metadata.modified()?))
     };
-    let session_options_id = digest(
+    let legacy_options_id = digest(
         format!(
             "{:?}:{:?}",
             crate::env::var_os("RSRS_ORT_PROFILE"),
@@ -248,6 +262,9 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         )
         .as_bytes(),
     );
+    let session_options_id = if cpu_owned_experiment {
+        digest(format!("cpu-owned-ort-v1:{legacy_options_id}:{}", model_path.display()).as_bytes())
+    } else { legacy_options_id };
     #[cfg(test)]
     let session_options_id = if crate::ffi::test_option_failure_armed() {
         format!("test-failing-options:{session_options_id}")
@@ -261,19 +278,23 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     };
     let mut loaded = model_cache()?;
     if let Some(existing) = loaded.as_ref().filter(|existing| existing.stamp == stamp) {
-        let reused = core.load_model(json!({"model":"m3", "asset_id":existing.asset_id,"engine":engine,
-            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":true}), &[], &[]);
+        let mut request = json!({"model":"m3", "asset_id":existing.asset_id,"engine":engine,
+            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":true});
+        if cpu_owned_experiment { request["cpu_owned_ort_experiment"] = json!(true); }
+        let reused = core.load_model(request, &[], &[]);
         if reused.is_ok() { return Ok(()); }
         // A reset or failed replacement may have retired the canonical group.
         // Cached reuse is initialization, not a replay of a business operation.
         *loaded = None;
     }
-    let model = std::fs::read(&model_path).context("read host BGE-M3 model")?;
+    let model = std::fs::read(&model_path).context("read host BGE-M3 model (CPU upgrades are prepared by the runtime model task; run rsrs model install-m3 if unavailable)")?;
     let tokenizer = std::fs::read(&tokenizer_path).context("read host BGE-M3 tokenizer")?;
     let model_hash = digest(&model);
     let tokenizer_hash = digest(&tokenizer);
     anyhow::ensure!(
-        model_hash == "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
+        model_hash == if cpu_owned_experiment {
+            "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff"
+        } else { "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d" },
         "BGE-M3 quantized model checksum mismatch; reinstall the model"
     );
     anyhow::ensure!(
@@ -302,8 +323,10 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     // Core retires the old group before constructing a replacement. Its failure
     // leaves no usable canonical group; never preserve an apparently live stamp.
     *loaded = None;
-    let loaded_model = core.load_model(json!({"model":"m3", "asset_id":asset_id,"engine":engine,
-        "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":false}), &model, &tokenizer);
+    let mut request = json!({"model":"m3", "asset_id":asset_id,"engine":engine,
+        "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":false});
+    if cpu_owned_experiment { request["cpu_owned_ort_experiment"] = json!(true); }
+    let loaded_model = core.load_model(request, &model, &tokenizer);
     if registration_errors.is_empty() {
         loaded_model?;
     } else {

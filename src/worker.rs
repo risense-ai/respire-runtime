@@ -308,6 +308,10 @@ fn process() -> Result<Arc<Process>> {
         "RSRS_M3_DIR",
         "RSRS_ENGINE",
         "RSRS_ORT_PROFILE",
+        #[cfg(feature = "cpu-owned-ort-experiment")]
+        "RSRS_CPU_OWNED_ORT_EXPERIMENT",
+        #[cfg(feature = "cpu-owned-ort-experiment")]
+        "RSRS_CPU_OWNED_ORT_FILE",
         "RSRS_CORE_TEST_MODE",
     ] {
         if let Some(value) = crate::env::var_os(name) {

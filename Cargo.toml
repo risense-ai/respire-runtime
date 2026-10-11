@@ -12,7 +12,9 @@ links = "respire_core_ffi"
 publish = ["crates-io"]
 
 [features]
+default = ["cpu-owned-ort-experiment"]
 native-fault-tests = []
+cpu-owned-ort-experiment = []
 
 [dependencies]
 anyhow = "1.0"
