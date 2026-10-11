@@ -1,6 +1,6 @@
 [package]
 name = "respire_core_sdk"
-version = "2.0.0-dev.2"
+version = "2.0.0-dev.3"
 edition = "2021"
 rust-version = "1.95"
 license-file = "LICENSE"
