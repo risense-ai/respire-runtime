@@ -130,6 +130,21 @@ impl LocalStore {
         self.put_inner_policy(memory, dirty, false)
     }
 
+    /// Session refreshes must not replace pending local work, even with a newer
+    /// source/import stamp. Keep the guard and write under the same write lock.
+    /// Sync and ordinary user writes retain their existing LWW policy.
+    pub fn put_session_import(&self, memory: &StoredMemory) -> Result<bool> {
+        let immediate = self.connection.is_autocommit().then(||
+            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+        let protected: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND (dirty=1 OR deleted=1))",
+            params![memory.id], |row| row.get(0),
+        )?;
+        let wrote = if protected { false } else { self.put_inner(memory, true)? };
+        if let Some(immediate) = immediate { immediate.commit()?; }
+        Ok(wrote)
+    }
+
     fn put_inner_policy(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
         let immediate = self.connection.is_autocommit().then(||
             rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
