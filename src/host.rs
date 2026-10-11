@@ -241,7 +241,8 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     } else { directory.join("onnx/model_quantized.onnx") };
     let tokenizer_path = directory.join("tokenizer.json");
     let metadata = |path: &std::path::Path| -> Result<_> {
-        let metadata = std::fs::metadata(path)?;
+        let metadata = std::fs::metadata(path).with_context(|| format!(
+            "model file unavailable at {}; run rsrs model install-m3 in this profile before direct inference", path.display()))?;
         Ok((metadata.len(), metadata.modified()?))
     };
     let legacy_options_id = digest(
