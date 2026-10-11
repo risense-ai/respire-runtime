@@ -33,6 +33,37 @@ struct Pending {
     started: Instant,
 }
 
+#[derive(serde::Serialize)]
+struct RequestFrame<'a> {
+    id: u64,
+    operation: &'a str,
+    payload: &'a Value,
+    index_root: Option<std::path::PathBuf>,
+    transport: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ResponseFrame<'a> {
+    id: u64,
+    #[serde(flatten)]
+    body: ResponseBody<'a>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum ResponseBody<'a> {
+    Result { result: &'a Value },
+    Error { error: String },
+    Callback { callback: &'a Value },
+    CallbackResult { callback_result: &'a Value },
+    CallbackError { callback_error: String },
+}
+
+#[derive(serde::Serialize)]
+struct HeartbeatFrame<'a> {
+    heartbeat: &'a Value,
+}
+
 struct Process {
     child: Mutex<Child>,
     input: Mutex<Option<ChildStdin>>,
@@ -122,7 +153,7 @@ fn read_frame(input: &mut impl Read) -> Result<Value> {
     serde_json::from_slice(&bytes).context("invalid Core worker frame")
 }
 
-fn write_frame(output: &mut impl Write, value: &Value) -> Result<()> {
+fn write_frame<T: serde::Serialize + ?Sized>(output: &mut impl Write, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     output.write_all(&(bytes.len() as u64).to_le_bytes())?;
     output.write_all(&bytes)?;
@@ -146,7 +177,7 @@ impl Process {
         ACTIVE_CALLBACKS.fetch_add(1, Ordering::AcqRel);
         Ok(CallbackGuard(self))
     }
-    fn send(&self, value: &Value) -> Result<()> {
+    fn send<T: serde::Serialize + ?Sized>(&self, value: &T) -> Result<()> {
         anyhow::ensure!(
             !self.retired.load(Ordering::Acquire),
             "Core worker retired; command was not replayed"
@@ -316,7 +347,7 @@ fn process() -> Result<Arc<Process>> {
     *slot = Some(Arc::clone(&process));
     let reader = Arc::clone(&process);
     spawn_control_thread("respire-core-replies", move || loop {
-        let frame = match read_frame(&mut output) {
+        let mut frame = match read_frame(&mut output) {
             Ok(frame) => frame,
             Err(error) => {
                 if let Err(retire) = reader.retire(&format!("IPC closed: {error:#}")) {
@@ -332,7 +363,7 @@ fn process() -> Result<Arc<Process>> {
             if let Ok(mut heartbeat) = reader.heartbeat.lock() {
                 let stalled = status["host_recovery_required"].as_bool() == Some(true);
                 heartbeat.0 = Instant::now();
-                heartbeat.1 = status.clone();
+                heartbeat.1 = frame["heartbeat"].take();
                 heartbeat.2 = if stalled {
                     heartbeat.2.or(Some(Instant::now()))
                 } else {
@@ -340,11 +371,12 @@ fn process() -> Result<Arc<Process>> {
                 };
             }
         } else if let Some(id) = frame["id"].as_u64() {
+            let is_callback = frame.get("callback").is_some();
             if let Ok(mut pending) = reader.pending.lock() {
                 if let Some(pending) = pending.get(&id) {
-                    let _ = pending.sender.send(frame.clone());
+                    let _ = pending.sender.send(frame);
                 }
-                if frame.get("callback").is_none() {
+                if !is_callback {
                     pending.remove(&id);
                 }
             }
@@ -426,14 +458,15 @@ pub(crate) fn execute(
         );
     }
     let root = crate::business::index_root().ok();
-    if let Err(error) = process.send(&json!({"id":id,"operation":operation,"payload":payload,
-        "index_root":root,"transport":transport.is_some()}))
+    if let Err(error) = process.send(&RequestFrame {
+        id, operation, payload, index_root: root, transport: transport.is_some(),
+    })
     {
         let _ = process.retire(&format!("IPC write failed: {error:#}"));
         return Err(error);
     }
     loop {
-        let frame = receiver
+        let mut frame = receiver
             .recv()
             .context("Core worker reply unavailable; command was not replayed")?;
         if let Some(request) = frame.get("callback") {
@@ -448,10 +481,11 @@ pub(crate) fn execute(
             };
             anyhow::ensure!(!process.retired.load(Ordering::Acquire) && process.generation == generation(),
                 "host transport already started and was not cancelled; its result was discarded after Core retirement; business outcome unavailable; not replayed");
-            let frame = match result {
-                Ok(value) => json!({"id":id,"callback_result":value}),
-                Err(error) => json!({"id":id,"callback_error":format!("{error:#}")}),
+            let body = match &result {
+                Ok(value) => ResponseBody::CallbackResult { callback_result: value },
+                Err(error) => ResponseBody::CallbackError { callback_error: format!("{error:#}") },
             };
+            let frame = ResponseFrame { id, body };
             if let Err(error) = process.send(&frame) {
                 let _ = process.retire("host callback IPC failed");
                 return Err(error);
@@ -464,8 +498,8 @@ pub(crate) fn execute(
                 "Core worker generation changed; late response discarded; command was not replayed"
             );
             return frame
-                .get("result")
-                .cloned()
+                .get_mut("result")
+                .map(Value::take)
                 .context("Core worker result missing");
         }
     }
@@ -584,7 +618,7 @@ pub fn run() -> Result<()> {
                     Ok(receiver) => receiver.recv(),
                     Err(_) => break,
                 };
-                let Ok(frame) = frame else {
+                let Ok(mut frame) = frame else {
                     break;
                 };
                 let id = frame["id"].as_u64().unwrap_or(u64::MAX);
@@ -592,16 +626,19 @@ pub fn run() -> Result<()> {
                     if let Some(root) = frame["index_root"].as_str() {
                         crate::business::set_index_root(std::path::Path::new(root))?;
                     }
-                    let operation = frame["operation"]
+                    let operation_value = frame["operation"].take();
+                    let operation = operation_value
                         .as_str()
                         .context("Core worker operation missing")?;
+                    let reset_model_cache = operation == "engine_control"
+                        && frame["payload"]["action"] == "reset";
                     #[cfg(feature = "native-fault-tests")]
                     if operation == "test_worker_hold" {
                         loop {
                             std::thread::park();
                         }
                     }
-                    let payload = frame["payload"].clone();
+                    let payload = frame["payload"].take();
                     let mut callback = |request: &Value| -> Result<Value> {
                         let (sender, receiver) = mpsc::channel();
                         callbacks
@@ -612,17 +649,17 @@ pub fn run() -> Result<()> {
                             &mut *output
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("Core worker output poisoned"))?,
-                            &json!({"id":id,"callback":request}),
+                            &ResponseFrame { id, body: ResponseBody::Callback { callback: request } },
                         )?;
-                        let response = receiver
+                        let mut response = receiver
                             .recv()
                             .context("host transport callback unavailable")?;
                         if let Some(error) = response["callback_error"].as_str() {
                             bail!("{error}");
                         }
                         response
-                            .get("callback_result")
-                            .cloned()
+                            .get_mut("callback_result")
+                            .map(Value::take)
                             .context("host transport callback result missing")
                     };
                     #[cfg(feature = "native-fault-tests")]
@@ -638,15 +675,16 @@ pub fn run() -> Result<()> {
                     } else {
                         crate::business::execute::<Value>(operation, payload)
                     }?;
-                    if operation == "engine_control" && frame["payload"]["action"] == "reset" {
+                    if reset_model_cache {
                         crate::host::reset_model_cache()?;
                     }
                     Ok(result)
                 })();
-                let response = match result {
-                    Ok(value) => json!({"id":id,"result":value}),
-                    Err(error) => json!({"id":id,"error":format!("{error:#}")}),
+                let body = match &result {
+                    Ok(value) => ResponseBody::Result { result: value },
+                    Err(error) => ResponseBody::Error { error: format!("{error:#}") },
                 };
+                let response = ResponseFrame { id, body };
                 if let Ok(mut output) = output.lock() {
                     if write_frame(&mut *output, &response).is_err() {
                         break;
@@ -674,7 +712,7 @@ pub fn run() -> Result<()> {
                     });
                 match (status, heartbeat_output.lock()) {
                     (Ok(status), Ok(mut output)) => {
-                        if write_frame(&mut *output, &json!({"heartbeat":status})).is_err() {
+                        if write_frame(&mut *output, &HeartbeatFrame { heartbeat: &status }).is_err() {
                             break;
                         }
                     }
@@ -708,6 +746,47 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn borrowed_frames_keep_the_existing_wire_contract() -> Result<()> {
+        let payload = json!({"nested":[null, {"body":"synthetic unicode fixture", "ids":[1,2,3]}]});
+        let request = RequestFrame {
+            id: u64::MAX, operation: "query", payload: &payload,
+            index_root: None, transport: true,
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request)?;
+        let decoded = read_frame(&mut bytes.as_slice())?;
+        assert_eq!(decoded["id"].as_u64(), Some(u64::MAX));
+        assert_eq!(decoded["operation"], "query");
+        assert_eq!(decoded["payload"], payload);
+        assert!(decoded["index_root"].is_null());
+        assert_eq!(decoded["transport"], true);
+        for (key, body) in [
+            ("result", ResponseBody::Result { result: &payload }),
+            ("callback", ResponseBody::Callback { callback: &payload }),
+            ("callback_result", ResponseBody::CallbackResult { callback_result: &payload }),
+            ("error", ResponseBody::Error { error: String::from("synthetic error") }),
+            ("callback_error", ResponseBody::CallbackError { callback_error: String::from("synthetic error") }),
+        ] {
+            bytes.clear();
+            write_frame(&mut bytes, &ResponseFrame { id: 9, body })?;
+            let decoded = read_frame(&mut bytes.as_slice())?;
+            assert_eq!(decoded["id"], 9);
+            assert_eq!(decoded.as_object().map(|object| object.len()), Some(2));
+            if key.ends_with("error") {
+                assert_eq!(decoded[key], "synthetic error");
+            } else {
+                assert_eq!(decoded[key], payload);
+            }
+        }
+        bytes.clear();
+        write_frame(&mut bytes, &HeartbeatFrame { heartbeat: &payload })?;
+        let decoded = read_frame(&mut bytes.as_slice())?;
+        assert_eq!(decoded["heartbeat"], payload);
+        assert!(decoded.get("id").is_none());
+        Ok(())
+    }
+
     #[test]
     fn private_frames_preserve_values_and_reject_truncation() {
         let value = json!({"id":9,"result":{"text":"synthetic unicode fixture 中文"}});
