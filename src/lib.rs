@@ -11,6 +11,7 @@ pub mod worker;
 mod host_winml;
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{marker::PhantomData, rc::Rc};
 
@@ -20,6 +21,19 @@ mod resident;
 pub use resident::{ResidentLease, ResidentScope, resident_scope_active, BackgroundIndexScope, defer_indexing, indexing_deferred};
 
 pub const ABI_VERSION: u32 = 0x0001_0002;
+
+#[derive(Serialize)]
+struct CoreRequest<'a> {
+    schema_version: u32,
+    request_id: &'a str,
+    operation: &'a str,
+    payload: &'a Value,
+}
+
+fn response_result(response: &mut Value) -> Result<Value> {
+    response.as_object_mut().and_then(|fields| fields.remove("result"))
+        .context("Core response missing result")
+}
 
 /// Confined to its owner thread; calls cannot race destruction or one another.
 pub struct Core {
@@ -64,10 +78,10 @@ impl Core {
             .checked_add(1)
             .context("request counter exhausted")?;
         let request_id = self.next_request.to_string();
-        let request = serde_json::to_vec(&json!({
-            "schema_version": 1, "request_id": request_id,
-            "operation": operation, "payload": payload,
-        }))?;
+        let request = serde_json::to_vec(&CoreRequest {
+            schema_version: 1, request_id: &request_id,
+            operation, payload: &payload,
+        })?;
         let (code, bytes) = match transport {
             Some(transport) => self.handle.call_with_transport(&request, transport)?,
             None => self.handle.call(&request)?,
@@ -75,7 +89,7 @@ impl Core {
         if code == 7 {
             self.poisoned = true;
         }
-        let response: Value =
+        let mut response: Value =
             serde_json::from_slice(&bytes).context("invalid Core response JSON")?;
         if code != 0 {
             bail!("Core error {code}: {}", response["error"]["message"]);
@@ -85,10 +99,7 @@ impl Core {
         {
             bail!("Core response schema or request ID mismatch");
         }
-        response
-            .get("result")
-            .cloned()
-            .context("Core response missing result")
+        response_result(&mut response)
     }
 
     pub fn capabilities(&mut self) -> Result<Value> {
@@ -100,9 +111,9 @@ impl Core {
         anyhow::ensure!(!self.poisoned, "Core handle is poisoned; recreate it");
         let (code, bytes) = self.handle.load_model(&serde_json::to_vec(&config)?, model, tokenizer)?;
         if code == 7 { self.poisoned = true; }
-        let response: Value = serde_json::from_slice(&bytes).context("invalid Core model response")?;
+        let mut response: Value = serde_json::from_slice(&bytes).context("invalid Core model response")?;
         anyhow::ensure!(code == 0, "Core error {code}: {}", response["error"]["message"]);
-        response.get("result").cloned().context("Core model response missing result")
+        response_result(&mut response)
     }
 
     #[cfg(windows)]
@@ -112,6 +123,30 @@ impl Core {
         let response: Value = serde_json::from_slice(&bytes).context("invalid Core provider response")?;
         anyhow::ensure!(code == 0, "Core provider registration error {code}: {}", response["error"]["message"]);
         Ok(diagnostics)
+    }
+}
+
+#[cfg(test)]
+mod core_wire_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_request_and_moved_result_preserve_protocol() -> Result<()> {
+        for payload in [Value::Null, json!({"nested":[1,"你好",{"flag":true}]}), json!([1,2,3])] {
+            let bytes = serde_json::to_vec(&CoreRequest {
+                schema_version:1, request_id:"42", operation:"query", payload:&payload,
+            })?;
+            let request: Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(request, json!({"schema_version":1,"request_id":"42",
+                "operation":"query","payload":payload}));
+            let mut response = json!({"schema_version":1,"request_id":"42","result":payload});
+            assert_eq!(response_result(&mut response)?, payload);
+            assert!(response.get("result").is_none());
+            assert_eq!(response["request_id"], "42");
+        }
+        assert!(response_result(&mut json!({"error":{"message":"failure"}})).is_err());
+        assert!(response_result(&mut Value::Null).is_err());
+        Ok(())
     }
 }
 
