@@ -130,6 +130,12 @@ impl LocalStore {
         self.put_inner_policy(memory, dirty, false)
     }
 
+    /// Authoritative local write: replace an existing row even when its
+    /// timestamp is unchanged or it has unpushed edits (explicit re-import).
+    pub fn put_authoritative(&self, memory: &StoredMemory) -> Result<bool> {
+        self.put_inner_policy(memory, true, true)
+    }
+
     fn put_inner_policy(
         &self,
         memory: &StoredMemory,
