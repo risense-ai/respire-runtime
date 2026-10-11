@@ -227,6 +227,17 @@ pub(crate) fn reset_model_cache() -> Result<()> {
     Ok(())
 }
 
+fn model_file_metadata(path: &std::path::Path, custom_cpu_file: bool) -> Result<(u64, std::time::SystemTime)> {
+    let recovery = if custom_cpu_file {
+        "correct or unset RSRS_CPU_OWNED_ORT_FILE; installing the default model does not repair this custom path"
+    } else {
+        "run rsrs model install-m3 in this profile before direct inference"
+    };
+    let metadata = std::fs::metadata(path).with_context(|| format!(
+        "model file unavailable at {}; {recovery}", path.display()))?;
+    Ok((metadata.len(), metadata.modified()?))
+}
+
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let directory = crate::bge::resolve_model_dir()?;
     let engine = crate::onnx::configured_engine()?;
@@ -241,9 +252,9 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     } else { directory.join("onnx/model_quantized.onnx") };
     let tokenizer_path = directory.join("tokenizer.json");
     let metadata = |path: &std::path::Path| -> Result<_> {
-        let metadata = std::fs::metadata(path).with_context(|| format!(
-            "model file unavailable at {}; run rsrs model install-m3 in this profile before direct inference", path.display()))?;
-        Ok((metadata.len(), metadata.modified()?))
+        let custom_cpu_file = cpu_owned_experiment && path == model_path.as_path()
+            && crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").is_some();
+        model_file_metadata(path, custom_cpu_file)
     };
     let legacy_options_id = digest(
         format!(

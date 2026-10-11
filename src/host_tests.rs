@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn missing_custom_cpu_model_preserves_io_error_and_correct_recovery() -> Result<()> {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let missing = std::env::temp_dir().join(format!("respire-missing-model-{}-{nonce}", std::process::id()));
+    assert!(!missing.exists());
+    for custom in [false, true] {
+        let failure = model_file_metadata(&missing, custom).err().ok_or_else(|| anyhow::anyhow!("missing model unexpectedly available"))?;
+        let io = failure.downcast_ref::<std::io::Error>().ok_or_else(|| anyhow::anyhow!("original IO error missing"))?;
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(failure.to_string().contains("correct or unset RSRS_CPU_OWNED_ORT_FILE"), custom);
+        assert_eq!(failure.to_string().contains("run rsrs model install-m3"), !custom);
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_second_session_reloads_the_prior_configuration_without_restart() -> Result<()> {
     recover_after_options_failure(2)
 }
