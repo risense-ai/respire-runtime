@@ -83,6 +83,7 @@ impl Core {
             schema_version: 1, request_id: &request_id,
             operation, payload: &payload,
         })?;
+        drop(payload);
         let (code, bytes) = match transport {
             Some(transport) => self.handle.call_with_transport(&request, transport)?,
             None => self.handle.call(&request)?,
