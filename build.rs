@@ -26,6 +26,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     if manifest["association_contract"].as_u64() != Some(1) {
         return Err("Core SDK lacks association contract 1; rebuild and pin a matching SDK".into());
     }
+    println!("cargo:rustc-check-cfg=cfg(model_input_stream_contract)");
+    if env::var_os("CARGO_FEATURE_MODEL_INPUT_STREAM_EXPERIMENT").is_some() {
+        if manifest["model_input_stream_contract"].as_u64() != Some(1) {
+            return Err("model-input-stream-experiment requires a pinned SDK with model_input_stream_contract 1".into());
+        }
+        println!("cargo:rustc-cfg=model_input_stream_contract");
+    }
     let target = env::var("TARGET")?;
     let lock_path =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");

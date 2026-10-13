@@ -14,6 +14,7 @@ publish = ["crates-io"]
 [features]
 default = ["cpu-owned-ort-experiment"]
 native-fault-tests = []
+model-input-stream-experiment = []
 cpu-owned-ort-experiment = []
 
 [dependencies]
