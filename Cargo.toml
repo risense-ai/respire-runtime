@@ -12,7 +12,7 @@ links = "respire_core_ffi"
 publish = ["crates-io"]
 
 [features]
-default = ["cpu-owned-ort-experiment"]
+default = ["cpu-owned-ort-experiment", "model-input-stream-experiment"]
 native-fault-tests = []
 model-input-stream-experiment = []
 cpu-owned-ort-experiment = []
