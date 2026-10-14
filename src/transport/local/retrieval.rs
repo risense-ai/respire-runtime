@@ -21,6 +21,9 @@ impl std::fmt::Display for IndexSourceChanged {
 impl std::error::Error for IndexSourceChanged {}
 
 impl LocalStore {
+    // Only production caller: LocalStore::all. Its SELECT reads the memories
+    // primary key, so out has unique IDs. On any error all discards the entire
+    // output Vec; this helper does not promise rollback for an arbitrary slice.
     pub(super) fn attach_retrieval_index(
         &self,
         out: &mut [crate::memory::model::StoredMemory],
@@ -31,13 +34,25 @@ impl LocalStore {
              JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source
              WHERE a.model=?1 AND m.deleted=0",
         )?;
-        let rows = stmt.query_map(params![generation_key(&model)?], |row| {
-            Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, Vec<u8>>(2)?))
-        })?;
-        let artifacts = rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
-        for memory in out.iter_mut() {
-            if let Some(artifact) = artifacts.get(&(memory.id.clone(), memory.ciphertext.clone())) {
-                memory.local_artifact = artifact.clone();
+        // Keep only the small ID lookup. Collecting every source ciphertext and
+        // artifact first duplicates the entire encrypted catalog at peak.
+        let positions: std::collections::HashMap<String, usize> = out.iter()
+            .enumerate().map(|(index, memory)| (memory.id.clone(), index)).collect();
+        debug_assert_eq!(positions.len(), out.len(), "catalog IDs must be unique");
+        let mut rows = stmt.query(params![generation_key(&model)?])?;
+        while let Some(row) = rows.next()? {
+            let id = row.get_ref(0)?.as_str()?;
+            let source = row.get_ref(1)?.as_str()?;
+            // Preserve the previous collect's decoding errors even if this row
+            // is absent from, or no longer matches, the supplied snapshot.
+            let artifact: Vec<u8> = row.get(2)?;
+            if let Some(&index) = positions.get(id) {
+                let memory = &mut out[index];
+                // The SQL join checks the database source; this check also
+                // protects a supplied snapshot from a newer database source.
+                if memory.ciphertext == source {
+                    memory.local_artifact = artifact;
+                }
             }
         }
         Ok(())
@@ -189,5 +204,72 @@ impl LocalStore {
 
     pub fn retrieval_model(&self) -> Result<String> {
         Ok("m3".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn attachments_preserve_source_deleted_model_and_subset_guards() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = LocalStore::open(&dir.path().join("attach.db"))?;
+        let mut one = super::super::tests::sample("one");
+        one.local_artifact = vec![1, 2, 3];
+        let mut two = super::super::tests::sample("two");
+        two.local_artifact = vec![4, 5, 6];
+        store.put(&one)?;
+        store.put(&two)?;
+        // IDs, not ciphertext/artifact identity, distinguish rows.
+        let mut duplicate = one.clone();
+        duplicate.id = "duplicate".into();
+        store.put(&duplicate)?;
+        let mut missing = one.clone();
+        missing.id = "missing".into();
+        missing.local_artifact.clear();
+        store.put(&missing)?;
+        let all = store.all(false)?;
+        assert_eq!(all.iter().map(|memory| &memory.id).collect::<std::collections::HashSet<_>>().len(), all.len());
+        let mut actual = all.clone();
+        let mut expected = all.clone();
+        for memory in actual.iter_mut().chain(expected.iter_mut()) { memory.local_artifact.clear(); }
+        let mut statement = store.connection.prepare("SELECT a.memory_id,a.source,a.artifact FROM core_artifacts a JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source WHERE a.model=?1 AND m.deleted=0")?;
+        let artifacts = statement.query_map([generation_key("m3")?], |row| {
+            Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, Vec<u8>>(2)?))
+        })?.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+        for memory in &mut expected {
+            if let Some(artifact) = artifacts.get(&(memory.id.clone(), memory.ciphertext.clone())) {
+                memory.local_artifact = artifact.clone();
+            }
+        }
+        store.attach_retrieval_index(&mut actual)?;
+        // Debug covers local-only fields skipped by wire serde, plus ordering.
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        drop(statement);
+        assert_eq!(all.len(), 4);
+        assert_eq!(all.iter().find(|m| m.id == "duplicate").ok_or_else(|| anyhow::anyhow!("duplicate fixture missing"))?.local_artifact, one.local_artifact);
+        assert!(all.iter().find(|m| m.id == "missing").ok_or_else(|| anyhow::anyhow!("missing fixture absent"))?.local_artifact.is_empty());
+        let mut stale = one.clone();
+        stale.ciphertext = "older source".into();
+        stale.local_artifact.clear();
+        store.attach_retrieval_index(std::slice::from_mut(&mut stale))?;
+        assert!(stale.local_artifact.is_empty());
+        let mut subset = vec![two.clone()];
+        subset[0].local_artifact.clear();
+        store.attach_retrieval_index(&mut subset)?;
+        assert_eq!(subset[0].local_artifact, two.local_artifact);
+        store.connection.execute("UPDATE core_artifacts SET model='other-generation' WHERE memory_id='one'", [])?;
+        store.connection.execute("UPDATE memories SET deleted=1 WHERE id='two'", [])?;
+        let all = store.all(true)?;
+        assert_eq!(all.len(), 4);
+        assert!(all.iter().filter(|m| m.id != "duplicate").all(|m| m.local_artifact.is_empty()));
+        store.attach_retrieval_index(&mut [])?;
+        store.connection.execute("UPDATE core_artifacts SET artifact='not-a-blob' WHERE memory_id='duplicate'", [])?;
+        assert!(store.attach_retrieval_index(std::slice::from_mut(&mut stale)).is_err());
+        assert!(store.all(false).is_err());
+        store.connection.execute("DROP TABLE core_artifacts", [])?;
+        assert!(store.attach_retrieval_index(&mut subset).is_err());
+        Ok(())
     }
 }
