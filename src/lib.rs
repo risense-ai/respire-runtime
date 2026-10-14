@@ -128,6 +128,64 @@ impl Core {
     }
 }
 
+/// Exclusive upload guard. Drop aborts a pending input; commit consumes it.
+#[cfg(model_input_stream_contract)]
+pub struct ModelInput<'a> { core: &'a mut Core, ticket: u64, offset: usize, pending: bool }
+
+#[cfg(model_input_stream_contract)]
+impl Core {
+    fn model_input_response(&mut self, reply: (i32, Vec<u8>)) -> Result<Value> {
+        let (code, bytes) = reply;
+        if code == 7 { self.poisoned = true; }
+        let mut response: Value = serde_json::from_slice(&bytes).context("invalid model input response")?;
+        anyhow::ensure!(code == 0, "Core error {code}: {}", response["error"]["message"]);
+        response_result(&mut response)
+    }
+
+    pub fn begin_model_input(&mut self, bytes: usize) -> Result<ModelInput<'_>> {
+        anyhow::ensure!(!self.poisoned, "Core handle is poisoned; recreate it");
+        let (ticket, code, bytes) = self.handle.input_begin(bytes);
+        let guard = ModelInput { core: self, ticket, offset: 0, pending: ticket != 0 };
+        if code == 7 { guard.core.poisoned = true; }
+        guard.core.model_input_response((code, bytes?))?;
+        anyhow::ensure!(ticket != 0, "Core returned a zero model input ticket");
+        Ok(guard)
+    }
+}
+
+#[cfg(model_input_stream_contract)]
+impl ModelInput<'_> {
+    pub fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(!self.core.poisoned, "Core handle is poisoned; recreate it");
+        let expected = self.offset.checked_add(bytes.len()).context("model input length overflow")?;
+        let reply = self.core.handle.input_append(self.ticket, self.offset, bytes)?;
+        let response = self.core.model_input_response(reply)?;
+        anyhow::ensure!(response["received"].as_u64() == Some(expected as u64), "Core model input offset mismatch");
+        self.offset = expected;
+        Ok(())
+    }
+    pub fn commit(mut self, config: Value, tokenizer: &[u8]) -> Result<Value> {
+        anyhow::ensure!(!self.core.poisoned, "Core handle is poisoned; recreate it");
+        let config = serde_json::to_vec(&config)?;
+        // This safe wrapper supplies valid preflight pointers, so commit consumes
+        // the matching ticket even when configuration/native loading fails.
+        self.pending = false;
+        let reply = self.core.handle.input_commit(self.ticket, &config, tokenizer)?;
+        self.core.model_input_response(reply)
+    }
+}
+
+#[cfg(model_input_stream_contract)]
+impl Drop for ModelInput<'_> {
+    fn drop(&mut self) {
+        if self.pending && !self.core.poisoned {
+            if let Ok(reply) = self.core.handle.input_abort(self.ticket) {
+                let _ = self.core.model_input_response(reply);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod core_wire_tests {
     use super::*;
@@ -225,6 +283,39 @@ mod ffi {
             output: *mut Buffer,
         ) -> i32;
         fn rs_core_destroy(core: *mut c_void);
+    }
+
+    #[cfg(model_input_stream_contract)]
+    extern "C" {
+        fn rs_core_model_input_begin(core: *mut c_void, bytes: usize, ticket: *mut u64, out: *mut Buffer) -> i32;
+        fn rs_core_model_input_append(core: *mut c_void, ticket: u64, offset: usize, bytes: *const u8, len: usize, out: *mut Buffer) -> i32;
+        fn rs_core_model_input_commit(core: *mut c_void, ticket: u64, config: *const u8, config_len: usize, tokenizer: *const u8, tokenizer_len: usize, out: *mut Buffer) -> i32;
+        fn rs_core_model_input_abort(core: *mut c_void, ticket: u64, out: *mut Buffer) -> i32;
+    }
+
+    #[cfg(model_input_stream_contract)]
+    impl Handle {
+        pub(super) fn input_begin(&mut self, bytes: usize) -> (u64, i32, Result<Vec<u8>>) {
+            let mut ticket = 0;
+            let mut output = Buffer::empty();
+            let code = unsafe { rs_core_model_input_begin(self.pointer.as_ptr(), bytes, &mut ticket, &mut output) };
+            (ticket, code, output.bytes())
+        }
+        pub(super) fn input_append(&mut self, ticket: u64, offset: usize, bytes: &[u8]) -> Result<(i32, Vec<u8>)> {
+            let mut output = Buffer::empty();
+            let code = unsafe { rs_core_model_input_append(self.pointer.as_ptr(), ticket, offset, bytes.as_ptr(), bytes.len(), &mut output) };
+            Ok((code, output.bytes()?))
+        }
+        pub(super) fn input_commit(&mut self, ticket: u64, config: &[u8], tokenizer: &[u8]) -> Result<(i32, Vec<u8>)> {
+            let mut output = Buffer::empty();
+            let code = unsafe { rs_core_model_input_commit(self.pointer.as_ptr(), ticket, config.as_ptr(), config.len(), tokenizer.as_ptr(), tokenizer.len(), &mut output) };
+            Ok((code, output.bytes()?))
+        }
+        pub(super) fn input_abort(&mut self, ticket: u64) -> Result<(i32, Vec<u8>)> {
+            let mut output = Buffer::empty();
+            let code = unsafe { rs_core_model_input_abort(self.pointer.as_ptr(), ticket, &mut output) };
+            Ok((code, output.bytes()?))
+        }
     }
 
     pub(super) fn abi_version() -> u32 {
@@ -463,5 +554,65 @@ mod ffi {
                 rs_core_destroy(self.pointer.as_ptr());
             }
         }
+    }
+}
+
+#[cfg(all(test, model_input_stream_contract))]
+mod model_input_guard_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires the pinned actual ORT model fixture"]
+    fn real_stream_commit_cache_budget_and_handle_lifetime() -> Result<()> {
+        use std::io::Read;
+        fn stable(mut value: Value) -> Value {
+            if let Some(fields) = value.as_object_mut() { fields.remove("elapsed_ms"); }
+            value
+        }
+        let root = std::path::PathBuf::from(std::env::var_os("RSRS_CORE_TEST_MODEL_DIR").context("explicit fixture required")?);
+        let tokenizer = std::fs::read(root.join("tokenizer.json"))?;
+        fn fill<'a>(core: &'a mut Core, root: &std::path::Path) -> Result<ModelInput<'a>> {
+            let mut file = std::fs::File::open(root.join("onnx/model_quantized.cpu-v1.ort"))?;
+            anyhow::ensure!(file.metadata()?.len() == 569654128, "fixture length mismatch");
+            let mut upload = core.begin_model_input(569654128)?;
+            let mut chunk = vec![0; 1 << 20];
+            loop { let n = file.read(&mut chunk)?; if n == 0 { break; } upload.append(&chunk[..n])?; }
+            Ok(upload)
+        }
+        let config = json!({"model":"m3","asset_id":"actual-stream-budget-fixture","engine":"cpu","execution_timeout_secs":120,"cpu_owned_ort_experiment":true});
+        let mut core = Core::new()?;
+        fill(&mut core, &root)?.commit(config.clone(), &tokenizer)?;
+        // A model-sized new reservation must succeed after publication.
+        drop(core.begin_model_input(569654128)?);
+        let expected = stable(core.call("model_probe", json!({"model":"m3","text":"model input lifecycle"}))?);
+        fill(&mut core, &root)?.commit(config.clone(), &tokenizer)?;
+        drop(core.begin_model_input(569654128)?);
+        assert_eq!(stable(core.call("model_probe", json!({"model":"m3","text":"model input lifecycle"}))?), expected);
+        drop(core);
+        let mut next = Core::new()?;
+        let mut reuse = config.clone(); reuse["reuse_current"] = json!(true);
+        next.load_model(reuse, &[], &[])?;
+        assert_eq!(stable(next.call("model_probe", json!({"model":"m3","text":"model input lifecycle"}))?), expected);
+        let mut invalid = config; invalid["asset_id"] = json!("invalid-tokenizer-replacement");
+        assert!(fill(&mut next, &root)?.commit(invalid, b"bad tokenizer").is_err());
+        drop(next.begin_model_input(569654128)?);
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_and_failed_uploads_allow_new_guard() -> Result<()> {
+        let mut core = Core::new()?;
+        {
+            let mut upload = core.begin_model_input(8)?;
+            upload.append(b"part")?;
+        }
+        let mut upload = core.begin_model_input(8)?;
+        assert!(upload.append(b"too many bytes").is_err());
+        upload.append(b"abcdORTM")?;
+        assert!(upload.commit(json!({"model":"m3","asset_id":"fixture","engine":"cpu","cpu_owned_ort_experiment":true}), b"invalid tokenizer").is_err());
+        let incomplete = core.begin_model_input(8)?;
+        assert!(incomplete.commit(json!({}), &[]).is_err());
+        drop(core.begin_model_input(8)?);
+        assert_eq!(core.capabilities()?["model_input_stream_contract"], 1);
+        Ok(())
     }
 }

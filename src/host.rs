@@ -293,6 +293,28 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         // Cached reuse is initialization, not a replay of a business operation.
         *loaded = None;
     }
+    #[cfg(model_input_stream_contract)]
+    if cpu_owned_experiment {
+        const MODEL_HASH: &str = "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff";
+        const MODEL_BYTES: usize = 569654128;
+        let tokenizer = std::fs::read(&tokenizer_path).context("read host BGE-M3 tokenizer")?;
+        let tokenizer_hash = digest(&tokenizer);
+        anyhow::ensure!(tokenizer_hash == "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790", "BGE-M3 tokenizer checksum mismatch; reinstall the model");
+        let mut file = std::fs::File::open(&model_path).context("open host BGE-M3 model")?;
+        anyhow::ensure!(file.metadata()?.len() == MODEL_BYTES as u64, "BGE-M3 model length mismatch");
+        let mut input = core.begin_model_input(MODEL_BYTES)?;
+        let model_hash = stream_model(&mut file, MODEL_BYTES, |bytes| input.append(bytes))?;
+        anyhow::ensure!(model_hash == MODEL_HASH, "BGE-M3 model checksum mismatch; reinstall the model");
+        drop(file);
+        let asset_id = format!("{MODEL_HASH}:{tokenizer_hash}");
+        let request = json!({"model":"m3", "asset_id":asset_id,"engine":engine,
+            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":false,"cpu_owned_ort_experiment":true});
+        *loaded = None;
+        *PROVIDER_DIAGNOSTICS.lock().map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? = Vec::new();
+        input.commit(request, &tokenizer)?;
+        *loaded = Some(LoadedModel { stamp, asset_id });
+        return Ok(());
+    }
     let model = std::fs::read(&model_path).context("read host BGE-M3 model (CPU upgrades are prepared by the runtime model task; run rsrs model install-m3 if unavailable)")?;
     let tokenizer = std::fs::read(&tokenizer_path).context("read host BGE-M3 tokenizer")?;
     let model_hash = digest(&model);
@@ -345,4 +367,44 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     }
     *loaded = Some(LoadedModel { stamp, asset_id });
     Ok(())
+}
+
+#[cfg(model_input_stream_contract)]
+fn stream_model(reader: &mut impl std::io::Read, expected: usize, mut append: impl FnMut(&[u8]) -> Result<()>) -> Result<String> {
+    let mut chunk = vec![0u8; 1 << 20];
+    let mut hasher = Sha256::new();
+    let mut received = 0usize;
+    loop {
+        let count = match reader.read(&mut chunk) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.context("stream host BGE-M3 model")?,
+        };
+        if count == 0 { break; }
+        received = received.checked_add(count).context("model length overflow")?;
+        anyhow::ensure!(received <= expected, "BGE-M3 model grew during read");
+        hasher.update(&chunk[..count]);
+        append(&chunk[..count])?;
+    }
+    anyhow::ensure!(received == expected, "short BGE-M3 model read");
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(all(test, model_input_stream_contract))]
+mod stream_tests {
+    use super::*;
+    #[test]
+    fn bounded_stream_short_long_failure_and_digest() -> Result<()> {
+        let source = b"synthetic model bytes";
+        let mut received = Vec::new();
+        let hash = stream_model(&mut &source[..], source.len(), |bytes| { received.extend_from_slice(bytes); Ok(()) })?;
+        assert_eq!(received, source);
+        assert_eq!(hash, digest(source));
+        assert!(stream_model(&mut &source[..], source.len()+1, |_| Ok(())).is_err());
+        assert!(stream_model(&mut &source[..], source.len()-1, |_| Ok(())).is_err());
+        assert!(stream_model(&mut &source[..], source.len(), |_| anyhow::bail!("injected append failure")).is_err());
+        struct Broken;
+        impl std::io::Read for Broken { fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("injected read failure")) } }
+        assert!(stream_model(&mut Broken, source.len(), |_| Ok(())).is_err());
+        Ok(())
+    }
 }
