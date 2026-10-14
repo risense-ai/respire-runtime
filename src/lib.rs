@@ -36,6 +36,13 @@ fn response_result(response: &mut Value) -> Result<Value> {
         .context("Core response missing result")
 }
 
+fn validate_response_identity(response: &Value, request_id: &str) -> Result<()> {
+    anyhow::ensure!(response["schema_version"].as_u64() == Some(1)
+        && response["request_id"].as_str() == Some(request_id),
+        "Core response schema or request ID mismatch");
+    Ok(())
+}
+
 /// Confined to its owner thread; calls cannot race destruction or one another.
 pub struct Core {
     handle: ffi::Handle,
@@ -96,11 +103,7 @@ impl Core {
         if code != 0 {
             bail!("Core error {code}: {}", response["error"]["message"]);
         }
-        if response["schema_version"].as_u64() != Some(1)
-            || response["request_id"].as_str() != Some(request_id.as_str())
-        {
-            bail!("Core response schema or request ID mismatch");
-        }
+        validate_response_identity(&response, &request_id)?;
         response_result(&mut response)
     }
 
@@ -139,6 +142,9 @@ impl Core {
         if code == 7 { self.poisoned = true; }
         let mut response: Value = serde_json::from_slice(&bytes).context("invalid model input response")?;
         anyhow::ensure!(code == 0, "Core error {code}: {}", response["error"]["message"]);
+        // Stream contract 1 uses the ABI ticket and offset for correlation;
+        // these synchronous extension calls have an empty JSON request ID.
+        validate_response_identity(&response, "")?;
         response_result(&mut response)
     }
 

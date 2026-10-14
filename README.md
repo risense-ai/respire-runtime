@@ -34,7 +34,11 @@ The pinned SDK advertises model input stream contract 1. The default CPU-owned
 ORT path reads model files in 1 MiB chunks, verifies length and SHA256 on the host,
 and transfers ownership to Core. Profiling, GPU/NPU and the explicit legacy CPU
 setting retain borrowed ONNX initialization. Building against an older SDK requires
-disabling the default stream feature; enabling it without contract 1 fails clearly.
+updating its exact manifest pin and disabling the default stream feature; enabling
+it without contract 1 fails clearly. Stream contract 1 responses carry
+`schema_version: 1` and an empty `request_id`; the synchronous ABI call, upload
+ticket and append offset identify the operation. The binding validates this
+envelope for begin, append, commit and abort responses.
 
 The public host adapter owns model discovery, file reads, engine configuration and
 opaque artifact persistence. Core receives model/tokenizer buffers and explicit
