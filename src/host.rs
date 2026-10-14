@@ -22,7 +22,7 @@ impl std::fmt::Display for CorruptArtifact {
 }
 impl std::error::Error for CorruptArtifact {}
 
-fn resolve(encoded: &str) -> Result<String> {
+pub(crate) fn resolve(encoded: &str) -> Result<String> {
     let bytes = STANDARD
         .decode(encoded)
         .context("invalid index artifact encoding")?;

@@ -29,6 +29,68 @@ pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload:
     execute_inner(operation, &mut payload, Some(transport))
 }
 
+// The parent still submits one request with one worker deadline. Bound only
+// the expanded artifact payload sent through the unchanged native ABI.
+const INDEX_STATUS_BATCH_COUNT: usize = 128;
+const INDEX_STATUS_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+fn unavailable_index(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause|
+        cause.downcast_ref::<crate::host::CorruptArtifact>().is_some()
+            || cause.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+}
+
+fn check_index_batches(
+    artifacts: Vec<String>,
+    mut resolve: impl FnMut(&str) -> Result<String>,
+    mut check: impl FnMut(Vec<String>) -> Result<bool>,
+) -> Result<bool> {
+    if artifacts.is_empty() { return check(Vec::new()); }
+    let mut batch = Vec::new();
+    let mut bytes = 0usize;
+    let mut verdict = Ok(true);
+    for artifact in artifacts {
+        let resolved = match resolve(&artifact) {
+            Ok(resolved) => resolved,
+            Err(error) if unavailable_index(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        // The old request resolves every locator before native validation.
+        // Keep resolving after a native failure so later host errors retain
+        // precedence, but never replay the failed native validation.
+        if !matches!(verdict, Ok(true)) { continue; }
+        if !batch.is_empty() && (batch.len() == INDEX_STATUS_BATCH_COUNT
+            || resolved.len() > INDEX_STATUS_BATCH_BYTES.saturating_sub(bytes)) {
+            verdict = check(std::mem::take(&mut batch));
+            bytes = 0;
+            if !matches!(verdict, Ok(true)) { continue; }
+        }
+        bytes += resolved.len();
+        batch.push(resolved);
+    }
+    if matches!(verdict, Ok(true)) && !batch.is_empty() { verdict = check(batch); }
+    verdict
+}
+
+fn execute_index_batches(payload: &mut Value,
+    mut transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<bool> {
+    let artifacts = serde_json::from_value(payload["artifacts"].take())?;
+    CORE.with(|cell| {
+        let mut slot = cell.try_borrow_mut().context("recursive Core call")?;
+        check_index_batches(artifacts, crate::host::resolve, |batch| {
+            if slot.is_none() { *slot = Some(crate::Core::new()?); }
+            let core = slot.as_mut().context("Core not initialized")?;
+            let payload = json!({"artifacts": batch});
+            let result = match transport.as_mut() {
+                Some(transport) => core.call_with_transport("index_status", payload, *transport)?,
+                None => core.call("index_status", payload)?,
+            };
+            serde_json::from_value(result).context("invalid Core business response")
+        })
+    })
+}
+
 fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
     transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<T> {
     crate::resident::apply_scope(operation, payload);
@@ -38,6 +100,12 @@ fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
         }
         return serde_json::from_value(crate::worker::execute(operation, payload, transport)?)
             .context("invalid isolated Core business response");
+    }
+    if operation == "index_status" && payload.as_object().is_some_and(|fields|
+        fields.len() == 1 && fields.get("artifacts").and_then(Value::as_array)
+            .is_some_and(|artifacts| artifacts.iter().all(Value::is_string))) {
+        return serde_json::from_value(json!(execute_index_batches(payload, transport)?))
+            .context("invalid Core business response");
     }
     if let Err(error) = crate::host::resolve_artifacts(payload) {
         if operation == "index_status" && error.chain().any(|cause|
@@ -164,6 +232,87 @@ pub fn generation_key(model: &str) -> Result<String> {
 
 pub fn index_ready(artifacts: &[Vec<u8>]) -> Result<bool> {
     execute("index_status", json!({"artifacts":artifacts.iter().map(|artifact| STANDARD.encode(artifact)).collect::<Vec<_>>()}))
+}
+
+#[cfg(test)]
+mod index_batch_tests {
+    use super::*;
+
+    #[test]
+    fn empty_count_and_byte_boundaries_preserve_order() -> Result<()> {
+        let mut batches = Vec::new();
+        assert!(check_index_batches(Vec::new(), |value| Ok(value.to_owned()), |batch| {
+            batches.push(batch); Ok(true)
+        })?);
+        assert_eq!(batches, vec![Vec::<String>::new()]);
+        batches.clear();
+        let input: Vec<_> = (0..257).map(|index| index.to_string()).collect();
+        assert!(check_index_batches(input.clone(), |value| Ok(value.to_owned()), |batch| {
+            batches.push(batch); Ok(true)
+        })?);
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [128, 128, 1]);
+        assert_eq!(batches.into_iter().flatten().collect::<Vec<_>>(), input);
+        let sizes = [INDEX_STATUS_BATCH_BYTES / 2, INDEX_STATUS_BATCH_BYTES / 2,
+            1, INDEX_STATUS_BATCH_BYTES + 1, 1];
+        let mut actual = Vec::new();
+        assert!(check_index_batches((0..sizes.len()).map(|i| i.to_string()).collect(),
+            |value| Ok("a".repeat(sizes[value.parse::<usize>()?])),
+            |batch| { actual.push(batch.iter().map(String::len).sum::<usize>()); Ok(true) })?);
+        assert_eq!(actual, [INDEX_STATUS_BATCH_BYTES, 1, INDEX_STATUS_BATCH_BYTES + 1, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn first_middle_and_last_native_failures_are_not_replayed() -> Result<()> {
+        for failed_batch in 0..3 {
+            let mut calls = 0;
+            let mut resolved = 0;
+            let error = check_index_batches((0..257).map(|i| i.to_string()).collect(),
+                |value| { resolved += 1; Ok(value.to_owned()) },
+                |_| {
+                    let batch = calls; calls += 1;
+                    if batch == failed_batch { bail!("native fixture failure {batch}"); }
+                    Ok(true)
+                }).err().context("native failure disappeared")?;
+            assert_eq!(error.to_string(), format!("native fixture failure {failed_batch}"));
+            assert_eq!(calls, failed_batch + 1);
+            assert_eq!(resolved, 257);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn later_host_errors_keep_priority_over_native_failures() -> Result<()> {
+        for kind in [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied] {
+            let result = check_index_batches((0..257).map(|i| i.to_string()).collect(),
+                |value| {
+                    if value == "256" { return Err(std::io::Error::from(kind).into()); }
+                    Ok(value.to_owned())
+                }, |_| bail!("earlier native failure"));
+            if kind == std::io::ErrorKind::NotFound {
+                assert!(!result?);
+            } else {
+                let error = result.err().context("host error disappeared")?;
+                assert_eq!(error.downcast_ref::<std::io::Error>().context("IO type lost")?.kind(), kind);
+            }
+        }
+        assert!(!check_index_batches(vec!["corrupt".into()],
+            |_| Err(crate::host::CorruptArtifact.into()), |_| Ok(true))?);
+        Ok(())
+    }
+
+    #[test]
+    fn first_middle_and_last_host_failures_never_accept_partial_results() -> Result<()> {
+        for failed_row in [0, 128, 256] {
+            let error = check_index_batches((0..257).map(|i| i.to_string()).collect(),
+                |value| {
+                    if value == failed_row.to_string() { bail!("host fixture failure {failed_row}"); }
+                    Ok(value.to_owned())
+                }, |_| Ok(true)).err().context("host failure disappeared")?;
+            assert_eq!(error.to_string(), format!("host fixture failure {failed_row}"));
+        }
+        Ok(())
+    }
 }
 
 pub mod search {
