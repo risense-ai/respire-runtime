@@ -3,7 +3,7 @@ use super::LocalStore;
 use crate::transport::protocol::*;
 use crate::{hydrate_local, SessionKeys, StoredMemory};
 use anyhow::{bail, Result};
-use rusqlite::params;
+use rusqlite::{params, Transaction, TransactionBehavior};
 
 impl LocalStore {
     /// Read a bounded immutable batch; the same op_id always carries the same bytes.
@@ -73,7 +73,7 @@ impl LocalStore {
                 );
             }
         } else {
-            let tx = self.connection.unchecked_transaction()?;
+            let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
             let legacy_parent:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox p JOIN sync_outbox c ON c.parent_op_id=p.op_id WHERE p.state='legacy' AND c.state='pending')",[],|r|r.get(0))?;
             if legacy_parent {
                 self.requeue_pending()?;
@@ -198,7 +198,8 @@ impl LocalStore {
         keys: &SessionKeys,
         after: &str,
     ) -> Result<Option<String>> {
-        let tx = self.connection.unchecked_transaction()?;
+        // Materialization reads before writing; reserve the writer before establishing its snapshot.
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let mut stmt=self.connection.prepare("SELECT i.id,i.wire,i.rev FROM sync_inbox i JOIN sync_remote_heads b ON b.id=i.id AND b.rev=i.rev
             LEFT JOIN sync_base e ON e.id=i.id
             WHERE i.id>?2 AND i.epoch=?1 AND i.status='applied' AND i.decode_error='' AND (e.rev IS NULL OR e.rev<>i.rev) AND NOT EXISTS (
@@ -369,7 +370,7 @@ impl LocalStore {
         if b.ciphertext.is_empty() {
             bail!("this version has no restorable content");
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let stamp = self.edit_stamp(&b.id)?;
         crate::MemoryEngine::restore_version(keys, &mut b, &stamp)?;
         if !self.put_inner(&b, true)? {
@@ -390,7 +391,7 @@ impl LocalStore {
         blobs: Vec<StoredMemory>,
         cursor: u64,
     ) -> Result<usize> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let mut changed = 0;
         for mut b in blobs {
             b.embedding_enc.clear();

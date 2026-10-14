@@ -257,11 +257,11 @@ mod tests {
     #[test]
     fn revision_read_only_probe_observes_committed_wal_without_initialization() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("onememory.db");
+        let path = dir.path().join("rsrs.db");
         assert!(read_memory_revision(&path).is_err());
         assert!(!path.exists());
         let conn = Connection::open(&path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")?;
         assert!(read_memory_revision(&path).is_err());
         let store = initialized(conn)?;
         let before = read_memory_revision(&path)?;
@@ -280,6 +280,12 @@ mod tests {
         );
         store.connection.execute_batch("COMMIT;")?;
         assert_ne!(read_memory_revision(&path)?, before);
+        let bytes = std::fs::read(&path)?;
+        let wal = std::fs::read(path.with_extension("db-wal"))?;
+        let committed = read_memory_revision(&path)?;
+        for _ in 0..3 { assert_eq!(read_memory_revision(&path)?, committed); }
+        assert_eq!(std::fs::read(&path)?, bytes, "probe changed database bytes");
+        assert_eq!(std::fs::read(path.with_extension("db-wal"))?, wal, "probe changed WAL bytes");
         drop(store);
         let previous = read_memory_revision(&path)?;
         std::fs::remove_file(&path)?;

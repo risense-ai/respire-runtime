@@ -18,10 +18,14 @@ use crate::memory::model::StoredMemory;
 mod conflicts;
 mod grants;
 mod retrieval;
+mod resident;
+pub use resident::MemorySourceChanged;
+mod related;
 mod revision;
 pub use revision::read_memory_revision;
 mod sync;
 pub use grants::AccessGrant;
+pub use retrieval::IndexSourceChanged;
 
 /// Query-log row (query-log command output). candidates=search candidates; adopted=used on a write (weak signal);
 /// good/bad=model self-grade (main post-train signal: useful / misleading).
@@ -87,6 +91,7 @@ impl LocalStore {
         )?;
         migrate(&connection)?;
         connection.execute_batch(include_str!("local/sync_schema.sql"))?;
+        connection.execute_batch(include_str!("local/resident_schema.sql"))?;
         Ok(Self { connection })
     }
 
@@ -109,17 +114,42 @@ impl LocalStore {
         Ok(Self { connection })
     }
 
+    /// Benchmark an initialized library without migrations or database writes.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ).with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
+        connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        Ok(Self { connection })
+    }
+
     /// Write (dirty semantics same as put, mark dirty=1).
     pub fn put_inner(&self, memory: &StoredMemory, dirty: bool) -> Result<bool> {
         self.put_inner_policy(memory, dirty, false)
     }
 
-    fn put_inner_policy(
-        &self,
-        memory: &StoredMemory,
-        dirty: bool,
-        authoritative: bool,
-    ) -> Result<bool> {
+    /// Session refreshes must not replace pending local work, even with a newer
+    /// source/import stamp. Keep the guard and write under the same write lock.
+    /// Sync and ordinary user writes retain their existing LWW policy.
+    pub fn put_session_import(&self, memory: &StoredMemory) -> Result<bool> {
+        let immediate = self.connection.is_autocommit().then(||
+            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+        let protected: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND (dirty=1 OR deleted=1))",
+            params![memory.id], |row| row.get(0),
+        )?;
+        let wrote = if protected { false } else { self.put_inner(memory, true)? };
+        if let Some(immediate) = immediate { immediate.commit()?; }
+        Ok(wrote)
+    }
+
+    fn put_inner_policy(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
+        let immediate = self.connection.is_autocommit().then(||
+            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
         self.connection
             .execute_batch("SAVEPOINT memory_with_chunks")?;
         let result = self.put_memory_and_chunks(memory, dirty, authoritative);
@@ -129,15 +159,11 @@ impl LocalStore {
         }
         self.connection
             .execute_batch("RELEASE memory_with_chunks")?;
+        if result.is_ok() { if let Some(immediate) = immediate { immediate.commit()?; } }
         result
     }
 
-    fn put_memory_and_chunks(
-        &self,
-        memory: &StoredMemory,
-        dirty: bool,
-        authoritative: bool,
-    ) -> Result<bool> {
+    fn put_memory_and_chunks(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
         // last-write-wins: same id and existing updated_at is newer → drop this write;
         // a tie (same updated_at) and local dirty=1 → also refuse — unpushed local edits (attach/delete) must not be overwritten by a sync loop
         // (hit 2026-09-08: after batch attach, sync reconcile pulled a same-stamp remote and wiped the unpushed attach).
@@ -206,7 +232,7 @@ impl LocalStore {
 
     /// Import already-sealed new rows: the whole batch commits or rolls back, so a partial backup cannot remain.
     pub fn import_batch(&self, memories: &[StoredMemory]) -> Result<()> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         for memory in memories {
             if !self.put_inner(memory, true)? {
                 anyhow::bail!("import conflict: {}", memory.id);
@@ -218,7 +244,7 @@ impl LocalStore {
 
     /// Keep a compound local edit atomic, including any reads used to plan it.
     pub fn write_transaction<T>(&self, edit: impl FnOnce() -> Result<T>) -> Result<T> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         let result = edit()?;
         transaction.commit()?;
         Ok(result)
@@ -705,6 +731,7 @@ pub fn validate_migration_snapshot(path: &Path) -> Result<()> {
 fn migrate(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     migrate_schema(&transaction)?;
+    transaction.execute_batch("CREATE TABLE IF NOT EXISTS recall_pairs(a TEXT NOT NULL,b TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(a,b),CHECK(a<b)); CREATE INDEX IF NOT EXISTS recall_pairs_b ON recall_pairs(b);")?;
     transaction.commit()?;
     Ok(())
 }
