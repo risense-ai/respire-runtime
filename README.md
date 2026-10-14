@@ -38,7 +38,8 @@ updating its exact manifest pin and disabling the default stream feature; enabli
 it without contract 1 fails clearly. Stream contract 1 responses carry
 `schema_version: 1` and an empty `request_id`; the synchronous ABI call, upload
 ticket and append offset identify the operation. The binding validates this
-envelope for begin, append, commit and abort responses.
+envelope for successful begin, append, commit and abort responses; nonzero ABI
+status codes are rejected before the envelope check.
 
 The public host adapter owns model discovery, file reads, engine configuration and
 opaque artifact persistence. Core receives model/tokenizer buffers and explicit
