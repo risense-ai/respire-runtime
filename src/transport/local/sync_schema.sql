@@ -1,5 +1,9 @@
 CREATE TABLE IF NOT EXISTS sync_base (id TEXT PRIMARY KEY, rev INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_remote_heads (id TEXT PRIMARY KEY, rev INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_remote_heads (
+    id TEXT PRIMARY KEY, rev INTEGER NOT NULL,
+    wire TEXT NOT NULL DEFAULT '', op_id TEXT,
+    decode_error TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS sync_conflict_analysis (
     epoch TEXT NOT NULL, rev INTEGER NOT NULL, kind TEXT NOT NULL,
     head_rev INTEGER NOT NULL, reason TEXT NOT NULL,
@@ -32,12 +36,15 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
 );
 CREATE INDEX IF NOT EXISTS sync_outbox_pending ON sync_outbox(state,seq);
 CREATE INDEX IF NOT EXISTS sync_outbox_object ON sync_outbox(id,seq DESC);
+CREATE INDEX IF NOT EXISTS sync_outbox_unconfirmed ON sync_outbox(id) WHERE state='pending';
+CREATE INDEX IF NOT EXISTS sync_outbox_parent ON sync_outbox(parent_op_id) WHERE state='pending';
 CREATE TABLE IF NOT EXISTS sync_inbox (
     epoch TEXT NOT NULL, rev INTEGER NOT NULL, id TEXT NOT NULL,
     status TEXT NOT NULL, op_id TEXT, wire TEXT NOT NULL,
     decode_error TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(epoch,rev)
 );
+CREATE INDEX IF NOT EXISTS sync_inbox_operation ON sync_inbox(op_id);
 -- Every local save and its immutable outgoing version share the SQLite statement.
 CREATE TRIGGER IF NOT EXISTS sync_capture_insert AFTER INSERT ON memories WHEN NEW.dirty=1
 BEGIN

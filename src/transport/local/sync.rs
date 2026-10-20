@@ -5,10 +5,147 @@ use crate::{hydrate_local, SessionKeys, StoredMemory};
 use anyhow::{bail, Result};
 use rusqlite::{params, Transaction, TransactionBehavior};
 
+#[derive(Debug)]
+pub struct SyncVersionNotFound;
+
+impl std::fmt::Display for SyncVersionNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("version is no longer retained locally")
+    }
+}
+
+impl std::error::Error for SyncVersionNotFound {}
+
 impl LocalStore {
     /// Read a bounded immutable batch; the same op_id always carries the same bytes.
     pub fn outgoing(&self) -> Result<Vec<Operation>> {
         self.outgoing_through(i64::MAX)
+    }
+
+    /// Move the current remote state out of the transport history before reclaiming it.
+    pub(super) fn initialize_sync_storage(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let columns = self
+            .connection
+            .prepare("PRAGMA table_info(sync_remote_heads)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (name, declaration) in [
+            ("wire", "TEXT NOT NULL DEFAULT ''"),
+            ("op_id", "TEXT"),
+            ("decode_error", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                self.connection.execute_batch(&format!(
+                    "ALTER TABLE sync_remote_heads ADD COLUMN {name} {declaration}"
+                ))?;
+            }
+        }
+        self.connection.execute(
+            "UPDATE sync_remote_heads AS h SET (wire,op_id,decode_error)=(
+                SELECT i.wire,i.op_id,i.decode_error FROM sync_inbox i
+                WHERE i.epoch=(SELECT value FROM meta WHERE key='sync_v2_epoch')
+                AND i.rev=h.rev AND i.id=h.id
+            ) WHERE h.wire='' AND EXISTS(
+                SELECT 1 FROM sync_inbox i
+                WHERE i.epoch=(SELECT value FROM meta WHERE key='sync_v2_epoch')
+                AND i.rev=h.rev AND i.id=h.id
+            )",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Reclaim completed payloads, keeping immutable unconfirmed operations and their dependencies.
+    fn prune_sync_history(&self) -> Result<usize> {
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let outgoing = self.connection.execute(
+            "DELETE FROM sync_outbox WHERE seq IN (
+                SELECT o.seq FROM sync_outbox o WHERE
+                (o.state='applied' OR o.state LIKE 'rebased:%'
+                    OR (o.state='conflict_saved' AND EXISTS(
+                        SELECT 1 FROM sync_inbox i WHERE i.op_id=o.op_id))
+                    OR (o.state='legacy' AND EXISTS(
+                        SELECT 1 FROM memories m WHERE m.id=o.id AND m.ciphertext=o.ciphertext
+                        AND m.nonce=o.nonce AND m.updated_at=o.updated_at AND m.deleted=o.deleted)))
+                AND NOT EXISTS(SELECT 1 FROM sync_outbox c
+                    WHERE c.state='pending' AND c.parent_op_id=o.op_id)
+                AND NOT EXISTS(SELECT 1 FROM sync_resolution_outbox r WHERE r.restore_op_id=o.op_id)
+                LIMIT 1000
+            )",
+            [],
+        )?;
+        let incoming = self.connection.execute(
+            "DELETE FROM sync_inbox WHERE rowid IN (
+                SELECT i.rowid FROM sync_inbox i WHERE
+                ((i.status='applied' AND i.decode_error='' AND NOT EXISTS(
+                    SELECT 1 FROM sync_remote_heads h WHERE h.id=i.id AND h.rev=i.rev AND h.wire=''))
+                    OR (i.status='reset_saved' AND EXISTS(
+                        SELECT 1 FROM sync_remote_heads h WHERE h.id=i.id AND h.wire=i.wire))
+                    OR EXISTS(SELECT 1 FROM sync_resolutions r
+                        WHERE r.epoch=i.epoch AND r.conflict_rev=i.rev))
+                AND NOT EXISTS(SELECT 1 FROM sync_resolution_outbox r
+                    WHERE r.epoch=i.epoch AND r.conflict_rev=i.rev)
+                AND NOT EXISTS(SELECT 1 FROM sync_outbox o WHERE o.op_id=i.op_id)
+                LIMIT 1000
+            )",
+            [],
+        )?;
+        let analysis = self.connection.execute(
+            "DELETE FROM sync_conflict_analysis WHERE rowid IN (
+                SELECT a.rowid FROM sync_conflict_analysis a WHERE NOT EXISTS(
+                    SELECT 1 FROM sync_inbox i WHERE i.epoch=a.epoch AND i.rev=a.rev)
+                LIMIT 1000
+            )",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(outgoing + incoming + analysis)
+    }
+
+    /// Run outside a transaction under the runtime's local write gate.
+    pub fn maintain_sync_storage(&self) -> Result<()> {
+        while self.prune_sync_history()? != 0 {}
+        let pages: i64 = self.connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let free: i64 = self.connection.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = self.connection.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let vacuum = free * page_size >= 16 * 1024 * 1024 && free * 4 >= pages;
+        let checkpoint_pending = self.meta_get("sync_storage_checkpoint_pending")?.as_deref() == Some("1");
+        if !vacuum && !checkpoint_pending {
+            return Ok(());
+        }
+        // A reader can arrive between VACUUM and its checkpoint; retry truncation even with no free pages.
+        self.meta_set("sync_storage_checkpoint_pending", "1")?;
+        self.connection.busy_timeout(std::time::Duration::from_millis(250))?;
+        let compact = (|| -> rusqlite::Result<bool> {
+            let busy: i64 = self.connection.query_row(
+                "PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            if busy != 0 {
+                return Ok(false);
+            }
+            if vacuum {
+                self.connection.execute_batch("VACUUM")?;
+            }
+            let busy: i64 = self.connection.query_row(
+                "PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            Ok(busy == 0)
+        })();
+        self.connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        match compact {
+            Ok(true) => self.meta_set("sync_storage_checkpoint_pending", "0"),
+            Ok(false) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(error.code, rusqlite::ErrorCode::DiskFull | rusqlite::ErrorCode::SystemIoFailure) => {
+                    eprintln!("automatic SQLite compaction deferred: {error}");
+                    Ok(())
+                }
+            Err(error) => Err(anyhow::anyhow!(error).context(
+                "automatic SQLite compaction failed; current memories and pending operations are retained"
+            )),
+        }
     }
 
     pub fn outgoing_boundary(&self) -> Result<i64> {
@@ -159,7 +296,7 @@ impl LocalStore {
             self.connection.execute("INSERT INTO sync_inbox(epoch,rev,id,status,op_id,wire,decode_error) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(epoch,rev) DO UPDATE SET decode_error=excluded.decode_error",
                 params![page.epoch,change.rev,b.id,change.status,change.op_id,wire,error])?;
             if change.status == "applied" {
-                self.connection.execute("INSERT INTO sync_remote_heads(id,rev) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET rev=excluded.rev WHERE excluded.rev>sync_remote_heads.rev",params![b.id,change.rev])?;
+                self.connection.execute("INSERT INTO sync_remote_heads(id,rev,wire,op_id,decode_error) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET rev=excluded.rev,wire=excluded.wire,op_id=excluded.op_id,decode_error=excluded.decode_error WHERE excluded.rev>=sync_remote_heads.rev",params![b.id,change.rev,wire,change.op_id,error])?;
                 let pending: bool = self.connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE id=?1 AND state='pending')",
                     [&b.id],
@@ -200,13 +337,15 @@ impl LocalStore {
     ) -> Result<Option<String>> {
         // Materialization reads before writing; reserve the writer before establishing its snapshot.
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let mut stmt=self.connection.prepare("SELECT i.id,i.wire,i.rev FROM sync_inbox i JOIN sync_remote_heads b ON b.id=i.id AND b.rev=i.rev
-            LEFT JOIN sync_base e ON e.id=i.id
-            WHERE i.id>?2 AND i.epoch=?1 AND i.status='applied' AND i.decode_error='' AND (e.rev IS NULL OR e.rev<>i.rev) AND NOT EXISTS (
-            SELECT 1 FROM sync_outbox o WHERE o.id=i.id AND o.state='pending') ORDER BY i.id LIMIT ?3")?;
-        let epoch = self.meta_get("sync_v2_epoch")?.unwrap_or_default();
+        let mut stmt = self.connection.prepare(
+            "SELECT h.id,h.wire,h.rev FROM sync_remote_heads h
+            LEFT JOIN sync_base e ON e.id=h.id
+            WHERE h.id>?1 AND h.wire<>'' AND h.decode_error='' AND (e.rev IS NULL OR e.rev<>h.rev)
+            AND NOT EXISTS (SELECT 1 FROM sync_outbox o INDEXED BY sync_outbox_unconfirmed
+                WHERE o.id=h.id AND o.state='pending') ORDER BY h.id LIMIT ?2",
+        )?;
         let wires = stmt
-            .query_map(params![epoch, after, PUSH_ITEMS as i64], |r| {
+            .query_map(params![after, PUSH_ITEMS as i64], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -262,11 +401,21 @@ impl LocalStore {
         ))
     }
 
-    /// Explicit recovery after restoring a server backup. Preserve all old envelopes;
-    /// pending edits get fresh identities with unknown bases, never automatic rebases.
+    /// Explicit recovery after restoring a server backup. Pending edits get fresh
+    /// identities with unknown bases; durable replacement copies permit later reclamation.
     pub fn reset_sync_snapshot(&self) -> Result<()> {
         let tx = self.connection.unchecked_transaction()?;
         self.requeue_pending()?;
+        // A server backup can replace current content; keep one recovery snapshot, not its edit history.
+        self.connection.execute(
+            "INSERT INTO sync_inbox(epoch,rev,id,status,op_id,wire,decode_error)
+            SELECT (SELECT value FROM meta WHERE key='sync_v2_epoch'),rev,id,'reset_saved',op_id,wire,decode_error
+            FROM sync_remote_heads WHERE wire<>''
+                AND (SELECT value FROM meta WHERE key='sync_v2_epoch') IS NOT NULL
+            ON CONFLICT(epoch,rev) DO UPDATE SET status='reset_saved',
+                wire=excluded.wire,op_id=excluded.op_id,decode_error=excluded.decode_error",
+            [],
+        )?;
         self.connection.execute("DELETE FROM sync_base", [])?;
         self.connection
             .execute("DELETE FROM sync_remote_heads", [])?;
@@ -291,7 +440,21 @@ impl LocalStore {
 
     /// Read recoverable encrypted versions without moving either sync cursor.
     pub fn sync_history(&self, id: Option<&str>) -> Result<Vec<serde_json::Value>> {
-        let mut stmt=self.connection.prepare("SELECT epoch,rev,status,op_id,wire FROM sync_inbox WHERE (?1 IS NULL OR id=?1) ORDER BY rev DESC LIMIT 200")?;
+        // Paused/read-only libraries intentionally keep their old schema until normal service resumes.
+        let current_heads: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sync_remote_heads') WHERE name='wire')",
+            [], |r| r.get(0),
+        )?;
+        let incoming = if current_heads {
+            "SELECT epoch,rev,status,op_id,wire FROM sync_inbox WHERE (?1 IS NULL OR id=?1)
+            UNION ALL SELECT (SELECT value FROM meta WHERE key='sync_v2_epoch'),h.rev,'applied',h.op_id,h.wire
+            FROM sync_remote_heads h WHERE (?1 IS NULL OR h.id=?1) AND h.wire<>''
+            AND NOT EXISTS(SELECT 1 FROM sync_inbox i WHERE i.epoch=(SELECT value FROM meta WHERE key='sync_v2_epoch') AND i.rev=h.rev)
+            ORDER BY rev DESC LIMIT 200"
+        } else {
+            "SELECT epoch,rev,status,op_id,wire FROM sync_inbox WHERE (?1 IS NULL OR id=?1) ORDER BY rev DESC LIMIT 200"
+        };
+        let mut stmt = self.connection.prepare(incoming)?;
         let mut out=stmt.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?)))?
             .map(|row| {let (epoch,rev,status,op_id,wire)=row?;Ok(serde_json::json!({"epoch":epoch,"rev":rev,"status":status,"op_id":op_id,"blob":serde_json::from_str::<serde_json::Value>(&wire)?}))})
             .collect::<Result<Vec<_>>>()?;
@@ -314,7 +477,7 @@ impl LocalStore {
         Ok(out)
     }
 
-    /// Cache remote history for inspection/restoration, not as a new editing base.
+    /// Stage an explicitly requested version for restoration without moving sync cursors.
     pub fn cache_history(&self, page: &Page) -> Result<()> {
         let tx = self.connection.unchecked_transaction()?;
         for c in &page.changes {
@@ -325,8 +488,7 @@ impl LocalStore {
         Ok(())
     }
 
-    /// Restore ciphertext locally as a new version, updating encrypted timestamps
-    /// without loading the embedding model. Existing history is never overwritten.
+    /// Restore retained ciphertext as a new edit without loading the embedding model.
     pub fn restore_sync_version(
         &self,
         keys: &SessionKeys,
@@ -336,9 +498,15 @@ impl LocalStore {
     ) -> Result<String> {
         use rusqlite::OptionalExtension;
         let wire = if let Some(op) = op_id {
-            let tuple=self.connection.query_row("SELECT id,user,ciphertext,nonce,updated_at,deleted FROM sync_outbox WHERE op_id=?1",[op],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?))).optional()?;
+            let tuple=self.connection.query_row("SELECT id,user,ciphertext,nonce,updated_at,deleted FROM sync_outbox WHERE op_id=?1
+                UNION ALL SELECT id,json_extract(wire,'$.user'),json_extract(wire,'$.ciphertext'),json_extract(wire,'$.nonce'),
+                    json_extract(wire,'$.updated_at'),json_extract(wire,'$.deleted')
+                FROM sync_remote_heads WHERE op_id=?1 AND wire<>''
+                UNION ALL SELECT id,json_extract(wire,'$.user'),json_extract(wire,'$.ciphertext'),json_extract(wire,'$.nonce'),
+                    json_extract(wire,'$.updated_at'),json_extract(wire,'$.deleted')
+                FROM sync_inbox WHERE op_id=?1 LIMIT 1",[op],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?))).optional()?;
             let Some((id, user, ciphertext, nonce, updated_at, deleted)) = tuple else {
-                bail!("local operation not found");
+                bail!(SyncVersionNotFound);
             };
             serde_json::to_string(&StoredMemory {
                 id,
@@ -355,14 +523,14 @@ impl LocalStore {
             })?;
             self.connection
                 .query_row(
-                    "SELECT wire FROM sync_inbox WHERE epoch=?1 AND rev=?2",
+                    "SELECT wire FROM sync_inbox WHERE epoch=?1 AND rev=?2
+                    UNION ALL SELECT wire FROM sync_remote_heads WHERE rev=?2 AND wire<>''
+                        AND ?1=(SELECT value FROM meta WHERE key='sync_v2_epoch') LIMIT 1",
                     params![epoch, rev],
                     |r| r.get::<_, String>(0),
                 )
                 .optional()?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("version not found; try sync-history --remote first")
-                })?
+                .ok_or_else(|| anyhow::anyhow!(SyncVersionNotFound))?
         } else {
             bail!("--op-id or --rev required");
         };
@@ -379,6 +547,11 @@ impl LocalStore {
         if let (Some(epoch), Some(rev)) = (epoch, rev) {
             self.track_restoration(epoch, rev, &b.id, "restore")?;
         }
+        self.connection.execute(
+            "DELETE FROM sync_inbox WHERE status='reset_saved'
+                AND ((?1 IS NOT NULL AND op_id=?1) OR (epoch=?2 AND rev=?3))",
+            params![op_id, epoch, rev],
+        )?;
         tx.commit()?;
         Ok(b.id)
     }
@@ -431,11 +604,14 @@ mod tests {
         )?;
         s.begin_sync_epoch("e")?;
         s.apply_page(&keys, &page(1, stored), false)?;
+        s.maintain_sync_storage()?;
         s.reset_sync_snapshot()?;
+        s.maintain_sync_storage()?;
         s.begin_sync_epoch("new")?;
         let mut new_page = page(1, tomb("entry", "2026-09-19T00:00:00.002Z"));
         new_page.epoch = "new".into();
         s.apply_page(&keys, &new_page, false)?;
+        s.maintain_sync_storage()?;
         assert!(s.restore_sync_version(&keys, None, Some(1), None).is_err());
         assert_eq!(
             s.restore_sync_version(&keys, None, Some(1), Some("e"))?,
@@ -497,9 +673,24 @@ mod tests {
             remaining[0].parent_op_id.as_deref(),
             Some(first[0].op_id.as_str())
         );
+        s.maintain_sync_storage()?;
+        assert_eq!(s.sync_history(None)?.len(), 2);
         drop(s);
         let reopened = LocalStore::open(&path)?;
         assert_eq!(reopened.outgoing()?[0].op_id, remaining[0].op_id);
+        reopened.acknowledge(
+            &remaining,
+            &[Receipt {
+                op_id: remaining[0].op_id.clone(),
+                status: "applied".into(),
+                stored_rev: 2,
+                head_rev: 2,
+            }],
+            false,
+        )?;
+        reopened.maintain_sync_storage()?;
+        assert!(reopened.outgoing()?.is_empty());
+        assert!(reopened.sync_history(None)?.is_empty());
         Ok(())
     }
 
@@ -572,7 +763,8 @@ mod tests {
     #[test]
     fn index_update_is_local_and_reset_keeps_pending_history() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let s = LocalStore::open(&dir.path().join("a.db"))?;
+        let path = dir.path().join("a.db");
+        let s = LocalStore::open(&path)?;
         let mut b = tomb("a", "2026-09-19T00:00:00.001Z");
         b.deleted = false;
         b.ciphertext = "source".into();
@@ -588,6 +780,80 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_ne!(pending[0].op_id, op);
         assert!(s.sync_history(None)?.len() >= 2);
+
+        let keys = SessionKeys::from_urk([9; 32])?;
+        let mut remote = page(1, tomb("remote", "2026-09-19T00:00:00.001Z"));
+        remote.epoch = "new".into();
+        s.apply_page(&keys, &remote, false)?;
+        let expected_memories = serde_json::to_string(&s.all(true)?)?;
+        let expected_pending = serde_json::to_string(&pending)?;
+        let expected_revision = s.meta_get("memory_revision_v1")?;
+        s.connection.execute_batch(
+            "ALTER TABLE sync_remote_heads RENAME TO previous_heads;
+            CREATE TABLE sync_remote_heads(id TEXT PRIMARY KEY,rev INTEGER NOT NULL);
+            INSERT INTO sync_remote_heads SELECT id,rev FROM previous_heads;
+            DROP TABLE previous_heads;
+            WITH RECURSIVE versions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM versions WHERE n<1200)
+            INSERT INTO sync_inbox(epoch,rev,id,status,wire)
+                SELECT 'new',n+10,'history','applied',hex(zeroblob(8192)) FROM versions;
+            WITH RECURSIVE versions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM versions WHERE n<1200)
+            INSERT INTO sync_outbox(op_id,id,user,ciphertext,nonce,updated_at,deleted,state)
+                SELECT 'confirmed-'||n,'history','',hex(zeroblob(8192)),'','old',0,'applied' FROM versions;
+            INSERT INTO sync_inbox(epoch,rev,id,status,wire)
+                VALUES('new',2,'conflict','conflict_saved','{}'),
+                      ('new',3,'processed','conflict_saved','{}');
+            INSERT INTO sync_inbox(epoch,rev,id,status,wire,decode_error)
+                VALUES('new',4,'undecodable','applied','{}','key unavailable');
+            INSERT INTO sync_resolutions(epoch,conflict_rev,seq,id,action,head_rev,processed_at)
+                VALUES('new',3,1,'processed','keep_current',1,'now');
+            PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+        let read_only = LocalStore::open_read_only(&path)?;
+        assert_eq!(read_only.sync_history(Some("remote"))?.len(), 1);
+        drop(read_only);
+        let before = std::fs::metadata(&path)?.len();
+        drop(s);
+        let reader = rusqlite::Connection::open(&path)?;
+        reader.execute_batch("BEGIN; SELECT count(*) FROM memories;")?;
+        let reopened = LocalStore::open(&path)?;
+        assert!(std::fs::metadata(&path)?.len() >= before / 2);
+        reader.execute_batch("ROLLBACK")?;
+        drop(reader);
+        reopened.maintain_sync_storage()?;
+        assert!(std::fs::metadata(&path)?.len() < before / 2);
+        assert_eq!(
+            serde_json::to_string(&reopened.all(true)?)?,
+            expected_memories
+        );
+        assert_eq!(
+            serde_json::to_string(&reopened.outgoing()?)?,
+            expected_pending
+        );
+        assert_eq!(reopened.meta_get("memory_revision_v1")?, expected_revision);
+        assert_eq!(reopened.sync_counts()?, (1, 1, 1));
+        assert_eq!(reopened.conflict_metrics()?, (2, 1, 0, 0));
+        assert_eq!(reopened.meta_get("sync_v2_cursor")?.as_deref(), Some("1"));
+        let retained: i64 =
+            reopened
+                .connection
+                .query_row("SELECT count(*) FROM sync_inbox", [], |r| r.get(0))?;
+        assert_eq!(retained, 2);
+        let head: String = reopened.connection.query_row(
+            "SELECT wire FROM sync_remote_heads WHERE id='remote'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(head, serde_json::to_string(&remote.changes[0].blob)?);
+        assert!(reopened
+            .sync_history(Some("remote"))?
+            .iter()
+            .any(|row| row["rev"] == 1));
+        reopened.maintain_sync_storage()?;
+        assert_eq!(
+            serde_json::to_string(&reopened.outgoing()?)?,
+            expected_pending
+        );
+        assert_eq!(reopened.meta_get("memory_revision_v1")?, expected_revision);
         Ok(())
     }
 

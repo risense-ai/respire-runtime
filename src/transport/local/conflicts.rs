@@ -1,4 +1,4 @@
-//! Recognition and user decisions are separate from immutable content history.
+//! Current remote state, unresolved candidates and small resolution receipts.
 use super::LocalStore;
 use crate::transport::protocol::*;
 use crate::{MemoryEngine, SessionKeys, StoredMemory};
@@ -7,7 +7,7 @@ use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
 impl LocalStore {
     fn conflict_head(&self, epoch: &str, id: &str) -> Result<Option<(i64, StoredMemory)>> {
-        let row=self.connection.query_row("SELECT h.rev,i.wire FROM sync_remote_heads h JOIN sync_inbox i ON i.epoch=?1 AND i.id=h.id AND i.rev=h.rev WHERE h.id=?2",
+        let row=self.connection.query_row("SELECT h.rev,h.wire FROM sync_remote_heads h WHERE h.id=?2 AND h.wire<>'' AND ?1=(SELECT value FROM meta WHERE key='sync_v2_epoch')",
             params![epoch,id],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?))).optional()?;
         row.map(|(rev, wire)| Ok((rev, serde_json::from_str(&wire)?)))
             .transpose()
@@ -301,12 +301,22 @@ impl LocalStore {
     pub fn conflict_metrics(&self) -> Result<(i64, i64, i64, i64)> {
         let epoch = self.meta_get("sync_v2_epoch")?.unwrap_or_default();
         let total: i64 = self.connection.query_row(
-            "SELECT count(*) FROM sync_inbox WHERE status IN ('conflict_saved','legacy_rejected')",
-            [],
+            "SELECT (SELECT count(*) FROM sync_inbox i
+                WHERE i.status IN ('conflict_saved','legacy_rejected') AND NOT EXISTS(
+                    SELECT 1 FROM sync_resolutions r WHERE r.epoch=i.epoch AND r.conflict_rev=i.rev))
+                + (SELECT count(*) FROM sync_resolutions)", [], |r| r.get(0),
+        )?;
+        let processed: i64 = self.connection.query_row(
+            "SELECT count(*) FROM sync_resolutions WHERE epoch=?1",
+            [&epoch],
             |r| r.get(0),
         )?;
-        let processed:i64=self.connection.query_row("SELECT count(*) FROM sync_inbox i JOIN sync_resolutions r ON r.epoch=i.epoch AND r.conflict_rev=i.rev WHERE i.epoch=?1 AND i.status IN ('conflict_saved','legacy_rejected')",[&epoch],|r|r.get(0))?;
-        let old:i64=self.connection.query_row("SELECT count(*) FROM sync_inbox WHERE epoch<>?1 AND status IN ('conflict_saved','legacy_rejected')",[&epoch],|r|r.get(0))?;
+        let old: i64 = self.connection.query_row(
+            "SELECT (SELECT count(*) FROM sync_inbox i WHERE i.epoch<>?1
+                AND i.status IN ('conflict_saved','legacy_rejected') AND NOT EXISTS(
+                    SELECT 1 FROM sync_resolutions r WHERE r.epoch=i.epoch AND r.conflict_rev=i.rev))
+                + (SELECT count(*) FROM sync_resolutions WHERE epoch<>?1)", [&epoch], |r| r.get(0),
+        )?;
         let resolving: i64 = self.connection.query_row(
             "SELECT count(*) FROM sync_resolution_outbox WHERE epoch=?1",
             [&epoch],
@@ -381,6 +391,32 @@ impl LocalStore {
             result.push(serde_json::json!({"epoch":scope,"rev":rev,"id":id,"original_status":status,"kind":kind,"reason":reason,
                 "state":state,"resolution":processed,"queued_action":queued,"candidate":describe(&candidate),
                 "current":head.map(|(rev,b)|serde_json::json!({"rev":rev,"value":describe(&b)}))}));
+        }
+        if include_processed {
+            let mut stmt = self.connection.prepare(
+                "SELECT r.epoch,r.conflict_rev,r.id,r.action FROM sync_resolutions r
+                WHERE (?1 IS NULL OR r.id=?1) AND NOT EXISTS(
+                    SELECT 1 FROM sync_inbox i WHERE i.epoch=r.epoch AND i.rev=r.conflict_rev)
+                ORDER BY r.conflict_rev DESC LIMIT 200",
+            )?;
+            for row in stmt.query_map([id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })? {
+                let (scope, rev, id, action) = row?;
+                result.push(serde_json::json!({
+                    "epoch":scope, "rev":rev, "id":id,
+                    "state":if scope == epoch { "processed" } else { "historical_epoch" },
+                    "resolution":action, "candidate":null, "current":null,
+                    "payload_reclaimed":true
+                }));
+            }
+            result.sort_by_key(|row| std::cmp::Reverse(row["rev"].as_i64()));
+            result.truncate(200);
         }
         Ok(result)
     }
@@ -481,8 +517,13 @@ mod tests {
             has_more: false,
             resolutions: vec![record],
         })?;
+        store.maintain_sync_storage()?;
         assert_eq!(store.sync_counts()?.1, 1);
         assert_eq!(store.conflict_metrics()?, (2, 1, 0, 0));
+        let all = store.list_conflicts(&keys, None, true)?;
+        assert!(all
+            .iter()
+            .any(|row| row["rev"] == 1 && row["payload_reclaimed"] == true));
         let pending = store.list_conflicts(&keys, None, false)?;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0]["kind"], "needs_review");
@@ -521,6 +562,7 @@ mod tests {
             }],
             false,
         )?;
+        store.maintain_sync_storage()?;
         let decisions = store.outgoing_resolutions()?;
         assert_eq!(decisions.len(), 1);
         store.acknowledge_resolutions(

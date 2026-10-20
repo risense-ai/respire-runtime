@@ -26,6 +26,7 @@ pub use revision::read_memory_revision;
 mod sync;
 pub use grants::AccessGrant;
 pub use retrieval::IndexSourceChanged;
+pub use sync::SyncVersionNotFound;
 
 /// Query-log row (query-log command output). candidates=search candidates; adopted=used on a write (weak signal);
 /// good/bad=model self-grade (main post-train signal: useful / misleading).
@@ -92,7 +93,10 @@ impl LocalStore {
         migrate(&connection)?;
         connection.execute_batch(include_str!("local/sync_schema.sql"))?;
         connection.execute_batch(include_str!("local/resident_schema.sql"))?;
-        Ok(Self { connection })
+        let store = Self { connection };
+        store.initialize_sync_storage()?;
+        store.maintain_sync_storage()?;
+        Ok(store)
     }
 
     /// Connect to a library already initialized by its runtime owner, without recovery writes.
