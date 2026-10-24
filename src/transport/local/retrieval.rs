@@ -177,8 +177,15 @@ impl LocalStore {
             if let Some(artifact) = artifact {
                 if respire_core_sdk::index_ready(&[artifact])? { continue; }
             }
+            let t_open = std::time::Instant::now();
             let entry = crate::memory::MemoryEngine::open(keys, stored)?;
+            let open_ms = t_open.elapsed().as_millis();
+            let t_prep = std::time::Instant::now();
             let prepared = embedder.prepare(&entry)?;
+            let prep_ms = t_prep.elapsed().as_millis();
+            if std::env::var("RSRS_REBUILD_TRACE").as_deref() == Ok("1") {
+                eprintln!("[rebuild] {}/{} chars={} art={}B open={}ms prepare={}ms", index + 1, candidates.len(), entry.content.chars().count(), prepared.artifact.len(), open_ms, prep_ms);
+            }
             progress(index, candidates.len())?;
             let mut derived = stored.clone();
             derived.local_artifact = prepared.artifact;
