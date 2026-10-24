@@ -11,6 +11,16 @@ use std::time::{Duration, Instant};
 const HEARTBEAT_LIMIT: Duration = Duration::from_secs(10);
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 // Load + native queue + execution budgets, plus cancellation grace.
+/// Maintenance ops (full index rebuild) may need far more than the default;
+/// `RSRS_CORE_CALL_LIMIT_SECS` overrides per process without changing the default.
+fn call_limit() -> Duration {
+    std::env::var("RSRS_CORE_CALL_LIMIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(CALL_LIMIT)
+}
 #[cfg(not(feature = "native-fault-tests"))]
 const CALL_LIMIT: Duration = Duration::from_secs(365);
 #[cfg(feature = "native-fault-tests")]
@@ -399,7 +409,7 @@ fn process() -> Result<Arc<Process>> {
             let expired = match supervisor.pending.lock() {
                 Ok(pending) => pending
                     .values()
-                    .any(|pending| pending.started.elapsed() >= CALL_LIMIT),
+                    .any(|pending| pending.started.elapsed() >= call_limit()),
                 Err(_) => true,
             };
             let reason = if expired {
