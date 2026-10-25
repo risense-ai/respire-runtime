@@ -5,6 +5,8 @@
 
 pub mod env;
 mod host;
+mod feedback_contract;
+pub use host::{query_settings_from_env,feedback_enabled};
 mod cpu_model;
 pub mod worker;
 #[cfg(windows)]
@@ -23,6 +25,8 @@ mod resident;
 pub use resident::{ResidentLease, ResidentScope, resident_scope_active, BackgroundIndexScope, defer_indexing, indexing_deferred};
 
 pub const ABI_VERSION: u32 = 0x0001_0002;
+/// Capability read from the pinned, verified SDK manifest.
+pub const FEEDBACK_CONTRACT:u64=include!(concat!(env!("OUT_DIR"),"/feedback_contract.rs"));
 
 /// Runtime libraries from the checksum-verified, pinned SDK manifest.
 pub const RUNTIME_FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
@@ -52,6 +56,7 @@ pub struct Core {
     handle: ffi::Handle,
     next_request: u64,
     poisoned: bool,
+    native_feedback_contract:Option<u64>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -61,13 +66,21 @@ impl Core {
         if version != ABI_VERSION {
             bail!("Core ABI mismatch: {version:#x}");
         }
-        Ok(Self {
+        let mut core=Self {
             handle: ffi::Handle::create(&serde_json::to_vec(&json!({"test_mode":
                 env::var("RSRS_CORE_TEST_MODE").as_deref() == Ok("1")}))?)?,
             next_request: 0,
             poisoned: false,
+            native_feedback_contract:None,
             _thread_bound: PhantomData,
-        })
+        };
+        // No request payload is live while probing the linked library. Cache
+        // only this handle's immutable native capability, never feedback counts.
+        if FEEDBACK_CONTRACT==1 {
+            let capabilities=core.capabilities()?;
+            core.native_feedback_contract=capabilities.get("feedback_contract").and_then(Value::as_u64);
+        }
+        Ok(core)
     }
 
     pub fn call(&mut self, operation: &str, payload: Value) -> Result<Value> {
@@ -84,6 +97,9 @@ impl Core {
         transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<Value> {
         if self.poisoned {
             bail!("Core handle is poisoned; recreate it");
+        }
+        if feedback_contract::validate(&payload,Some(FEEDBACK_CONTRACT))? {
+            feedback_contract::require(self.native_feedback_contract)?;
         }
         self.next_request = self
             .next_request
@@ -199,6 +215,23 @@ impl Drop for ModelInput<'_> {
 #[cfg(test)]
 mod core_wire_tests {
     use super::*;
+
+    #[test]
+    fn explicit_feedback_cannot_bypass_old_sdk_checks_in_public_call_paths()->Result<()> {
+        if FEEDBACK_CONTRACT==1{return Ok(());} // New-SDK actual scoring is verified separately.
+        let payload=json!({"query_settings":{"feedback":{"enabled":true}},"model":"m3","snapshots":[],"query":{"text":"synthetic","limit":1},"mode":"scored"});
+        let mut core=Core::new()?;
+        let direct=core.call("query",payload.clone()).err().context("old native SDK accepted feedback")?;
+        assert!(direct.to_string().contains("feedback contract 1"));
+        let high=execute::<Value>("query",payload.clone()).err().context("high-level execute accepted feedback")?;
+        assert!(high.to_string().contains("feedback contract 1"));
+        let mut calls=0;let mut transport=|_:&Value|->Result<Value>{calls+=1;Ok(Value::Null)};
+        let transport_error=core.call_with_transport("query_business",payload,&mut transport).err().context("transport path accepted feedback")?;
+        assert!(transport_error.to_string().contains("feedback contract 1"));assert_eq!(calls,0);
+        let disabled=core.call("capabilities",json!({"query_settings":{"feedback":{"enabled":false}}}))?;
+        assert_eq!(disabled["abi_version"].as_u64(),Some(ABI_VERSION as u64));
+        Ok(())
+    }
 
     #[test]
     fn borrowed_request_and_moved_result_preserve_protocol() -> Result<()> {

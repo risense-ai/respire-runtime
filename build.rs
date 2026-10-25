@@ -121,6 +121,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Cargo does not stage SDK runtime dependencies next to executables.
     // OUT_DIR is <profile>/build/<package>/out; tests also run in <profile>/deps.
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("missing OUT_DIR")?);
+    fs::write(out.join("feedback_contract.rs"),manifest["feedback_contract"].as_u64().unwrap_or(0).to_string())?;
     let profile = out
         .parent()
         .and_then(|path| path.parent())

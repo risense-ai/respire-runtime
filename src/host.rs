@@ -140,27 +140,10 @@ fn explicit_setting<T: std::str::FromStr + serde::Serialize>(
 }
 
 pub(crate) fn request_settings(payload: &mut Value) -> Result<()> {
+    crate::feedback_contract::validate(payload,Some(crate::FEEDBACK_CONTRACT))?;
     if let Some(fields) = payload.as_object_mut() {
         if !fields.contains_key("query_settings") {
-            let mut settings = serde_json::Map::new();
-            match crate::env::var("RSRS_ROUTE") {
-                Ok(value) => { settings.insert("route_on".to_owned(), json!(value != "0")); }
-                Err(std::env::VarError::NotPresent) => {}
-                Err(error) => return Err(error.into()),
-            }
-            match crate::env::var("RSRS_ABLATE") {
-                Ok(value) => { settings.insert("ablate".to_owned(), json!(value)); }
-                Err(std::env::VarError::NotPresent) => {}
-                Err(error) => return Err(error.into()),
-            }
-            explicit_setting::<f32>(&mut settings, "recall_min_score", "RSRS_RECALL_MIN_SCORE")?;
-            explicit_setting::<f32>(&mut settings, "mmr_lambda", "RSRS_MMR_LAMBDA")?;
-            explicit_setting::<usize>(&mut settings, "ancestor_budget", "RSRS_ANCESTOR_BUDGET")?;
-            explicit_setting::<usize>(
-                &mut settings,
-                "ancestor_root_floor",
-                "RSRS_ANCESTOR_ROOT_FLOOR",
-            )?;
+            let settings=query_settings_from_env()?;
             fields.insert("query_settings".to_owned(), Value::Object(settings));
         }
         if !fields.contains_key("related_settings") {
@@ -411,4 +394,43 @@ mod stream_tests {
         assert!(stream_model(&mut Broken, source.len(), |_| Ok(())).is_err());
         Ok(())
     }
+}
+
+/// Strict host opt-in; compatibility environment aliases are handled by env::var.
+pub fn feedback_enabled()->Result<bool> { feedback_switch("RSRS_FEEDBACK",false) }
+fn feedback_switch(name:&str,default:bool)->Result<bool> {
+    match crate::env::var(name) {
+        Ok(value)=>match value.trim(){"1"=>Ok(true),"0"=>Ok(false),_=>anyhow::bail!("{name} must be 0 or 1")},
+        Err(std::env::VarError::NotPresent)=>Ok(default),Err(error)=>Err(error.into()),
+    }
+}
+
+/// Host environment defaults, copied into each immutable request.
+pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
+    let mut settings = serde_json::Map::new();
+    if feedback_enabled()? {
+        anyhow::ensure!(crate::FEEDBACK_CONTRACT==1,"enabled feedback requires Core SDK feedback contract 1; install the paired SDK/CLI version");
+        // Non-recall ranking callers still remove read heat. Recall paths
+        // explicitly replace these neutral counts with their authorized context.
+        settings.insert("feedback".into(),json!({"enabled":true,"good":{},"bad":{},"bad_penalty":feedback_switch("RSRS_BAD_PENALTY",true)?}));
+    }
+    match crate::env::var("RSRS_ROUTE") {
+        Ok(value) => { settings.insert("route_on".to_owned(), json!(value != "0")); }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
+    match crate::env::var("RSRS_ABLATE") {
+        Ok(value) => { settings.insert("ablate".to_owned(), json!(value)); }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
+    explicit_setting::<f32>(&mut settings, "recall_min_score", "RSRS_RECALL_MIN_SCORE")?;
+    explicit_setting::<f32>(&mut settings, "mmr_lambda", "RSRS_MMR_LAMBDA")?;
+    explicit_setting::<usize>(&mut settings, "ancestor_budget", "RSRS_ANCESTOR_BUDGET")?;
+    explicit_setting::<usize>(
+        &mut settings,
+        "ancestor_root_floor",
+        "RSRS_ANCESTOR_ROOT_FLOOR",
+    )?;
+    Ok(settings)
 }
