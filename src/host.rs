@@ -239,6 +239,10 @@ fn model_file_metadata(path: &std::path::Path, custom_cpu_file: bool) -> Result<
 }
 
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
+    let background_intra_threads = crate::inference_policy::background_threads(
+        crate::env::var("RSRS_INTRA_THREADS").ok().as_deref(),
+        std::thread::available_parallelism().map_or(2, |cores| cores.get()),
+    )?;
     let directory = crate::bge::resolve_model_dir()?;
     let engine = crate::onnx::configured_engine()?;
     let cpu_owned_experiment = crate::bge::cpu_owned_mode(engine)?;
@@ -258,7 +262,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     };
     let legacy_options_id = digest(
         format!(
-            "{:?}:{:?}",
+            "{:?}:{:?}:{background_intra_threads}",
             crate::env::var_os("RSRS_ORT_PROFILE"),
             if cfg!(windows) && engine != crate::onnx::Engine::Cpu {
                 Some(crate::onnx::host_cache_dir())
@@ -285,7 +289,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let mut loaded = model_cache()?;
     if let Some(existing) = loaded.as_ref().filter(|existing| existing.stamp == stamp) {
         let mut request = json!({"model":"m3", "asset_id":existing.asset_id,"engine":engine,
-            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":true});
+            "execution_timeout_secs":120,"background_intra_threads":background_intra_threads,"session_options_id":session_options_id,"reuse_current":true});
         if cpu_owned_experiment { request["cpu_owned_ort_experiment"] = json!(true); }
         let reused = core.load_model(request, &[], &[]);
         if reused.is_ok() { return Ok(()); }
@@ -308,7 +312,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         drop(file);
         let asset_id = format!("{MODEL_HASH}:{tokenizer_hash}");
         let request = json!({"model":"m3", "asset_id":asset_id,"engine":engine,
-            "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":false,"cpu_owned_ort_experiment":true});
+            "execution_timeout_secs":120,"background_intra_threads":background_intra_threads,"session_options_id":session_options_id,"reuse_current":false,"cpu_owned_ort_experiment":true});
         *loaded = None;
         *PROVIDER_DIAGNOSTICS.lock().map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? = Vec::new();
         input.commit(request, &tokenizer)?;
@@ -352,7 +356,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     // leaves no usable canonical group; never preserve an apparently live stamp.
     *loaded = None;
     let mut request = json!({"model":"m3", "asset_id":asset_id,"engine":engine,
-        "execution_timeout_secs":120,"session_options_id":session_options_id,"reuse_current":false});
+        "execution_timeout_secs":120,"background_intra_threads":background_intra_threads,"session_options_id":session_options_id,"reuse_current":false});
     if cpu_owned_experiment { request["cpu_owned_ort_experiment"] = json!(true); }
     let loaded_model = core.load_model(request, &model, &tokenizer);
     if registration_errors.is_empty() {

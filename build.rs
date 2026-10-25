@@ -20,11 +20,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_path = directory.join("manifest.json");
     let manifest_bytes = fs::read(&manifest_path)?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
-    if manifest.get("test_only").is_some() && env::var_os("CARGO_FEATURE_NATIVE_FAULT_TESTS").is_none() {
+    if manifest.get("test_only").is_some()
+        && env::var_os("CARGO_FEATURE_NATIVE_FAULT_TESTS").is_none()
+    {
         return Err("Test-only SDK requires the non-default native-fault-tests feature".into());
     }
     if manifest["association_contract"].as_u64() != Some(1) {
         return Err("Core SDK lacks association contract 1; rebuild and pin a matching SDK".into());
+    }
+    if manifest["inference_thread_contract"].as_u64() != Some(1) {
+        return Err("Core SDK lacks inference thread contract 1; pin an SDK with isolated foreground/background configuration".into());
     }
     println!("cargo:rustc-check-cfg=cfg(model_input_stream_contract)");
     if env::var_os("CARGO_FEATURE_MODEL_INPUT_STREAM_EXPERIMENT").is_some() {
@@ -34,8 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("cargo:rustc-cfg=model_input_stream_contract");
     }
     let target = env::var("TARGET")?;
-    let lock_path =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");
+    let lock_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");
     let lock: Value = serde_json::from_slice(&fs::read(&lock_path)?)?;
     let locked_hash = lock["targets"][&target]["manifest_sha256"]
         .as_str()
@@ -122,22 +126,54 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|path| path.parent())
         .and_then(|path| path.parent())
         .ok_or("unexpected Cargo output directory")?;
+    let mut runtime_files = Vec::new();
     for file in files {
         let relative = file["path"].as_str().ok_or("missing SDK file path")?;
         if let Some(name) = relative.strip_prefix("runtime/") {
             if name.contains('/') {
                 return Err("runtime libraries must be flat".into());
             }
+            runtime_files.push((
+                name.to_owned(),
+                file["sha256"]
+                    .as_str()
+                    .ok_or("missing runtime checksum")?
+                    .to_owned(),
+            ));
             for destination in [profile.to_path_buf(), profile.join("deps")] {
                 fs::create_dir_all(&destination)?;
-                fs::copy(directory.join(relative), destination.join(name))?;
+                let installed = destination.join(name);
+                if fs::read(&installed).is_ok_and(|bytes| {
+                    hex::encode(Sha256::digest(bytes))
+                        == file["sha256"].as_str().unwrap_or_default()
+                }) {
+                    continue;
+                }
+                // Never truncate a library that a concurrently running test or
+                // example has mapped. Install a new inode atomically instead.
+                let temporary = destination.join(format!(".{name}.{}.tmp", std::process::id()));
+                fs::copy(directory.join(relative), &temporary)?;
+                if let Err(error) = fs::rename(&temporary, &installed) {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error.into());
+                }
             }
         }
     }
+    fs::write(out.join("runtime_files.rs"), format!("&{runtime_files:?}"))?;
     println!(
         "cargo:rustc-link-search=native={}",
         directory.join("lib").display()
     );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        directory.join("runtime").display()
+    );
+    if target.ends_with("-linux-gnu") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    } else if target.contains("apple-darwin") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+    }
     println!("cargo:rustc-link-lib=static=respire_core_ffi");
     if target.contains("apple-darwin")
         && manifest["native_libraries"]
