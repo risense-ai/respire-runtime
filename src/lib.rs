@@ -8,6 +8,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+pub mod durable;
 mod confinement;
 pub use confinement::is_restricted;
 
