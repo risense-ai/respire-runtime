@@ -15,6 +15,10 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
 
+mod feedback;
+pub use feedback::FeedbackCounts;
+mod witness;
+pub use witness::{WitnessReport,witness_checkpoint_file,register_witness_functions};
 mod conflicts;
 mod grants;
 mod retrieval;
@@ -32,6 +36,7 @@ pub use sync::SyncVersionNotFound;
 /// good/bad=model self-grade (main post-train signal: useful / misleading).
 #[derive(serde::Serialize)]
 pub struct QueryLogRow {
+    pub request_id:Option<String>,
     pub id: i64,
     pub ts: String,
     pub query: String,
@@ -111,6 +116,7 @@ impl LocalStore {
         .with_context(|| {
             format!("failed to open initialized local memory db: {}", path.display())
         })?;
+        witness::register_witness_functions(&connection)?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
         connection
             .prepare("SELECT seq, op_id, state FROM sync_outbox LIMIT 0")
@@ -128,6 +134,7 @@ impl LocalStore {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ).with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
         connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        witness::register_witness_functions(&connection)?;
         Ok(Self { connection })
     }
 
@@ -502,57 +509,29 @@ impl LocalStore {
     /// Returns ids that matched no candidate (caller warns).
     pub fn mark_verdict(&self, ids: &[String], good: bool) -> Result<Vec<String>> {
         let cutoff = chrono::Utc::now().timestamp() - 600;
-        let rows: Vec<(i64, String, String, String)> = {
-            let mut stmt = self.connection.prepare(
-                "SELECT id, candidates, good_ids, bad_ids FROM query_log WHERE ts_unix >= ?1 ORDER BY id DESC LIMIT 20",
-            )?;
-            let it = stmt.query_map(params![cutoff], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?;
-            it.collect::<rusqlite::Result<Vec<_>>>()?
+        let rows:Vec<(i64,String)>= {
+            let mut statement=self.connection.prepare("SELECT id,candidates FROM query_log WHERE ts_unix>=?1 ORDER BY id DESC LIMIT 20")?;
+            let rows=statement.query_map([cutoff],|row|Ok((row.get(0)?,row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let mut unmatched: Vec<String> = ids.to_vec();
-        for (row_id, cands_json, good_json, bad_json) in rows {
-            if unmatched.is_empty() {
-                break;
-            }
-            let cands: Vec<String> = serde_json::from_str(&cands_json).unwrap_or_default();
-            let mut good_ids: Vec<String> = serde_json::from_str(&good_json).unwrap_or_default();
-            let mut bad_ids: Vec<String> = serde_json::from_str(&bad_json).unwrap_or_default();
-            let mut changed = false;
-            unmatched.retain(|short| {
-                let Some(full) = cands
-                    .iter()
-                    .find(|c| *c == short || c.starts_with(short.as_str()))
-                else {
-                    return true; // this row has no such candidate; id stays unmatched
-                };
-                // Re-grade: latest self-grade wins — write this side and remove from the other (bad then good = re-grade good)
-                let (tgt, other) = if good {
-                    (&mut good_ids, &mut bad_ids)
-                } else {
-                    (&mut bad_ids, &mut good_ids)
-                };
-                if !tgt.contains(full) {
-                    tgt.push(full.clone());
-                    changed = true;
-                }
-                if let Some(pos) = other.iter().position(|x| x == full) {
-                    other.remove(pos);
-                    changed = true;
-                }
-                false // matched; drop from unmatched
+        let mut unmatched=ids.to_vec();
+        for (row_id,encoded) in rows {
+            if unmatched.is_empty(){break;}
+            let candidates:Vec<String>=serde_json::from_str(&encoded)?;
+            let mut resolved=Vec::new();
+            unmatched.retain(|prefix|{
+                if let Some(id)=candidates.iter().find(|id|*id==prefix||id.starts_with(prefix.as_str())) {
+                    resolved.push(id.clone());false
+                }else{true}
             });
-            if changed {
-                self.connection.execute(
-                    "UPDATE query_log SET good_ids = ?2, bad_ids = ?3 WHERE id = ?1",
-                    params![
-                        row_id,
-                        serde_json::to_string(&good_ids)?,
-                        serde_json::to_string(&bad_ids)?
-                    ],
-                )?;
-            }
+            if resolved.is_empty(){continue;}
+            // Legacy selection stays compatible while disabled, but every
+            // accepted mark uses the same attributed event/mirror authority.
+            // Assign old rows an identity; concurrent assignments retain the
+            // first committed UUID rather than fabricating a second request.
+            self.connection.execute("UPDATE query_log SET request_id=COALESCE(request_id,?2) WHERE id=?1",params![row_id,uuid::Uuid::new_v4().to_string()])?;
+            let request_id:String=self.connection.query_row("SELECT request_id FROM query_log WHERE id=?1",[row_id],|row|row.get(0))?;
+            self.mark_query_feedback(&request_id,&resolved,good,"model")?;
         }
         Ok(unmatched)
     }
@@ -600,10 +579,11 @@ impl LocalStore {
     /// List recent query logs (newest first).
     pub fn query_log_rows(&self, limit: usize) -> Result<Vec<QueryLogRow>> {
         let mut stmt = self.connection.prepare(
-            "SELECT id, ts, query, project, scope, candidates, adopted, good_ids, bad_ids FROM query_log ORDER BY id DESC LIMIT ?1",
+            "SELECT id, ts, query, project, scope, candidates, adopted, good_ids, bad_ids, request_id FROM query_log ORDER BY id DESC LIMIT ?1",
         )?;
         let it = stmt.query_map(params![limit as i64], |r| {
             Ok(QueryLogRow {
+                request_id:r.get(9)?,
                 id: r.get(0)?,
                 ts: r.get(1)?,
                 query: r.get(2)?,
@@ -666,6 +646,28 @@ impl LocalStore {
             bad_total,
             top,
         })
+    }
+
+    pub fn verify_sqlite_integrity(&self)->Result<()> {
+        let value:String=self.connection.query_row("PRAGMA quick_check",[],|row|row.get(0))?;
+        anyhow::ensure!(value=="ok","runtime library integrity check failed");Ok(())
+    }
+    pub fn snapshot_quarantine_id(&self)->Result<Option<String>> {
+        let value:Option<String>=self.connection.query_row("SELECT value FROM meta WHERE key='snapshot_sync_quarantine_v1'",[],|row|row.get(0)).optional()?;
+        value.map(|value|{let parsed:serde_json::Value=serde_json::from_str(&value)?;
+            parsed["snapshot"].as_str().map(str::to_owned).ok_or_else(||anyhow::anyhow!("invalid snapshot quarantine identity"))}).transpose()
+    }
+
+    /// Unlike legacy best-effort meta lookups, this safety gate propagates every
+    /// SQLite error; unavailable quarantine metadata must never enable sync.
+    pub fn ensure_snapshot_sync_allowed(&self) -> Result<()> {
+        let quarantined: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='snapshot_sync_quarantine_v1')",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(!quarantined,"snapshot restore quarantined sync; compare differences before explicit snapshot resume-sync");
+        Ok(())
     }
 
     /// meta read/write (sync cursor etc.).
@@ -733,6 +735,7 @@ pub fn validate_migration_snapshot(path: &Path) -> Result<()> {
 /// Commit schema upgrades together; any unsupported format or SQL failure leaves
 /// the original tables and rows intact.
 fn migrate(connection: &Connection) -> Result<()> {
+    witness::register_witness_functions(connection)?;
     let transaction = connection.unchecked_transaction()?;
     migrate_schema(&transaction)?;
     transaction.execute_batch("CREATE TABLE IF NOT EXISTS recall_pairs(a TEXT NOT NULL,b TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(a,b),CHECK(a<b)); CREATE INDEX IF NOT EXISTS recall_pairs_b ON recall_pairs(b);")?;
@@ -961,6 +964,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         END;
         ",
     )?;
+    if !connection.prepare("PRAGMA table_info(query_log)")?.query_map([],|row|row.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name|name=="request_id") {
+        connection.execute_batch("ALTER TABLE query_log ADD COLUMN request_id TEXT;")?;
+    }
+    connection.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_query_request ON query_log(request_id) WHERE request_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS query_feedback(query_log_id INTEGER NOT NULL REFERENCES query_log(id),memory_id TEXT NOT NULL,good INTEGER NOT NULL CHECK(good IN(0,1)),source TEXT NOT NULL CHECK(source IN('human','model','task_outcome')),marked_at INTEGER NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(query_log_id,memory_id));")?;
+
     // query_log v1→v2: hit_ids/hit_scores renamed candidates/candidate_scores (candidates are not hits —
     // a hit is a model self-grade useful, in good_ids/bad_ids); old DBs add columns, new DBs already match and skip.
     let mut qcols: Vec<String> = connection
@@ -994,6 +1003,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         );",
     )?;
     connection.execute_batch(include_str!("local/revision_schema.sql"))?;
+    witness::install(connection)?;
     Ok(())
 }
 
