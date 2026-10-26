@@ -13,6 +13,11 @@ mod confinement;
 pub use confinement::is_restricted;
 
 #[cfg(windows)]
+mod process_identity;
+#[cfg(windows)]
+pub use process_identity::process_birth;
+
+#[cfg(windows)]
 mod winml;
 #[cfg(windows)]
 pub use winml::{install_accelerators, replace_provider_manifest};
