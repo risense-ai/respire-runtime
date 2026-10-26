@@ -317,13 +317,21 @@ impl LocalStore {
             if base != Some(head_rev) && !recovery {
                 bail!("current content is not applied; finish sync first");
             }
+            let mut stamp = self.edit_stamp(&candidate.id)?;
+            if recovery
+                && !super::super::compare_timestamps(&stamp, &current.updated_at)?.is_gt()
+            {
+                // The server requires both the inspected CAS revision and a
+                // monotonic timestamp. An undecodable head was not installed
+                // in memories, so the local edit clock alone can be behind it.
+                stamp = super::super::timestamp_after(Some(&current.updated_at))?;
+            }
             let mut selected = if action == "merge" {
                 current
             } else {
                 candidate
             };
             let deleted = selected.deleted && action == "take_incoming";
-            let stamp = self.edit_stamp(&selected.id)?;
             if selected.ciphertext.is_empty() {
                 if !deleted {
                     bail!("this version has no mergeable content");

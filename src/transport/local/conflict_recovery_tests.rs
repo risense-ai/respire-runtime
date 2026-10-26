@@ -1,6 +1,9 @@
 // 合成密文与临时数据库，不读取真实账号、记忆或 Runtime。
 fn unreadable_head(store: &LocalStore, keys: &SessionKeys) -> Result<()> {
-    let mut bad = sealed(keys, "not a real record", "2026-09-19T00:00:00.004Z")?;
+    unreadable_head_at(store, keys, "2026-09-19T00:00:00.004Z")
+}
+fn unreadable_head_at(store: &LocalStore, keys: &SessionKeys, stamp: &str) -> Result<()> {
+    let mut bad = sealed(keys, "not a real record", stamp)?;
     let (nonce, ciphertext) = keys.encrypt_content(r#"{"content":123}"#)?;
     bad.nonce = nonce;
     bad.ciphertext = ciphertext;
@@ -361,5 +364,21 @@ fn sync_unreadable_head_can_recover_on_a_fresh_client_without_an_applied_base() 
         .connection
         .query_row("SELECT count(*) FROM sync_base", [], |r| r.get(0))?;
     assert_eq!(count, 0);
+    Ok(())
+}
+
+#[test]
+fn sync_unreadable_future_head_recovery_advances_the_inspected_wire_timestamp() -> Result<()> {
+    let (_dir, store, keys) = fixture()?;
+    let head_stamp="2100-01-01T00:00:00.000Z";
+    unreadable_head_at(&store,&keys,head_stamp)?;
+    store.queue_conflict_resolution(&keys,"epoch",2,4,"take_incoming",None)?;
+    let operations=store.outgoing()?;
+    assert_eq!(operations.len(),1);
+    assert_eq!(operations[0].base_rev,Some(4));
+    assert!(crate::transport::compare_timestamps(&operations[0].blob.updated_at,head_stamp)?.is_gt());
+    assert_eq!(MemoryEngine::open(&keys,&operations[0].blob)?.content,"unique old edit");
+    store.queue_conflict_resolution(&keys,"epoch",2,4,"take_incoming",None)?;
+    assert_eq!(serde_json::to_value(store.outgoing()?)?,serde_json::to_value(operations)?);
     Ok(())
 }
