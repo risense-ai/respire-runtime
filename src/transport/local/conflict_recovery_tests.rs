@@ -266,20 +266,80 @@ fn sync_recovery_server_race_is_not_resolved_and_retry_does_not_duplicate() -> R
 
 #[test]
 fn sync_reset_invalidates_recovery_retry_without_recreating_operations() -> Result<()> {
-    let (_dir, store, keys) = fixture()?;
-    unreadable_head(&store, &keys)?;
-    store.queue_conflict_resolution(&keys, "epoch", 2, 4, "take_incoming", None)?;
-    store.reset_sync_snapshot()?;
-    store.begin_sync_epoch("epoch")?;
-    store.meta_set("sync_v2_resolution_support", "1")?;
-    let before = serde_json::to_value(store.outgoing()?)?;
-    assert!(store
-        .queue_conflict_resolution(&keys, "epoch", 2, 4, "take_incoming", None)
-        .unwrap_err()
-        .to_string()
-        .contains("invalidated"));
-    assert_eq!(serde_json::to_value(store.outgoing()?)?, before);
-    assert_eq!(store.processed_conflict_action("epoch", 2)?, None);
+    for acknowledged in [None, Some("applied"), Some("conflict_saved")] {
+        let (_dir, store, keys) = fixture()?;
+        unreadable_head(&store, &keys)?;
+        store.queue_conflict_resolution(&keys, "epoch", 2, 4, "take_incoming", None)?;
+        let operations = store.outgoing()?;
+        if let Some(status) = acknowledged {
+            store.acknowledge(
+                &operations,
+                &[Receipt {
+                    op_id: operations[0].op_id.clone(),
+                    status: status.into(),
+                    stored_rev: 5,
+                    head_rev: 5,
+                }],
+                false,
+            )?;
+        }
+        store.reset_sync_snapshot()?;
+        store.begin_sync_epoch("epoch")?;
+        store.meta_set("sync_v2_resolution_support", "1")?;
+        let before = serde_json::to_value(store.outgoing()?)?;
+        assert!(store
+            .queue_conflict_resolution(&keys, "epoch", 2, 4, "take_incoming", None)
+            .unwrap_err()
+            .to_string()
+            .contains("invalidated"));
+        assert_eq!(serde_json::to_value(store.outgoing()?)?, before);
+        assert_eq!(store.processed_conflict_action("epoch", 2)?, None);
+        assert!(
+            store.outgoing_resolutions()?.is_empty(),
+            "reset must not resend an old recovery decision"
+        );
+        if acknowledged.is_some() {
+            let wire: String = store.connection.query_row(
+                "SELECT wire FROM sync_inbox WHERE epoch='epoch' AND rev=4",
+                [],
+                |r| r.get(0),
+            )?;
+            let bad: StoredMemory = serde_json::from_str(&wire)?;
+            store.apply_page(
+                &keys,
+                &Page {
+                    epoch: "epoch".into(),
+                    until: 6,
+                    cursor: 6,
+                    has_more: false,
+                    total: 1,
+                    alive: 1,
+                    changes: vec![Change {
+                        rev: 6,
+                        status: "applied".into(),
+                        op_id: None,
+                        blob: bad,
+                    }],
+                },
+                false,
+            )?;
+            store.queue_conflict_resolution(&keys, "epoch", 2, 6, "take_incoming", None)?;
+            let fresh = store.outgoing()?;
+            assert_eq!(fresh.len(), 1);
+            assert_eq!(fresh[0].base_rev, Some(6));
+            assert_ne!(fresh[0].op_id, operations[0].op_id);
+            let prior: String = store.connection.query_row(
+                "SELECT state FROM sync_outbox WHERE op_id=?1",
+                [&operations[0].op_id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                Some(prior.as_str()),
+                acknowledged,
+                "reset preserves acknowledged operation history"
+            );
+        }
+    }
     Ok(())
 }
 

@@ -406,6 +406,15 @@ impl LocalStore {
     pub fn reset_sync_snapshot(&self) -> Result<()> {
         let tx = self.connection.unchecked_transaction()?;
         self.requeue_pending()?;
+        // A reset invalidates unconfirmed recovery decisions even when their
+        // content was already acknowledged. Keep operation/history and intent
+        // identities, but never resend or reuse their old resolution binding.
+        self.connection.execute(
+            "DELETE FROM sync_resolution_outbox AS r WHERE EXISTS(
+                SELECT 1 FROM sync_recovery_intents i WHERE i.epoch=r.epoch
+                AND i.conflict_rev=r.conflict_rev AND i.op_id=r.restore_op_id)",
+            [],
+        )?;
         // A server backup can replace current content; keep one recovery snapshot, not its edit history.
         self.connection.execute(
             "INSERT INTO sync_inbox(epoch,rev,id,status,op_id,wire,decode_error)
