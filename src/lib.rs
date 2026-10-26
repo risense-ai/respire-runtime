@@ -22,6 +22,17 @@ mod winml;
 #[cfg(windows)]
 pub use winml::{install_accelerators, replace_provider_manifest};
 
+/// Short-lived host service-manager clients must not retain the calling CLI's
+/// unrelated inheritable output handles on Windows or open a console window.
+pub fn spawn_host_control(command: &mut Command) -> io::Result<std::process::Child> {
+    #[cfg(windows)] {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, same user/token.
+        return without_inherited_stdio(|| command.spawn());
+    }
+    #[cfg(not(windows))] { command.spawn() }
+}
+
 pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
     spawn_runtime_with_boot_token(exe, None)
 }
