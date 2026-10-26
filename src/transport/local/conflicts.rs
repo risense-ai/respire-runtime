@@ -217,6 +217,8 @@ impl LocalStore {
         action: &str,
         content: Option<&str>,
     ) -> Result<()> {
+        // epoch 检查与读取 head、创建操作必须共享写锁，避免换库快照插入其间。
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         if self.meta_get("sync_v2_epoch")?.as_deref() != Some(epoch) {
             bail!("sync the current epoch first; older epoch versions can be restored with sync-restore");
         }
@@ -229,15 +231,16 @@ impl LocalStore {
         if (action == "merge") != content.is_some() {
             bail!("only merge needs --content");
         }
-        // Keep the inspected state and its resolution in one reserved write transaction.
-        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let processed: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sync_resolutions WHERE epoch=?1 AND conflict_rev=?2)",
             params![epoch, rev],
             |r| r.get(0),
         )?;
         if processed {
-            if action != "keep_current" {
+            if action != "keep_current"
+                && !(action == "take_incoming"
+                    && self.processed_conflict_action(epoch, rev)?.as_deref() == Some(action))
+            {
                 bail!("this record is already resolved and no new version was created; use update or sync-restore to change it again");
             }
             tx.commit()?;
@@ -245,6 +248,31 @@ impl LocalStore {
         }
         let wire:String=self.connection.query_row("SELECT wire FROM sync_inbox WHERE epoch=?1 AND rev=?2 AND status IN ('conflict_saved','legacy_rejected')",params![epoch,rev],|r|r.get(0))?;
         let candidate: StoredMemory = serde_json::from_str(&wire)?;
+        // 对同一候选和已审阅 head 的重试复用不可变操作。服务端拒绝后也不能
+        // 再造新 op_id，否则重复调用会不断累积 conflict_saved 历史。
+        if action == "take_incoming" {
+            let prior: Option<bool> = self
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sync_resolution_outbox r
+                    JOIN sync_outbox o ON o.op_id=r.restore_op_id
+                    WHERE r.epoch=i.epoch AND r.conflict_rev=i.conflict_rev
+                    AND r.restore_op_id=i.op_id AND r.action='take_incoming'
+                    AND o.state IN ('pending','applied','conflict_saved'))
+                 FROM sync_recovery_intents i
+                 WHERE i.epoch=?1 AND i.conflict_rev=?2 AND i.head_rev=?3",
+                    params![epoch, rev, inspected_head_rev],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(queued) = prior {
+                if !queued {
+                    bail!("this recovery was already attempted or invalidated by a sync reset; refresh sync-conflicts and inspect the new head before retrying");
+                }
+                tx.commit()?;
+                return Ok(());
+            }
+        }
         let (head_rev, current) = self
             .conflict_head(epoch, &candidate.id)?
             .ok_or_else(|| anyhow::anyhow!("sync the current version first"))?;
@@ -258,8 +286,12 @@ impl LocalStore {
                 ON CONFLICT(epoch,conflict_rev) DO UPDATE SET action=excluded.action,expected_head_rev=excluded.expected_head_rev,restore_op_id=NULL",params![epoch,rev,head_rev])?;
         } else {
             let pending: bool = self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE id=?1 AND state='pending')",
-                [&candidate.id],
+                "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE id=?1 AND state='pending')
+                    OR EXISTS(SELECT 1 FROM memories WHERE id=?1 AND dirty=1)
+                    OR EXISTS(SELECT 1 FROM sync_resolution_outbox r
+                        JOIN sync_outbox o ON o.op_id=r.restore_op_id WHERE r.epoch=?2 AND o.id=?1
+                        AND o.state IN ('pending','applied','conflict_saved'))",
+                params![candidate.id, epoch],
                 |r| r.get(0),
             )?;
             let base: Option<i64> = self
@@ -270,8 +302,20 @@ impl LocalStore {
                     |r| r.get(0),
                 )
                 .optional()?;
-            if pending || base != Some(head_rev) {
-                bail!("current content is not applied or still has pending local changes; finish sync first");
+            if pending {
+                bail!("current content still has pending local changes or a queued resolution; finish sync first");
+            }
+            let undecodable: bool = self.connection.query_row(
+                "SELECT decode_error<>'' FROM sync_remote_heads WHERE id=?1 AND rev=?2",
+                params![candidate.id, head_rev],
+                |r| r.get(0),
+            )?;
+            let recovery = undecodable && MemoryEngine::open(keys, &current).is_err();
+            if recovery && action != "take_incoming" {
+                bail!("current revision is undecodable; inspect a readable candidate and use take-incoming with its current head revision");
+            }
+            if base != Some(head_rev) && !recovery {
+                bail!("current content is not applied; finish sync first");
             }
             let mut selected = if action == "merge" {
                 current
@@ -293,6 +337,24 @@ impl LocalStore {
                 bail!("resolution version was not written");
             }
             self.track_restoration(epoch, rev, &selected.id, action)?;
+            if recovery {
+                // 仅在同一事务内修改尚未对外可见的新操作。sync_base 仍保留最后
+                // 真正应用的版本；服务端以用户审阅的 head 执行既有 CAS 校验。
+                let op_id: String = self.connection.query_row(
+                    "SELECT restore_op_id FROM sync_resolution_outbox WHERE epoch=?1 AND conflict_rev=?2",
+                    params![epoch, rev], |r| r.get(0),
+                )?;
+                let changed = self.connection.execute(
+                    "UPDATE sync_outbox SET base_rev=?1 WHERE op_id=?2 AND id=?3
+                        AND state='pending' AND parent_op_id IS NULL",
+                    params![head_rev, op_id, selected.id],
+                )?;
+                anyhow::ensure!(changed == 1, "recovery operation was not queued safely");
+                self.connection.execute(
+                    "INSERT INTO sync_recovery_intents(epoch,conflict_rev,head_rev,op_id) VALUES(?1,?2,?3,?4)",
+                    params![epoch, rev, head_rev, op_id],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -659,4 +721,5 @@ mod tests {
         assert_eq!(store.sync_counts()?.1, 2);
         Ok(())
     }
+    include!("conflict_recovery_tests.rs");
 }

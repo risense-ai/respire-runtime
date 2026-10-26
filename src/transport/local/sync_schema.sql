@@ -1,3 +1,9 @@
+-- 恢复请求的持久幂等键；只保存版本与操作标识，不保存正文或密钥。
+CREATE TABLE IF NOT EXISTS sync_recovery_intents (
+    epoch TEXT NOT NULL, conflict_rev INTEGER NOT NULL, head_rev INTEGER NOT NULL,
+    op_id TEXT NOT NULL,
+    PRIMARY KEY(epoch,conflict_rev,head_rev)
+);
 CREATE TABLE IF NOT EXISTS sync_base (id TEXT PRIMARY KEY, rev INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_remote_heads (
     id TEXT PRIMARY KEY, rev INTEGER NOT NULL,
