@@ -13,6 +13,11 @@ mod confinement;
 pub use confinement::is_restricted;
 
 #[cfg(windows)]
+mod supervisor_job;
+#[cfg(windows)]
+pub use supervisor_job::confine_supervisor_tree;
+
+#[cfg(windows)]
 mod process_identity;
 #[cfg(windows)]
 pub use process_identity::process_birth;
