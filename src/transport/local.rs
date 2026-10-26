@@ -7,6 +7,7 @@
 //! Supported TEXT-ID schemas retain their rows during upgrades. Historical
 //! INTEGER-ID demos use a different ciphertext format and require explicit export.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -62,6 +63,20 @@ pub struct QueryLogStats {
     pub bad_total: i64,
     /// Top adopted entries (id, count)
     pub top: Vec<(String, i64)>,
+}
+
+/// Run history for one procedure (skill/knowledge entry). Local-only.
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRunStats {
+    pub ok: i64,
+    pub fail: i64,
+    /// verdicts that attribute nothing (other changes interfered / no observable
+    /// effect): neither success nor failure, so ordering ignores them.
+    pub confounded: i64,
+    pub no_effect: i64,
+    /// ok | fail | confounded | no_effect | "" (never run)
+    pub last_status: String,
+    pub last_ts: i64,
 }
 
 pub struct LocalStore {
@@ -648,6 +663,100 @@ impl LocalStore {
         })
     }
 
+    /// Record one procedure run verdict. Local-only: not encrypted-payload
+    /// state, not dirty, not synced — the same contract as `query_log`.
+    pub fn log_skill_run(&self, skill_id: &str, status: &str, note: &str) -> Result<()> {
+        anyhow::ensure!(
+            matches!(status, "ok" | "fail" | "confounded" | "no_effect"),
+            "run status must be ok, fail, confounded or no_effect"
+        );
+        self.connection.execute(
+            "INSERT INTO skill_runs (skill_id, status, note, ts_unix) VALUES (?1,?2,?3,?4)",
+            params![
+                skill_id,
+                status,
+                note,
+                chrono::Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Verdict counts and the latest outcome per procedure id (missing ids omitted).
+    pub fn skill_run_stats(&self, ids: &[String]) -> Result<HashMap<String, SkillRunStats>> {
+        let mut out = HashMap::new();
+        let mut stmt = self.connection.prepare(
+            "SELECT
+                COALESCE(SUM(status = 'ok'), 0),
+                COALESCE(SUM(status = 'fail'), 0),
+                COALESCE(SUM(status = 'confounded'), 0),
+                COALESCE(SUM(status = 'no_effect'), 0)
+             FROM skill_runs WHERE skill_id = ?1",
+        )?;
+        let mut last = self.connection.prepare(
+            "SELECT status, ts_unix FROM skill_runs WHERE skill_id = ?1 ORDER BY id DESC LIMIT 1",
+        )?;
+        for id in ids {
+            let (ok, fail, confounded, no_effect): (i64, i64, i64, i64) = stmt
+                .query_row(params![id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?;
+            if ok == 0 && fail == 0 && confounded == 0 && no_effect == 0 {
+                continue;
+            }
+            let (last_status, last_ts): (String, i64) = last
+                .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .unwrap_or_default();
+            out.insert(
+                id.clone(),
+                SkillRunStats {
+                    ok,
+                    fail,
+                    confounded,
+                    no_effect,
+                    last_status,
+                    last_ts,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Procedures whose latest N attributable runs all failed. An ok breaks the
+    /// streak; confounded / no_effect runs are not verdicts, so they neither
+    /// count toward it nor reset it.
+    pub fn failing_skills(&self, streak: usize) -> Result<Vec<(String, i64)>> {
+        anyhow::ensure!(streak > 0, "streak must be positive");
+        let mut stmt = self.connection.prepare(
+            "SELECT skill_id, status FROM skill_runs ORDER BY id DESC",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut seen: HashMap<String, (usize, bool)> = HashMap::new();
+        for (id, status) in rows {
+            let slot = seen.entry(id).or_insert((0, true));
+            if slot.0 >= streak {
+                continue;
+            }
+            if status == "fail" {
+                slot.0 += 1;
+            } else if status == "ok" {
+                slot.1 = false;
+                slot.0 = streak; // stop counting this procedure
+            }
+            // confounded / no_effect: no verdict, keep counting older runs
+        }
+        let mut out: Vec<(String, i64)> = seen
+            .into_iter()
+            .filter(|(_, (n, failing))| *failing && *n >= streak)
+            .map(|(id, (n, _))| (id, n as i64))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     pub fn verify_sqlite_integrity(&self)->Result<()> {
         let value:String=self.connection.query_row("PRAGMA quick_check",[],|row|row.get(0))?;
         anyhow::ensure!(value=="ok","runtime library integrity check failed");Ok(())
@@ -924,6 +1033,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             bad_ids TEXT NOT NULL DEFAULT '[]'
         );
         CREATE INDEX IF NOT EXISTS idx_query_log_ts ON query_log(ts_unix);
+        CREATE TABLE IF NOT EXISTS skill_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            ts_unix INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_runs_skill ON skill_runs(skill_id, ts_unix);
         CREATE TABLE IF NOT EXISTS entry_audit (
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             entry_id TEXT NOT NULL,
@@ -1451,5 +1568,81 @@ mod lww_tie_tests {
         assert!(!took, "tie + local dirty → pull must be refused");
         assert_eq!(store.all(false)?[0].local_parent_id, "p1");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod skill_run_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, LocalStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(&dir.path().join("runs.db")).expect("open");
+        (dir, store)
+    }
+
+    #[test]
+    fn run_log_aggregates_ok_fail_and_latest() {
+        let (_dir, store) = store();
+        store.log_skill_run("skill-a", "ok", "").unwrap();
+        store.log_skill_run("skill-a", "fail", "command 3 exit 2").unwrap();
+        store.log_skill_run("skill-a", "ok", "").unwrap();
+        let stats = store.skill_run_stats(&["skill-a".into(), "skill-b".into()]).unwrap();
+        let a = stats.get("skill-a").expect("skill-a stats");
+        assert_eq!((a.ok, a.fail), (2, 1));
+        assert_eq!(a.last_status, "ok");
+        assert!(a.last_ts > 0);
+        assert!(!stats.contains_key("skill-b"), "unrun procedures stay absent");
+    }
+
+    #[test]
+    fn three_consecutive_failures_are_reported_and_ok_resets() {
+        let (_dir, store) = store();
+        for _ in 0..3 {
+            store.log_skill_run("broken", "fail", "").unwrap();
+        }
+        store.log_skill_run("healthy", "fail", "").unwrap();
+        store.log_skill_run("healthy", "ok", "").unwrap();
+        let failing = store.failing_skills(3).unwrap();
+        assert_eq!(failing, vec![("broken".to_string(), 3)]);
+
+        store.log_skill_run("broken", "ok", "").unwrap();
+        assert!(store.failing_skills(3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn confounded_and_no_effect_are_verdicts_that_attribute_nothing() {
+        let (_dir, store) = store();
+        for status in ["confounded", "no_effect", "confounded"] {
+            store
+                .log_skill_run("a", status, "hook also changed")
+                .unwrap();
+        }
+        let stats = store.skill_run_stats(&["a".into()]).unwrap();
+        let a = stats.get("a").expect("stats exist even with no ok/fail");
+        assert_eq!((a.ok, a.fail, a.confounded, a.no_effect), (0, 0, 2, 1));
+        assert_eq!(a.last_status, "confounded");
+        assert!(
+            store.failing_skills(3).unwrap().is_empty(),
+            "a non-verdict is not a failure"
+        );
+
+        // A confounded run between failures neither counts nor resets the streak.
+        for _ in 0..3 {
+            store.log_skill_run("b", "fail", "").unwrap();
+        }
+        store
+            .log_skill_run("b", "confounded", "dep changed mid-run")
+            .unwrap();
+        assert_eq!(store.failing_skills(3).unwrap(), vec![("b".to_string(), 3)]);
+        // ...and an ok still breaks it.
+        store.log_skill_run("b", "ok", "").unwrap();
+        assert!(store.failing_skills(3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_status_is_rejected() {
+        let (_dir, store) = store();
+        assert!(store.log_skill_run("skill-a", "maybe", "").is_err());
     }
 }
