@@ -20,7 +20,7 @@ pub use supervisor_job::confine_supervisor_tree;
 #[cfg(windows)]
 mod process_identity;
 #[cfg(windows)]
-pub use process_identity::process_birth;
+pub use process_identity::{process_birth, process_identity, runtime_process_identity, terminate_runtime, ProcessIdentity};
 
 #[cfg(windows)]
 mod winml;
