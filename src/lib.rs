@@ -18,7 +18,15 @@ mod winml;
 pub use winml::{install_accelerators, replace_provider_manifest};
 
 pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
+    spawn_runtime_with_boot_token(exe, None)
+}
+
+/// A non-secret maintenance operation identifier lets the replacement child
+/// prove it belongs to the host's still-fenced startup, before accepting work.
+pub fn spawn_runtime_with_boot_token(exe: &Path, token: Option<&str>) -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
+    command.env_remove("RSRS_RUNTIME_BOOT_TOKEN");
+    if let Some(token) = token { command.env("RSRS_RUNTIME_BOOT_TOKEN", token); }
     command
         .arg("--runtime-internal")
         .stdin(Stdio::null())
