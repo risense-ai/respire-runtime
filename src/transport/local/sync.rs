@@ -16,7 +16,34 @@ impl std::fmt::Display for SyncVersionNotFound {
 
 impl std::error::Error for SyncVersionNotFound {}
 
+#[cfg(test)]
+#[path = "sync_diary_tests.rs"]
+mod diary_tests;
+
 impl LocalStore {
+    /// A transport conflict receipt is not permission to discard a confirmed
+    /// diary working copy. Keep distinct live diary branches visible until an
+    /// explicit resolution; the canonical head and conflict bytes remain intact.
+    pub(super) fn protects_diary_working_copy(&self, incoming: &StoredMemory) -> Result<bool> {
+        if incoming.deleted || incoming.local_importance != "trivial" {
+            return Ok(false);
+        }
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.id=?1 AND m.deleted=0 AND m.importance='trivial'
+            AND (m.ciphertext<>?2 OR m.nonce<>?3 OR m.updated_at<>?4)
+            AND (EXISTS(SELECT 1 FROM sync_outbox o WHERE o.id=m.id AND o.state='conflict_saved'
+                AND o.ciphertext=m.ciphertext AND o.nonce=m.nonce AND o.updated_at=m.updated_at AND o.deleted=m.deleted
+                AND NOT EXISTS(SELECT 1 FROM sync_inbox i JOIN sync_resolutions r ON r.epoch=i.epoch AND r.conflict_rev=i.rev
+                    WHERE i.epoch=(SELECT value FROM meta WHERE key='sync_v2_epoch') AND i.op_id=o.op_id))
+            OR EXISTS(SELECT 1 FROM sync_inbox i WHERE i.epoch=(SELECT value FROM meta WHERE key='sync_v2_epoch')
+                AND i.id=m.id AND i.status IN ('conflict_saved','legacy_rejected') AND json_valid(i.wire)
+                AND json_extract(i.wire,'$.ciphertext')=m.ciphertext AND json_extract(i.wire,'$.nonce')=m.nonce
+                AND json_extract(i.wire,'$.updated_at')=m.updated_at AND json_extract(i.wire,'$.deleted')=m.deleted
+                AND NOT EXISTS(SELECT 1 FROM sync_resolutions r WHERE r.epoch=i.epoch AND r.conflict_rev=i.rev))))",
+            params![incoming.id, incoming.ciphertext, incoming.nonce, incoming.updated_at], |r| r.get(0),
+        )?)
+    }
+
     /// Read a bounded immutable batch; the same op_id always carries the same bytes.
     pub fn outgoing(&self) -> Result<Vec<Operation>> {
         self.outgoing_through(i64::MAX)
@@ -302,7 +329,7 @@ impl LocalStore {
                     [&b.id],
                     |r| r.get(0),
                 )?;
-                if !pending && error.is_empty() {
+                if !pending && error.is_empty() && !self.protects_diary_working_copy(&b)? {
                     self.put_inner_policy(&b, false, true)?;
                     self.connection.execute("INSERT INTO sync_base(id,rev) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET rev=excluded.rev",params![b.id,change.rev])?;
                 }
@@ -370,6 +397,9 @@ impl LocalStore {
                 b.embedding_enc.clear();
                 if !(b.deleted && b.ciphertext.is_empty()) {
                     hydrate_local(keys, &mut b)?;
+                }
+                if self.protects_diary_working_copy(&b)? {
+                    continue;
                 }
                 self.put_inner_policy(&b, false, true)?;
             }

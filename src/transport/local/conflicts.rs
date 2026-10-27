@@ -314,16 +314,23 @@ impl LocalStore {
             if recovery && action != "take_incoming" {
                 bail!("current revision is undecodable; inspect a readable candidate and use take-incoming with its current head revision");
             }
-            if base != Some(head_rev) && !recovery {
+            let mut inspected = current.clone();
+            let preserved_diary = if !recovery && !current.deleted {
+                crate::hydrate_local(keys, &mut inspected)?;
+                self.protects_diary_working_copy(&inspected)?
+            } else {
+                false
+            };
+            if base != Some(head_rev) && !recovery && !preserved_diary {
                 bail!("current content is not applied; finish sync first");
             }
             let mut stamp = self.edit_stamp(&candidate.id)?;
-            if recovery
+            if (recovery || preserved_diary)
                 && !super::super::compare_timestamps(&stamp, &current.updated_at)?.is_gt()
             {
                 // The server requires both the inspected CAS revision and a
-                // monotonic timestamp. An undecodable head was not installed
-                // in memories, so the local edit clock alone can be behind it.
+                // monotonic timestamp. This head was not installed in the
+                // working copy, so its local edit clock alone can be behind it.
                 stamp = super::super::timestamp_after(Some(&current.updated_at))?;
             }
             let mut selected = if action == "merge" {
@@ -345,9 +352,10 @@ impl LocalStore {
                 bail!("resolution version was not written");
             }
             self.track_restoration(epoch, rev, &selected.id, action)?;
-            if recovery {
-                // 仅在同一事务内修改尚未对外可见的新操作。sync_base 仍保留最后
-                // 真正应用的版本；服务端以用户审阅的 head 执行既有 CAS 校验。
+            if recovery || preserved_diary {
+                // Only the new, unexposed resolution operation may use the
+                // explicitly inspected head. The working copy's sync_base is
+                // still its last applied revision; server CAS remains required.
                 let op_id: String = self.connection.query_row(
                     "SELECT restore_op_id FROM sync_resolution_outbox WHERE epoch=?1 AND conflict_rev=?2",
                     params![epoch, rev], |r| r.get(0),
@@ -358,10 +366,12 @@ impl LocalStore {
                     params![head_rev, op_id, selected.id],
                 )?;
                 anyhow::ensure!(changed == 1, "recovery operation was not queued safely");
-                self.connection.execute(
-                    "INSERT INTO sync_recovery_intents(epoch,conflict_rev,head_rev,op_id) VALUES(?1,?2,?3,?4)",
-                    params![epoch, rev, head_rev, op_id],
-                )?;
+                if recovery || action == "take_incoming" {
+                    self.connection.execute(
+                        "INSERT INTO sync_recovery_intents(epoch,conflict_rev,head_rev,op_id) VALUES(?1,?2,?3,?4)",
+                        params![epoch, rev, head_rev, op_id],
+                    )?;
+                }
             }
         }
         tx.commit()?;
@@ -460,6 +470,7 @@ impl LocalStore {
             };
             result.push(serde_json::json!({"epoch":scope,"rev":rev,"id":id,"original_status":status,"kind":kind,"reason":reason,
                 "state":state,"resolution":processed,"queued_action":queued,"candidate":describe(&candidate),
+                "current_scope":"remote_canonical",
                 "current":head.map(|(rev,b)|serde_json::json!({"rev":rev,"value":describe(&b)}))}));
         }
         if include_processed {
