@@ -131,7 +131,9 @@ fn explicit_setting<T: std::str::FromStr + serde::Serialize>(
                 .trim()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid {name}"))?;
-            settings.insert(key.to_owned(), serde_json::to_value(value)?);
+            let value = serde_json::to_value(value)?;
+            anyhow::ensure!(!value.is_null(), "invalid {name}");
+            settings.insert(key.to_owned(), value);
             Ok(())
         }
         Err(std::env::VarError::NotPresent) => Ok(()),
@@ -408,6 +410,18 @@ fn feedback_switch(name:&str,default:bool)->Result<bool> {
 /// Host environment defaults, copied into each immutable request.
 pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
     let mut settings = serde_json::Map::new();
+    match crate::env::var("RSRS_RECALL_PROFILE") {
+        Ok(value) if value == "legacy" => {
+            settings = serde_json::from_value(json!({"cos_min":0.0,"sim_min":0.30,
+                "recall_min_score":0.25,"lexical_weight":0.30,"semantic_power":1.3,
+                "bm25":false,"max_fusion":false,"normalize_ablation":false,
+                "aux_cap_ratio":null,"rrf_cap":0.0,"heat_cap":15}))?;
+        }
+        Ok(value) if value == "calibrated" => {}
+        Ok(_) => anyhow::bail!("RSRS_RECALL_PROFILE must be calibrated or legacy"),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
     if feedback_enabled()? {
         anyhow::ensure!(crate::FEEDBACK_CONTRACT==1,"enabled feedback requires Core SDK feedback contract 1; install the paired SDK/CLI version");
         // Non-recall ranking callers still remove read heat. Recall paths
@@ -424,6 +438,19 @@ pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
         Err(std::env::VarError::NotPresent) => {}
         Err(error) => return Err(error.into()),
     }
+    for (key, name) in [
+        ("cos_min", "RSRS_RECALL_COS_MIN"), ("sim_min", "RSRS_RECALL_SIM_MIN"),
+        ("cos_relative_ratio", "RSRS_RECALL_COS_RELATIVE_RATIO"), ("cos_margin", "RSRS_RECALL_COS_MARGIN"),
+        ("lexical_weight", "RSRS_RECALL_LEXICAL_WEIGHT"), ("semantic_power", "RSRS_RECALL_SEMANTIC_POWER"),
+        ("aux_cap_ratio", "RSRS_RECALL_AUX_CAP_RATIO"), ("rrf_cap", "RSRS_RECALL_RRF_CAP"),
+    ] { explicit_setting::<f32>(&mut settings, key, name)?; }
+    for (key, name, default) in [
+        ("bm25", "RSRS_RECALL_BM25", true), ("max_fusion", "RSRS_RECALL_MAX_FUSION", false),
+        ("normalize_ablation", "RSRS_RECALL_NORMALIZE_ABLATION", true), ("debug_score", "RSRS_DEBUG_SCORE", false),
+    ] {
+        if crate::env::var_os(name).is_some() { settings.insert(key.into(), json!(feedback_switch(name, default)?)); }
+    }
+    explicit_setting::<u32>(&mut settings, "heat_cap", "RSRS_RECALL_HEAT_CAP")?;
     explicit_setting::<f32>(&mut settings, "recall_min_score", "RSRS_RECALL_MIN_SCORE")?;
     explicit_setting::<f32>(&mut settings, "mmr_lambda", "RSRS_MMR_LAMBDA")?;
     explicit_setting::<usize>(&mut settings, "ancestor_budget", "RSRS_ANCESTOR_BUDGET")?;
