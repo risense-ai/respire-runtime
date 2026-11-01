@@ -497,22 +497,29 @@ pub mod onnx {
         if !diagnostics.is_empty() { status["provider_registration_errors"] = json!(diagnostics); }
         Ok(status)
     }
-    fn write_engine(engine: Engine, force_cpu: bool) -> Result<()> {
+    fn engine_settings(engine: Engine, force_cpu: bool, model: Option<&str>) -> Result<(std::path::PathBuf, Value)> {
         let directory = settings_dir();
-        std::fs::create_dir_all(&directory)?;
-        let path = directory.join("inference.json");
-        // Preserve an explicitly selected model variant across engine changes,
-        // including settings read through the legacy-directory fallback.
         let (_, existing) = read_inference_json()?;
-        let model = stored_variant(&existing)?.map(|variant| variant.name);
+        let selected = match model {
+            Some(model) => Some(parse_variant(model)?),
+            None => stored_variant(&existing)?,
+        };
         let mut value = json!({"engine":engine,"force_cpu":force_cpu});
-        if let Some(model) = model { value["model"] = json!(model); }
-        std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+        if let Some(model) = selected { value["model"] = json!(model.name); }
+        Ok((directory.join("inference.json"), value))
+    }
+    fn commit_engine_settings(path: &std::path::Path, value: &Value, reset: impl FnOnce() -> Result<()>) -> Result<()> {
+        // Never persist half of an engine/variant selection when retiring the
+        // previous native session fails. The runtime serializes these requests.
+        reset()?;
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::write(path, serde_json::to_vec_pretty(value)?)?;
         Ok(())
     }
-    pub fn save_engine(engine: Engine) -> Result<()> {
-        reset_sessions()?;
-        write_engine(engine, false)
+    pub fn save_engine(engine: Engine) -> Result<()> { save_engine_with_variant(engine, None) }
+    pub fn save_engine_with_variant(engine: Engine, model: Option<&str>) -> Result<()> {
+        let (path, value) = engine_settings(engine, false, model)?;
+        commit_engine_settings(&path, &value, reset_sessions)
     }
     /// Persist an explicit model variant selection without touching the engine.
     pub fn save_model_variant(model: &str) -> Result<()> {
@@ -527,7 +534,10 @@ pub mod onnx {
         execute::<()>("engine_control", json!({"action":"reset"}))?;
         crate::host::reset_model_cache()
     }
-    pub fn reset_cpu_config() -> Result<()> { write_engine(Engine::Cpu, true) }
+    pub fn reset_cpu_config() -> Result<()> {
+        let (path, value) = engine_settings(Engine::Cpu, true, None)?;
+        commit_engine_settings(&path, &value, || Ok(()))
+    }
     pub fn accelerator_catalog_path() -> Result<Option<std::path::PathBuf>> {
         #[cfg(windows)] {
             let directory = settings_dir().join("engines/winml-2.4.89");
@@ -555,6 +565,22 @@ pub mod onnx {
     #[cfg(test)]
     mod variant_settings_tests {
         use super::*;
+        #[test]
+        fn failed_session_reset_does_not_persist_a_partial_selection() -> Result<()> {
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+            let directory = std::env::temp_dir().join(format!("respire-engine-commit-{}-{nonce}",std::process::id()));
+            std::fs::create_dir(&directory)?;
+            let path = directory.join("inference.json");
+            let previous = br#"{"engine":"cpu","model":"quantized"}"#;
+            std::fs::write(&path, previous)?;
+            let selected = json!({"engine":"gpu","model":"fp16","force_cpu":false});
+            assert!(commit_engine_settings(&path, &selected, || anyhow::bail!("native reset failed")).is_err());
+            assert_eq!(std::fs::read(&path)?, previous);
+            commit_engine_settings(&path, &selected, || Ok(()))?;
+            assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&path)?)?, selected);
+            std::fs::remove_dir_all(directory)?;
+            Ok(())
+        }
         #[test]
         fn missing_legacy_selection_is_distinct_from_malformed_selection() -> Result<()> {
             assert_eq!(stored_variant(&json!({"engine":"gpu"}))?, None);
