@@ -57,6 +57,7 @@ pub struct Core {
     next_request: u64,
     poisoned: bool,
     native_feedback_contract:Option<u64>,
+    native_read_heat_contract:Option<u64>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -72,14 +73,14 @@ impl Core {
             next_request: 0,
             poisoned: false,
             native_feedback_contract:None,
+            native_read_heat_contract:None,
             _thread_bound: PhantomData,
         };
         // No request payload is live while probing the linked library. Cache
         // only this handle's immutable native capability, never feedback counts.
-        if FEEDBACK_CONTRACT==1 {
-            let capabilities=core.capabilities()?;
-            core.native_feedback_contract=capabilities.get("feedback_contract").and_then(Value::as_u64);
-        }
+        let capabilities=core.capabilities()?;
+        core.native_feedback_contract=capabilities.get("feedback_contract").and_then(Value::as_u64);
+        core.native_read_heat_contract=capabilities.get("read_heat_contract").and_then(Value::as_u64);
         Ok(core)
     }
 
@@ -97,6 +98,11 @@ impl Core {
         transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<Value> {
         if self.poisoned {
             bail!("Core handle is poisoned; recreate it");
+        }
+        if let Some(read_heat) = payload.get("query_settings").and_then(|settings| settings.get("read_heat")) {
+            anyhow::ensure!(read_heat.is_boolean(), "query_settings.read_heat must be true or false");
+            anyhow::ensure!(self.native_read_heat_contract == Some(1),
+                "explicit read_heat requires Core SDK read_heat_contract 1; install the paired SDK/CLI version");
         }
         if feedback_contract::validate(&payload,Some(FEEDBACK_CONTRACT))? {
             feedback_contract::require(self.native_feedback_contract)?;

@@ -148,6 +148,11 @@ pub(crate) fn request_settings(payload: &mut Value) -> Result<()> {
             let settings=query_settings_from_env()?;
             fields.insert("query_settings".to_owned(), Value::Object(settings));
         }
+        let settings = fields.get_mut("query_settings").and_then(Value::as_object_mut)
+            .context("query_settings must be an object")?;
+        if !settings.contains_key("now") {
+            settings.insert("now".into(), json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+        }
         if !fields.contains_key("related_settings") {
             let mut settings = serde_json::Map::new();
             match crate::env::var("RSRS_RELATED") {
@@ -459,5 +464,6 @@ pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
         "ancestor_root_floor",
         "RSRS_ANCESTOR_ROOT_FLOOR",
     )?;
+    settings.insert("now".into(), json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
     Ok(settings)
 }
