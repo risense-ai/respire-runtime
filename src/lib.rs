@@ -8,6 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod metadata;
+pub use metadata::{
+    Artifact, ConfirmedBy, ConfirmerKind, Evidence, ExtraFields, MemoryMeta, MetadataError,
+    RequestScope, Scope, SourceRef, Verification,
+};
+
 pub const VERSION_TAG: &str = env!("CARGO_PKG_VERSION");
 
 /// Recall routing receipt; no intermediate ranking features are exposed.
@@ -16,6 +22,63 @@ pub struct RecallRouting {
     pub temporal: bool,
     pub route_on: bool,
     pub ablate: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_heat: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heat_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heat_disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallRepresentation {
+    Title,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderItem {
+    pub id: String,
+    pub representation: RecallRepresentation,
+    pub rendered_text: String,
+}
+
+/// Complete host rendering inputs; Core owns candidate selection and counting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderBudget {
+    pub budget_chars: usize,
+    pub prefix_by_count: Vec<String>,
+    pub separator: String,
+    pub suffix: String,
+    pub items: Vec<RenderItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderBudgetStatus {
+    Selected,
+    EmptyCandidates,
+    AllDroppedByBudget,
+    WrapperOverBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderBudgetReceipt {
+    pub budget_chars: usize,
+    pub chars: usize,
+    pub tokens: Option<usize>,
+    pub estimated: bool,
+    pub tokenizer_id: Option<String>,
+    pub representation: RecallRepresentation,
+    pub items: Vec<RenderItem>,
+    pub rendered_text: String,
+    pub candidate_count: usize,
+    pub selected_count: usize,
+    pub dropped_by_budget: usize,
+    pub dropped_by_duplicate: usize,
+    pub status: RenderBudgetStatus,
 }
 
 fn de_see_also<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
@@ -43,6 +106,10 @@ pub enum Kind {
     Time,
     Skill,
     Knowledge,
+    Hypothesis,
+    Reflection,
+    #[serde(rename = "Self")]
+    SelfNote,
 }
 
 impl Kind {
@@ -56,6 +123,9 @@ impl Kind {
             Kind::Time => "time",
             Kind::Skill => "skill",
             Kind::Knowledge => "knowledge",
+            Kind::Hypothesis => "hypothesis",
+            Kind::Reflection => "reflection",
+            Kind::SelfNote => "self",
         }
     }
 
@@ -68,7 +138,22 @@ impl Kind {
             "time" => Kind::Time,
             "skill" => Kind::Skill,
             "knowledge" => Kind::Knowledge,
+            "hypothesis" => Kind::Hypothesis,
+            "reflection" => Kind::Reflection,
+            "self" => Kind::SelfNote,
             _ => Kind::Context,
+        }
+    }
+
+    /// Strict parsing for metadata-aware payloads; legacy callers retain from_str.
+    pub fn try_from_str(value: &str) -> Option<Self> {
+        match value {
+            "context" => Some(Self::Context), "decision" => Some(Self::Decision),
+            "preference" => Some(Self::Preference), "task" => Some(Self::Task),
+            "emotion" => Some(Self::Emotion), "time" => Some(Self::Time),
+            "skill" => Some(Self::Skill), "knowledge" => Some(Self::Knowledge),
+            "hypothesis" => Some(Self::Hypothesis), "reflection" => Some(Self::Reflection),
+            "self" => Some(Self::SelfNote), _ => None,
         }
     }
 
@@ -83,6 +168,9 @@ impl Kind {
             Kind::Time => "时间",
             Kind::Skill => "技能",
             Kind::Knowledge => "知识",
+            Kind::Hypothesis => "假设",
+            Kind::Reflection => "反思",
+            Kind::SelfNote => "自我说明",
         }
     }
 }
@@ -119,6 +207,10 @@ pub struct MemoryEntry {
     /// Last-modified device: refreshed on update/append/merge (together with updated_at: which device changed it when). Empty on old data.
     #[serde(default)]
     pub modified_by: String,
+    #[serde(default, flatten)]
+    pub metadata: MemoryMeta,
+    #[serde(default, flatten)]
+    pub unknown_fields: ExtraFields,
 }
 
 /// Ciphertext payload v2 (AES-256-GCM of the whole object; decrypting on a client yields this struct).
@@ -157,6 +249,10 @@ pub struct PayloadV2 {
     /// Last-modified device: refreshed on update/append/merge (with updated_at). Empty on old data.
     #[serde(default)]
     pub modified_by: String,
+    #[serde(default, flatten)]
+    pub metadata: MemoryMeta,
+    #[serde(default, flatten)]
+    pub unknown_fields: ExtraFields,
 }
 
 fn default_importance() -> String {
@@ -219,6 +315,9 @@ pub struct StoredMemory {
     /// Local-only opaque Core artifact; never part of the sync wire format.
     #[serde(skip)]
     pub local_artifact: Vec<u8>,
+    /// Local projection of metadata; the authoritative value stays encrypted.
+    #[serde(skip)]
+    pub local_meta: MemoryMeta,
 }
 
 impl StoredMemory {
@@ -246,6 +345,7 @@ impl StoredMemory {
             local_modified_by: String::new(),
             local_chunks: Vec::new(),
             local_artifact: Vec::new(),
+            local_meta: MemoryMeta::default(),
         }
     }
 }

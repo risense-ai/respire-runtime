@@ -1,6 +1,6 @@
 [package]
 name = "respire_protocol"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 edition = "2021"
 rust-version = "1.88"
 description = "respire wire protocol and serde-only domain types"
@@ -12,10 +12,10 @@ publish = ["crates-io"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 anyhow = "1.0"
-serde_json = "1.0"
 
 [lints.rust]
 unsafe_code = "forbid"
