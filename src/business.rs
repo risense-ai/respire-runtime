@@ -462,7 +462,13 @@ pub mod onnx {
         }
         let value = if path.exists() { serde_json::from_slice::<Value>(&std::fs::read(&path)?)? }
             else { json!({"engine":"cpu"}) };
+        anyhow::ensure!(value.is_object(), "inference.json must contain an object");
         Ok((path, value))
+    }
+    fn stored_variant(value: &Value) -> Result<Option<ModelVariant>> {
+        value.get("model").map(|model| {
+            parse_variant(model.as_str().context("inference.json model must be a string")?)
+        }).transpose()
     }
     pub fn configured_engine() -> Result<Engine> {
         let (_, value) = read_inference_json()?;
@@ -476,16 +482,13 @@ pub mod onnx {
     pub fn configured_variant(engine: Engine) -> Result<ModelVariant> {
         if let Ok(value) = crate::env::var("RSRS_MODEL_VARIANT") { return parse_variant(&value); }
         let (_, value) = read_inference_json()?;
-        match value["model"].as_str() {
-            Some(model) => parse_variant(model),
-            None => parse_variant(default_variant(engine)),
-        }
+        stored_variant(&value)?.map_or_else(|| parse_variant(default_variant(engine)), Ok)
     }
     /// Whether the operator picked a variant (setting or env), not the engine default.
     pub fn explicit_model_selection() -> Result<bool> {
         if crate::env::var("RSRS_MODEL_VARIANT").is_ok() { return Ok(true); }
         let (_, value) = read_inference_json()?;
-        Ok(value["model"].as_str().is_some())
+        Ok(stored_variant(&value)?.is_some())
     }
     pub fn inference_status() -> Result<Value> {
         if crate::worker::enabled() { return crate::worker::status(); }
@@ -501,7 +504,7 @@ pub mod onnx {
         // Preserve an explicitly selected model variant across engine changes,
         // including settings read through the legacy-directory fallback.
         let (_, existing) = read_inference_json()?;
-        let model = existing.get("model").and_then(Value::as_str).map(str::to_owned);
+        let model = stored_variant(&existing)?.map(|variant| variant.name);
         let mut value = json!({"engine":engine,"force_cpu":force_cpu});
         if let Some(model) = model { value["model"] = json!(model); }
         std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
@@ -548,6 +551,20 @@ pub mod onnx {
             for (name, path) in saved { providers.push(crate::host_winml::Provider { name, ready:path.is_file(), path:Some(path) }); }
         }
         Ok(providers)
+    }
+    #[cfg(test)]
+    mod variant_settings_tests {
+        use super::*;
+        #[test]
+        fn missing_legacy_selection_is_distinct_from_malformed_selection() -> Result<()> {
+            assert_eq!(stored_variant(&json!({"engine":"gpu"}))?, None);
+            assert_eq!(stored_variant(&json!({"model":" FP16 "}))?.map(|v| v.name), Some("fp16"));
+            for value in [json!(null), json!(1), json!(false), json!([]), json!({})] {
+                assert!(stored_variant(&json!({"model":value})).is_err());
+            }
+            assert!(stored_variant(&json!({"model":"unknown"})).is_err());
+            Ok(())
+        }
     }
     pub fn install_accelerators() -> Result<Vec<String>> { bail!("accelerator installation is host-managed; run rsrs model install-engines from the host CLI") }
 }
