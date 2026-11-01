@@ -473,6 +473,12 @@ pub mod bge {
             None => parse_variant(default_variant(engine)),
         }
     }
+    /// Whether the operator picked a variant (setting or env), not the engine default.
+    pub fn explicit_model_selection() -> Result<bool> {
+        if crate::env::var("RSRS_MODEL_VARIANT").is_ok() { return Ok(true); }
+        let (_, value) = read_inference_json()?;
+        Ok(value["model"].as_str().is_some())
+    }
     pub fn inference_status() -> Result<Value> {
         if crate::worker::enabled() { return crate::worker::status(); }
         let mut status: Value = execute("engine_control", json!({"action":"inference_status"}))?;
@@ -484,10 +490,10 @@ pub mod bge {
         let directory = settings_dir();
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("inference.json");
-        // Preserve an explicitly selected model variant across engine changes.
-        let model = if path.exists() {
-            serde_json::from_slice::<Value>(&std::fs::read(&path)?)?.get("model").and_then(Value::as_str).map(str::to_owned)
-        } else { None };
+        // Preserve an explicitly selected model variant across engine changes,
+        // including settings read through the legacy-directory fallback.
+        let (_, existing) = read_inference_json()?;
+        let model = existing.get("model").and_then(Value::as_str).map(str::to_owned);
         let mut value = json!({"engine":engine,"force_cpu":force_cpu});
         if let Some(model) = model { value["model"] = json!(model); }
         std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;

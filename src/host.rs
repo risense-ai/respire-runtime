@@ -241,11 +241,32 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     anyhow::ensure!(!cpu_owned_experiment || engine == crate::onnx::Engine::Cpu, "CPU owned ORT experiment requires CPU; GPU/NPU remain legacy");
     anyhow::ensure!(!cpu_owned_experiment || crate::env::var_os("RSRS_ORT_PROFILE").is_none(),
         "CPU owned ORT experiment does not support host profiling callbacks; disable the experiment for legacy profiling");
-    let variant = crate::onnx::configured_variant(engine)?;
+    let mut variant = crate::onnx::configured_variant(engine)?;
+    // Accelerator installs upgraded before variant selection existed may lack
+    // the fp16 default file. Keep them inferring on quantized until the
+    // operator picks a variant explicitly; explicit selections stay strict.
+    let mut fallback_note = String::new();
+    if !cpu_owned_experiment
+        && engine != crate::onnx::Engine::Cpu
+        && !crate::onnx::explicit_model_selection()?
+        && !directory.join(crate::onnx::variant_file_name(variant.name)).exists()
+    {
+        fallback_note = format!(
+            "accelerator default {} is not installed; using quantized until `rsrs model install --model {}` completes",
+            variant.name, variant.name
+        );
+        variant = crate::onnx::parse_variant("quantized")?;
+    }
     let model_path = if cpu_owned_experiment {
         crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").map(std::path::PathBuf::from)
             .unwrap_or_else(|| crate::bge::cpu_ort_path(&directory))
     } else { directory.join(crate::onnx::variant_file_name(variant.name)) };
+    if !fallback_note.is_empty() {
+        PROVIDER_DIAGNOSTICS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))?
+            .push(fallback_note);
+    }
     let tokenizer_path = directory.join("tokenizer.json");
     let metadata = |path: &std::path::Path| -> Result<_> {
         let custom_cpu_file = cpu_owned_experiment && path == model_path.as_path()
