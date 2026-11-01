@@ -187,6 +187,7 @@ pub(crate) fn request_settings(payload: &mut Value) -> Result<()> {
 struct ModelStamp {
     directory: PathBuf,
     engine: crate::onnx::Engine,
+    variant: String,
     model: (u64, std::time::SystemTime),
     tokenizer: (u64, std::time::SystemTime),
     session_options_id: String,
@@ -246,10 +247,11 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     anyhow::ensure!(!cpu_owned_experiment || engine == crate::onnx::Engine::Cpu, "CPU owned ORT experiment requires CPU; GPU/NPU remain legacy");
     anyhow::ensure!(!cpu_owned_experiment || crate::env::var_os("RSRS_ORT_PROFILE").is_none(),
         "CPU owned ORT experiment does not support host profiling callbacks; disable the experiment for legacy profiling");
+    let variant = crate::onnx::configured_variant(engine)?;
     let model_path = if cpu_owned_experiment {
         crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").map(std::path::PathBuf::from)
             .unwrap_or_else(|| crate::bge::cpu_ort_path(&directory))
-    } else { directory.join("onnx/model_quantized.onnx") };
+    } else { directory.join(crate::onnx::variant_file_name(variant.name)) };
     let tokenizer_path = directory.join("tokenizer.json");
     let metadata = |path: &std::path::Path| -> Result<_> {
         let custom_cpu_file = cpu_owned_experiment && path == model_path.as_path()
@@ -278,6 +280,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let stamp = ModelStamp {
         directory,
         engine,
+        variant: variant.name.to_owned(),
         model: metadata(&model_path)?,
         tokenizer: metadata(&tokenizer_path)?,
         session_options_id: session_options_id.clone(),
@@ -320,10 +323,11 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let model_hash = digest(&model);
     let tokenizer_hash = digest(&tokenizer);
     anyhow::ensure!(
-        model_hash == if cpu_owned_experiment {
+        model_hash.eq_ignore_ascii_case(if cpu_owned_experiment {
             "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff"
-        } else { "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d" },
-        "BGE-M3 quantized model checksum mismatch; reinstall the model"
+        } else { variant.sha256 }),
+        "BGE-M3 {} model checksum mismatch; run rsrs model install-m3 --model {}",
+        variant.name, variant.name
     );
     anyhow::ensure!(
         tokenizer_hash == "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",

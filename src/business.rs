@@ -402,7 +402,7 @@ pub mod bge {
     }
 }
 
-pub mod onnx {
+    pub mod onnx {
     use super::*;
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all="lowercase")]
@@ -412,12 +412,37 @@ pub mod onnx {
             match value { "cpu" => Ok(Self::Cpu), "gpu" => Ok(Self::Gpu), "npu" => Ok(Self::Npu), _ => bail!("engine must be npu, gpu, or cpu; automatic mode is no longer supported") }
         }
     }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ModelVariant { pub name: &'static str, pub sha256: &'static str, pub size: u64 }
+    /// Pinned Xenova/bge-m3@4de13258 single-file onnx variants. fp32 (external
+    /// .onnx_data), bnb4 and sentence_transformers files cannot load from memory
+    /// or conflict with CLS pooling, so they are not offered.
+    pub const MODEL_VARIANTS: &[ModelVariant] = &[
+        ModelVariant { name: "quantized", sha256: "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d", size: 569694530 },
+        ModelVariant { name: "fp16", sha256: "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9", size: 1133992936 },
+        ModelVariant { name: "int8", sha256: "a206e10e995aa2a833924bcd725ba5dd6c3425cd34bac3cf2b5677cd2a1c51d6", size: 568456694 },
+        ModelVariant { name: "uint8", sha256: "3222211565d0d5da2fe89e0c40856ed879e5c5dd3369fbbe685213469498e811", size: 568456765 },
+        ModelVariant { name: "q4", sha256: "4f6d9786712f8dbf00efbb08ffd819395ef05d860249e852b4efc16022f753a6", size: 1248237611 },
+        ModelVariant { name: "q4f16", sha256: "8305fdfa48b5702ecb4a6d84c1a52a4d1cb27d69880ff7f69d1a93d795864f25", size: 699932840 },
+    ];
+    pub fn parse_variant(value: &str) -> Result<ModelVariant> {
+        let wanted = value.trim().to_ascii_lowercase();
+        MODEL_VARIANTS.iter().copied().find(|variant| variant.name == wanted).ok_or_else(|| {
+            anyhow::anyhow!("model variant must be one of: {}",
+                MODEL_VARIANTS.iter().map(|variant| variant.name).collect::<Vec<_>>().join(", "))
+        })
+    }
+    pub fn variant_file_name(variant: &str) -> String { format!("onnx/model_{variant}.onnx") }
+    /// CPU keeps the quantized graph; accelerators default to fp16.
+    pub fn default_variant(engine: Engine) -> &'static str {
+        match engine { Engine::Cpu => "quantized", _ => "fp16" }
+    }
     fn settings_dir() -> std::path::PathBuf {
         crate::env::var_os("RSRS_DATA_DIR").map(std::path::PathBuf::from)
             .unwrap_or_else(|| bge::expand_home("~/.rsrs"))
     }
     pub(crate) fn host_cache_dir() -> std::path::PathBuf { settings_dir().join("engines/openvino-cache") }
-    pub fn configured_engine() -> Result<Engine> {
+    fn read_inference_json() -> Result<(std::path::PathBuf, Value)> {
         let mut path = settings_dir().join("inference.json");
         if !path.exists() && crate::env::var_os("RSRS_DATA_DIR").is_none() {
             if let Some(home) = dirs::home_dir() {
@@ -427,12 +452,25 @@ pub mod onnx {
                 }
             }
         }
-        let value = if path.exists() { serde_json::from_slice::<Value>(&std::fs::read(path)?)? }
+        let value = if path.exists() { serde_json::from_slice::<Value>(&std::fs::read(&path)?)? }
             else { json!({"engine":"cpu"}) };
+        Ok((path, value))
+    }
+    pub fn configured_engine() -> Result<Engine> {
+        let (_, value) = read_inference_json()?;
         if value["force_cpu"].as_bool() == Some(true) { return Ok(Engine::Cpu); }
         if let Ok(value) = crate::env::var("RSRS_ENGINE") { return Engine::parse(&value); }
         match value["engine"].as_str().context("inference.json missing engine")? {
             "auto" => Ok(Engine::Cpu), value => Engine::parse(value),
+        }
+    }
+    /// Selected onnx variant; falls back to the engine default when unset.
+    pub fn configured_variant(engine: Engine) -> Result<ModelVariant> {
+        if let Ok(value) = crate::env::var("RSRS_MODEL_VARIANT") { return parse_variant(&value); }
+        let (_, value) = read_inference_json()?;
+        match value["model"].as_str() {
+            Some(model) => parse_variant(model),
+            None => parse_variant(default_variant(engine)),
         }
     }
     pub fn inference_status() -> Result<Value> {
@@ -445,12 +483,28 @@ pub mod onnx {
     fn write_engine(engine: Engine, force_cpu: bool) -> Result<()> {
         let directory = settings_dir();
         std::fs::create_dir_all(&directory)?;
-        std::fs::write(directory.join("inference.json"), serde_json::to_vec_pretty(&json!({"engine":engine,"force_cpu":force_cpu}))?)?;
+        let path = directory.join("inference.json");
+        // Preserve an explicitly selected model variant across engine changes.
+        let model = if path.exists() {
+            serde_json::from_slice::<Value>(&std::fs::read(&path)?)?.get("model").and_then(Value::as_str).map(str::to_owned)
+        } else { None };
+        let mut value = json!({"engine":engine,"force_cpu":force_cpu});
+        if let Some(model) = model { value["model"] = json!(model); }
+        std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
         Ok(())
     }
     pub fn save_engine(engine: Engine) -> Result<()> {
         reset_sessions()?;
         write_engine(engine, false)
+    }
+    /// Persist an explicit model variant selection without touching the engine.
+    pub fn save_model_variant(model: &str) -> Result<()> {
+        let (path, mut value) = read_inference_json()?;
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        value["model"] = json!(parse_variant(model)?.name);
+        if value.get("engine").is_none() { value["engine"] = json!("cpu"); }
+        std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+        Ok(())
     }
     pub fn reset_sessions() -> Result<()> {
         execute::<()>("engine_control", json!({"action":"reset"}))?;

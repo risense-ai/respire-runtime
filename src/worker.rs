@@ -699,6 +699,8 @@ pub fn run() -> Result<()> {
     let heartbeat_output = Arc::clone(&output);
     std::thread::Builder::new()
         .name("respire-core-heartbeat".into())
+        // Core calls can initialize native EPs with deep call stacks.
+        .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             let result = crate::Core::new();
             let Ok(mut core) = result else {
