@@ -1,3 +1,4 @@
+import { downloadPrivateSdk } from './private-sdk-download.mjs';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -98,7 +99,7 @@ export async function prepareSdk(target, destination, lockPath = join(root, 'cor
   } else {
     if (existsSync(output)) throw new Error('SDK destination already exists without a manifest; use a fresh directory');
     if (!entry.url) throw new Error(`No approved SDK download URL for ${target}; provide a validated local RSRS_CORE_SDK_DIR`);
-    const bytes = await download(entry.url);
+    const bytes = entry.private_repository ? await downloadPrivateSdk(entry, target, 'manifest') : await download(entry.url);
     if (hash(bytes) !== entry.manifest_sha256) throw new Error('SDK manifest does not match the pinned SHA-256');
     mkdirSync(dirname(output), { recursive: true });
     const temporary = mkdtempSync(join(dirname(output), '.sdk-prepare-'));
@@ -107,7 +108,7 @@ export async function prepareSdk(target, destination, lockPath = join(root, 'cor
     try {
       if (entry.archive_url) {
         if (!/^[a-f0-9]{64}$/.test(entry.archive_sha256 || '')) throw new Error('Missing pinned SDK archive SHA-256');
-        const archive = await download(entry.archive_url);
+        const archive = entry.private_repository ? await downloadPrivateSdk(entry, target, 'archive') : await download(entry.archive_url);
         if (hash(archive) !== entry.archive_sha256) throw new Error('SDK archive SHA-256 mismatch');
         inspectArchive(archive);
         const archivePath = join(temporary, 'sdk.tar.gz');
