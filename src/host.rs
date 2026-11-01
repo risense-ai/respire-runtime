@@ -246,6 +246,14 @@ fn model_diagnostics(fallback: &str, registration_errors: &[String]) -> Vec<Stri
     diagnostics
 }
 
+#[cfg(any(windows, test))]
+fn register_selected_catalog(engine: crate::onnx::Engine,
+    register: impl FnOnce() -> Result<Vec<String>>) -> Result<Vec<String>> {
+    // DirectML GPU sessions register their provider in Core. Only NPU discovery
+    // needs the Windows ML catalog; a missing catalog must not block GPU/CPU.
+    if engine == crate::onnx::Engine::Npu { register() } else { Ok(Vec::new()) }
+}
+
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let background_intra_threads = crate::inference_policy::background_threads(
         crate::env::var("RSRS_INTRA_THREADS").ok().as_deref(),
@@ -370,11 +378,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let registration_errors: Vec<String> = {
         #[cfg(windows)]
         {
-            if engine != crate::onnx::Engine::Cpu {
-                core.register_providers()?
-            } else {
-                Vec::new()
-            }
+            register_selected_catalog(engine, || core.register_providers())?
         }
         #[cfg(not(windows))]
         {

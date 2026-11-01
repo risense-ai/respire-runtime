@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn only_npu_requires_a_working_windows_ml_catalog() -> Result<()> {
+    use crate::onnx::Engine;
+    for engine in [Engine::Cpu, Engine::Gpu] {
+        let errors = register_selected_catalog(engine, || anyhow::bail!("catalog unavailable"))?;
+        assert!(errors.is_empty());
+    }
+    assert!(register_selected_catalog(Engine::Npu, || anyhow::bail!("catalog unavailable")).is_err());
+    assert_eq!(register_selected_catalog(Engine::Npu, || Ok(vec!["optional provider".into()]))?,
+        vec!["optional provider".to_owned()]);
+    Ok(())
+}
+
+#[test]
 fn missing_custom_cpu_model_preserves_io_error_and_correct_recovery() -> Result<()> {
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
     let missing = std::env::temp_dir().join(format!("respire-missing-model-{}-{nonce}", std::process::id()));
