@@ -6,12 +6,31 @@ fn missing_custom_cpu_model_preserves_io_error_and_correct_recovery() -> Result<
     let missing = std::env::temp_dir().join(format!("respire-missing-model-{}-{nonce}", std::process::id()));
     assert!(!missing.exists());
     for custom in [false, true] {
-        let failure = model_file_metadata(&missing, custom).err().ok_or_else(|| anyhow::anyhow!("missing model unexpectedly available"))?;
+        let failure = model_file_metadata(&missing, custom, "fp16").err().ok_or_else(|| anyhow::anyhow!("missing model unexpectedly available"))?;
         let io = failure.downcast_ref::<std::io::Error>().ok_or_else(|| anyhow::anyhow!("original IO error missing"))?;
         assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(failure.to_string().contains("correct or unset RSRS_CPU_OWNED_ORT_FILE"), custom);
         assert_eq!(failure.to_string().contains("run rsrs model install-m3"), !custom);
+        assert_eq!(failure.to_string().contains("--model fp16"), !custom);
     }
+    Ok(())
+}
+
+#[test]
+fn model_reads_are_bounded_and_fallback_diagnostics_do_not_accumulate() -> Result<()> {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("respire-model-bounds-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&root)?;
+    let file = root.join("model");
+    std::fs::write(&file, b"abc")?;
+    assert_eq!(read_model_bytes(&file, 3)?, b"abc");
+    assert!(read_model_bytes(&file, 2).is_err());
+    assert!(read_model_bytes(&file, 4).is_err());
+    let errors = vec!["provider unavailable".to_owned()];
+    let expected = vec!["provider unavailable".to_owned(), "using quantized".to_owned()];
+    for _ in 0..3 { assert_eq!(model_diagnostics("using quantized", &errors), expected); }
+    assert_eq!(model_diagnostics("", &errors), errors);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -55,4 +74,15 @@ fn recover_after_options_failure(failure_at: usize) -> Result<()> {
     assert_eq!(core.call("model_probe", json!({"model":"m3","text":"stale cached reuse recovered"}))?["ready"], true);
     core.call("engine_control", json!({"action":"reset"}))?;
     Ok(())
+}
+
+#[test]
+fn user_variants_take_precedence_over_packaged_baselines() {
+    use std::path::PathBuf;
+    let user = PathBuf::from("user-model");
+    let packaged = PathBuf::from("packaged-model");
+    let legacy = PathBuf::from("legacy-model");
+    let candidates = crate::bge::model_directory_candidates(user.clone(), vec![legacy.clone()], Some(packaged.clone()));
+    assert_eq!(&candidates[..3], &[user, legacy, packaged]);
+    assert_eq!(candidates.last(), Some(&PathBuf::from("/usr/lib/respire/models/bge-m3")));
 }

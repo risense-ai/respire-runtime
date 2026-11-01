@@ -10,9 +10,16 @@ pub const CPU_ORT_SIZE: u64 = 569654128;
 pub const CPU_ORT_URL: &str = "https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort";
 
 pub fn cpu_owned_mode(engine: crate::onnx::Engine) -> Result<bool> {
-    mode(engine, cfg!(feature="cpu-owned-ort-experiment"),
-        crate::env::var("RSRS_CPU_OWNED_ORT_EXPERIMENT").ok().as_deref(),
-        crate::env::var_os("RSRS_ORT_PROFILE").is_some())
+    let setting = crate::env::var("RSRS_CPU_OWNED_ORT_EXPERIMENT").ok();
+    let owned = mode(engine, cfg!(feature="cpu-owned-ort-experiment"), setting.as_deref(),
+        crate::env::var_os("RSRS_ORT_PROFILE").is_some())?;
+    owned_variant_policy(owned, setting.as_deref(), crate::onnx::configured_variant(engine)?.name)
+
+}
+fn owned_variant_policy(owned: bool, setting: Option<&str>, variant: &str) -> Result<bool> {
+    if variant == "quantized" { return Ok(owned); }
+    anyhow::ensure!(setting != Some("1"), "CPU owned ORT requires the quantized variant; unset RSRS_CPU_OWNED_ORT_EXPERIMENT or select quantized");
+    Ok(false)
 }
 fn mode(engine: crate::onnx::Engine, compiled: bool, setting: Option<&str>, profiling: bool) -> Result<bool> {
     let requested = match setting {
@@ -71,6 +78,16 @@ fn validated_path(path: PathBuf) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_variants_cannot_silently_use_the_quantized_container() -> Result<()> {
+        assert!(owned_variant_policy(true, None, "quantized")?);
+        for variant in ["fp16", "int8", "uint8", "q4", "q4f16"] {
+            assert!(!owned_variant_policy(true, None, variant)?);
+            assert!(!owned_variant_policy(false, Some("0"), variant)?);
+            assert!(owned_variant_policy(true, Some("1"), variant).is_err());
+        }
+        Ok(())
+    }
     #[test]
     fn preparation_and_loading_share_legacy_selection() -> Result<()> {
         use crate::onnx::Engine::{Cpu,Gpu,Npu};

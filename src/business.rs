@@ -381,18 +381,26 @@ pub mod bge {
             anyhow::ensure!(model_files_present(&user), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3", user.display());
             return Ok(user);
         }
-        let mut candidates = vec![user.clone()];
+        let mut legacy = Vec::new();
         if crate::env::var_os("RSRS_DATA_DIR").is_none() {
             if let Some(home) = dirs::home_dir() {
-                candidates.extend([home.join(".respire/models/bge-m3"), home.join(".onememory/models/bge-m3")]);
+                legacy.extend([home.join(".respire/models/bge-m3"), home.join(".onememory/models/bge-m3")]);
             }
         }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() { candidates.insert(0, parent.join("models/bge-m3")); }
-        }
-        candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        let packaged = std::env::current_exe().ok()
+            .and_then(|exe| exe.parent().map(|parent| parent.join("models/bge-m3")));
+        let candidates = model_directory_candidates(user.clone(), legacy, packaged);
         for directory in candidates { if model_files_present(&directory) { return Ok(directory); } }
         bail!("BGE-M3 quantized files missing; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR (expected {})", user.display())
+    }
+    pub(crate) fn model_directory_candidates(user: PathBuf, legacy: Vec<PathBuf>, packaged: Option<PathBuf>) -> Vec<PathBuf> {
+        // Installers write the user model first. Packaged/system models remain
+        // fallbacks, so an installed variant cannot be shadowed by a baseline.
+        let mut candidates = vec![user];
+        candidates.extend(legacy);
+        candidates.extend(packaged);
+        candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        candidates
     }
     pub fn expand_home(value: &str) -> PathBuf {
         match value.strip_prefix("~/") {
@@ -402,7 +410,7 @@ pub mod bge {
     }
 }
 
-    pub mod onnx {
+pub mod onnx {
     use super::*;
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all="lowercase")]
