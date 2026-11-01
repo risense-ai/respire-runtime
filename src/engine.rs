@@ -146,6 +146,7 @@ impl MemoryEngine {
         entry: &MemoryEntry,
         user: &str,
     ) -> Result<StoredMemory> {
+        validate_metadata(entry.kind.as_str(), &entry.metadata, &entry.unknown_fields)?;
         // v2 payload: metadata and content encrypted as a whole (including parent_id — the causal parent travels with ciphertext so the tree restores across devices)
         let payload = PayloadV2 {
             supersedes: entry.supersedes.clone(),
@@ -165,6 +166,8 @@ impl MemoryEngine {
             importance: entry.importance.clone(),
             device: entry.device.clone(),
             modified_by: entry.modified_by.clone(),
+            metadata: entry.metadata.clone(),
+            unknown_fields: entry.unknown_fields.clone(),
         };
         let payload_json = serde_json::to_string(&payload).context("payload serialize failed")?;
         let (nonce, ciphertext) = keys.encrypt_content(&payload_json)?;
@@ -196,6 +199,7 @@ impl MemoryEngine {
             local_modified_by: entry.modified_by.clone(),
             local_chunks: Vec::new(),
             local_artifact: prepared.artifact,
+            local_meta: entry.metadata.clone(),
         })
     }
 
@@ -247,6 +251,8 @@ impl MemoryEngine {
         content: Option<&str>,
     ) -> Result<()> {
         let plaintext = keys.decrypt_content(&stored.ciphertext, &stored.nonce)?;
+        let typed: PayloadV2 = serde_json::from_str(&plaintext).context("payload parse failed")?;
+        validate_metadata(&typed.kind, &typed.metadata, &typed.unknown_fields)?;
         let mut payload: serde_json::Value = serde_json::from_str(&plaintext)?;
         let object = payload
             .as_object_mut()
@@ -273,6 +279,7 @@ impl MemoryEngine {
         edit: impl FnOnce(&mut PayloadV2)) -> Result<StoredMemory> {
         let plaintext = keys.decrypt_content(&stored.ciphertext, &stored.nonce)?;
         let mut payload: PayloadV2 = serde_json::from_str(&plaintext).context("payload parse failed")?;
+        validate_metadata(&payload.kind, &payload.metadata, &payload.unknown_fields)?;
         let mut expected = payload.clone();
         edit(&mut payload);
         expected.supersedes = payload.supersedes.clone();
@@ -288,6 +295,7 @@ impl MemoryEngine {
         result.ciphertext = ciphertext;
         result.updated_at = stamp.to_owned();
         result.local_modified_by = payload.modified_by;
+        result.local_meta = payload.metadata;
         Ok(result)
     }
 
@@ -300,6 +308,7 @@ impl MemoryEngine {
         let payload_json = keys.decrypt_content(&stored.ciphertext, &stored.nonce)?;
         let mut payload: PayloadV2 =
             serde_json::from_str(&payload_json).context("payload parse failed")?;
+        validate_metadata(&payload.kind, &payload.metadata, &payload.unknown_fields)?;
         payload.parent_id = new_parent.to_owned();
         payload.updated_at = updated_at.to_owned();
         let payload_json = serde_json::to_string(&payload)?;
@@ -309,6 +318,7 @@ impl MemoryEngine {
         out.nonce = nonce;
         out.updated_at = updated_at.to_owned();
         out.local_parent_id = new_parent.to_owned();
+        out.local_meta = payload.metadata;
         Ok(out)
     }
 
@@ -321,7 +331,7 @@ impl MemoryEngine {
             superseded_by: payload.superseded_by,
             see_also: payload.see_also,
             id: stored.id.clone(),
-            kind: Kind::from_str(&payload.kind),
+            kind: payload_kind(&payload.kind, payload.metadata.memory_contract)?,
             tags: payload
                 .tags
                 .split(',')
@@ -342,34 +352,36 @@ impl MemoryEngine {
             importance: payload.importance,
             device: payload.device,
             modified_by: payload.modified_by,
+            metadata: payload.metadata,
+            unknown_fields: payload.unknown_fields,
         })
     }
 
     pub fn recall_local<E: Embedder>(
         keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
     ) -> Result<Vec<MemoryEntry>> {
-        let snapshots = snapshots(keys, stored_list);
+        let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::query(embedder, &snapshots, query, "plain")
     }
 
     pub fn recall_local_scored<E: Embedder>(
         keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
     ) -> Result<Vec<(f32, MemoryEntry)>> {
-        let snapshots = snapshots(keys, stored_list);
+        let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::query(embedder, &snapshots, query, "scored")
     }
 
     pub fn remember_candidates<E: Embedder>(
         keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
     ) -> Result<respire_core_sdk::RememberCandidates> {
-        let snapshots = snapshots(keys, stored_list);
+        let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::remember_candidates(embedder, &snapshots, query)
     }
 
     pub fn recall_local_contextual<E: Embedder>(
         keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
     ) -> Result<Vec<RecalledWithContext>> {
-        let snapshots = snapshots(keys, stored_list);
+        let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::query(embedder, &snapshots, query, "contextual")
     }
 }
@@ -380,9 +392,31 @@ pub fn reembed_embedding<E: Embedder>(keys: &SessionKeys, embedder: &E, stored: 
     Ok((prepared.artifact, String::new()))
 }
 
+fn validate_metadata(kind: &str, metadata: &super::model::MemoryMeta,
+    unknown_fields: &super::model::ExtraFields) -> Result<()> {
+    super::model::metadata::validate_extra_fields(unknown_fields)?;
+    metadata.validate()?;
+    let kind = payload_kind(kind, metadata.memory_contract)?;
+    anyhow::ensure!(metadata.memory_contract != 0 || !matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote),
+        "invalid_metadata: new memory kinds require contract 1");
+    Ok(())
+}
+
+fn payload_kind(value: &str, memory_contract: u8) -> Result<Kind> {
+    let normalized;
+    let wire = if memory_contract == 0 {
+        normalized = value.trim().to_lowercase();
+        normalized.as_str()
+    } else {
+        value
+    };
+    Kind::try_from_str(wire).ok_or_else(|| anyhow::anyhow!("unsupported_metadata: unknown memory kind"))
+}
+
 pub fn hydrate_local(keys: &SessionKeys, stored: &mut StoredMemory) -> Result<()> {
     let payload_json = keys.decrypt_content(&stored.ciphertext, &stored.nonce)?;
     let payload: PayloadV2 = serde_json::from_str(&payload_json).context("payload parse failed")?;
+    payload_kind(&payload.kind, payload.metadata.memory_contract)?;
     stored.local_kind = payload.kind;
     stored.local_tags = payload.tags;
     stored.local_title = payload.title;
@@ -395,13 +429,16 @@ pub fn hydrate_local(keys: &SessionKeys, stored: &mut StoredMemory) -> Result<()
     stored.local_importance = payload.importance;
     stored.local_device = payload.device;
     stored.local_modified_by = payload.modified_by;
+    stored.local_meta = payload.metadata;
     Ok(())
 }
 
-pub fn snapshots(keys: &SessionKeys, stored: &[StoredMemory]) -> Vec<respire_core_sdk::Snapshot> {
-    if respire_core_sdk::resident_scope_active() { return Vec::new(); }
+pub fn snapshots(keys: &SessionKeys, stored: &[StoredMemory]) -> Result<Vec<respire_core_sdk::Snapshot>> {
+    if respire_core_sdk::resident_scope_active() { return Ok(Vec::new()); }
     stored.iter().map(|memory| {
-        let entry = if memory.deleted { None } else { MemoryEngine::open(keys, memory).ok() };
-        respire_core_sdk::Snapshot::new(memory, entry)
+        let entry = if memory.deleted { None } else {
+            Some(MemoryEngine::open(keys, memory).with_context(|| format!("decode snapshot {}", memory.id))?)
+        };
+        Ok(respire_core_sdk::Snapshot::new(memory, entry))
     }).collect()
 }
