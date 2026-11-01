@@ -28,6 +28,10 @@ pub use resident::MemorySourceChanged;
 mod related;
 mod revision;
 pub use revision::read_memory_revision;
+mod review;
+pub use review::ReviewHistoryRow;
+mod review_snapshot;
+pub use review_snapshot::ReviewSnapshot;
 mod sync;
 pub use grants::AccessGrant;
 pub use retrieval::IndexSourceChanged;
@@ -81,6 +85,27 @@ pub struct SkillRunStats {
 
 pub struct LocalStore {
     connection: Connection,
+}
+
+fn json_column<T: serde::de::DeserializeOwned>(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<T> {
+    let text: String = row.get(column)?;
+    serde_json::from_str(&text).map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+        column, rusqlite::types::Type::Text, Box::new(error),
+    ))
+}
+
+/// A local safety gate only; projections and history do not authenticate ciphertext.
+pub fn has_memory_metadata(connection: &Connection) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM review_history)
+         OR EXISTS(SELECT 1 FROM memories
+           WHERE memory_contract IS NOT 0 OR summary IS NOT NULL
+             OR source_refs IS NOT '[]' OR valid_until IS NOT NULL
+             OR review_at IS NOT NULL OR artifact IS NOT NULL OR verification IS NOT NULL
+             OR kind IN ('hypothesis','reflection','self'))",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 fn map_audit(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
@@ -213,12 +238,13 @@ impl LocalStore {
             "SELECT embedding FROM memories WHERE id=?1 AND ciphertext=?2",
             params![memory.id, memory.ciphertext], |row| row.get::<_, Option<Vec<u8>>>(0),
         ).optional()?.flatten();
+        memory.local_meta.validate()?;
         self.connection.execute(
             "INSERT INTO memories
                 (id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, dirty, parent_id, content_head, recall_count, importance,
-                 device, modified_by)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+                 device, modified_by, memory_contract, summary, source_refs, valid_until, review_at, artifact, verification)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
              ON CONFLICT(id) DO UPDATE SET
                 user=excluded.user, ciphertext=excluded.ciphertext, nonce=excluded.nonce,
                 embedding_enc=excluded.embedding_enc, updated_at=excluded.updated_at,
@@ -227,6 +253,9 @@ impl LocalStore {
                 embedding=excluded.embedding, created_at=excluded.created_at,
                 dirty=excluded.dirty, parent_id=excluded.parent_id, content_head=excluded.content_head,
                 importance=excluded.importance, device=excluded.device, modified_by=excluded.modified_by,
+                memory_contract=excluded.memory_contract, summary=excluded.summary, source_refs=excluded.source_refs,
+                valid_until=excluded.valid_until, review_at=excluded.review_at,
+                artifact=excluded.artifact, verification=excluded.verification,
                 recall_count=COALESCE((SELECT recall_count FROM memories WHERE id=excluded.id), excluded.recall_count)",
             params![
                 memory.id,
@@ -250,6 +279,13 @@ impl LocalStore {
                 memory.local_importance,
                 memory.local_device,
                 memory.local_modified_by,
+                memory.local_meta.memory_contract,
+                memory.local_meta.summary,
+                serde_json::to_string(&memory.local_meta.source_refs)?,
+                memory.local_meta.valid_until,
+                memory.local_meta.review_at,
+                memory.local_meta.artifact.as_ref().map(serde_json::to_string).transpose()?,
+                memory.local_meta.verification.as_ref().map(serde_json::to_string).transpose()?,
             ],
         )?;
         self.store_artifact(memory, &self.retrieval_model()?)?;
@@ -331,6 +367,15 @@ impl LocalStore {
             local_modified_by: row.get(19).unwrap_or_default(),
             local_chunks: Vec::new(),
             local_artifact: Vec::new(),
+            local_meta: respire_protocol::MemoryMeta {
+                memory_contract: row.get(20)?,
+                summary: row.get(21)?,
+                source_refs: json_column(row, 22)?,
+                valid_until: row.get(23)?,
+                review_at: row.get(24)?,
+                artifact: json_column(row, 25)?,
+                verification: json_column(row, 26)?,
+            },
         })
     }
 
@@ -338,7 +383,8 @@ impl LocalStore {
     pub fn all_dirty(&self) -> Result<Vec<StoredMemory>> {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
+                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories WHERE dirty = 1",
         )?;
         let rows = statement.query_map([], Self::row_to_memory)?;
@@ -351,7 +397,8 @@ impl LocalStore {
     pub fn missing_embedding(&self) -> Result<Vec<StoredMemory>> {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
+                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories WHERE deleted = 0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=memories.id AND a.source=memories.ciphertext AND a.model=?1)",
         )?;
         let rows = statement.query_map([respire_core_sdk::generation_key(&self.retrieval_model()?)?], Self::row_to_memory)?;
@@ -373,7 +420,8 @@ impl LocalStore {
         }
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
+                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories WHERE parent_id = ?1 AND deleted = 0 ORDER BY recall_count DESC, updated_at",
         )?;
         let rows = statement.query_map(params![parent_id], Self::row_to_memory)?;
@@ -385,7 +433,8 @@ impl LocalStore {
     pub fn roots(&self) -> Result<Vec<StoredMemory>> {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
+                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories WHERE parent_id = '' AND deleted = 0 ORDER BY recall_count DESC, updated_at",
         )?;
         let rows = statement.query_map([], Self::row_to_memory)?;
@@ -779,6 +828,26 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Missing is disabled; malformed values and database failures are errors.
+    /// Enabling requires the external writer-upgrade and backup gates.
+    pub fn memory_metadata_v1_enabled(&self) -> Result<bool> {
+        let value: Option<String> = self.connection.query_row(
+            "SELECT value FROM meta WHERE key = 'memory_metadata_v1_enabled'",
+            [],
+            |row| row.get(0),
+        ).optional()?;
+        match value.as_deref() {
+            None | Some("0") => Ok(false),
+            Some("1") => Ok(true),
+            Some(_) => anyhow::bail!("invalid memory_metadata_v1_enabled value: expected 0 or 1"),
+        }
+    }
+
+    /// Detect retained new-format local state without loading encrypted records.
+    pub fn has_memory_metadata(&self) -> Result<bool> {
+        has_memory_metadata(&self.connection)
+    }
+
     /// meta read/write (sync cursor etc.).
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         Ok(self
@@ -1004,6 +1073,68 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             ",
         )?;
     }
+    // Metadata stays unverified until an explicit, gated review writes its payload.
+    for (name, declaration) in [
+        ("memory_contract", "INTEGER NOT NULL DEFAULT 0"),
+        ("summary", "TEXT"),
+        ("source_refs", "TEXT NOT NULL DEFAULT '[]'"),
+        ("valid_until", "TEXT"),
+        ("review_at", "TEXT"),
+        ("artifact", "TEXT"),
+        ("verification", "TEXT"),
+    ] {
+        if !cols.iter().any(|column| column == name) {
+            connection.execute_batch(&format!(
+                "ALTER TABLE memories ADD COLUMN {name} {declaration}"
+            ))?;
+        }
+    }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS review_history (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL,
+            record_revision TEXT NOT NULL,
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            happened_at TEXT NOT NULL,
+            previous_verification TEXT,
+            next_verification TEXT,
+            previous_review_at TEXT,
+            next_review_at TEXT,
+            reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_history_entry ON review_history(entry_id,seq);
+        DROP TRIGGER IF EXISTS memory_metadata_gate_insert;
+        CREATE TRIGGER memory_metadata_gate_insert BEFORE INSERT ON memories
+        WHEN COALESCE((SELECT value FROM meta WHERE key='memory_metadata_v1_enabled'),'0') <> '1'
+          AND (
+            EXISTS(SELECT 1 FROM memories AS old WHERE old.id=NEW.id
+              AND (old.memory_contract IS NOT NEW.memory_contract OR old.summary IS NOT NEW.summary
+                OR old.source_refs IS NOT NEW.source_refs OR old.valid_until IS NOT NEW.valid_until
+                OR old.review_at IS NOT NEW.review_at OR old.artifact IS NOT NEW.artifact
+                OR old.verification IS NOT NEW.verification))
+            OR (NOT EXISTS(SELECT 1 FROM memories WHERE id=NEW.id)
+              AND (NEW.memory_contract IS NOT 0 OR NEW.summary IS NOT NULL
+                OR NEW.source_refs IS NOT '[]' OR NEW.valid_until IS NOT NULL
+                OR NEW.review_at IS NOT NULL OR NEW.artifact IS NOT NULL OR NEW.verification IS NOT NULL))
+          )
+        BEGIN SELECT RAISE(ABORT,'memory_metadata_v1_disabled'); END;
+        CREATE TRIGGER IF NOT EXISTS memory_metadata_gate_update BEFORE UPDATE ON memories
+        WHEN (OLD.memory_contract IS NOT NEW.memory_contract OR OLD.summary IS NOT NEW.summary
+          OR OLD.source_refs IS NOT NEW.source_refs OR OLD.valid_until IS NOT NEW.valid_until
+          OR OLD.review_at IS NOT NEW.review_at OR OLD.artifact IS NOT NEW.artifact
+          OR OLD.verification IS NOT NEW.verification)
+          AND COALESCE((SELECT value FROM meta WHERE key='memory_metadata_v1_enabled'),'0') <> '1'
+        BEGIN SELECT RAISE(ABORT,'memory_metadata_v1_disabled'); END;
+        CREATE TRIGGER IF NOT EXISTS memory_metadata_revision_update AFTER UPDATE ON memories
+        WHEN OLD.memory_contract IS NOT NEW.memory_contract OR OLD.summary IS NOT NEW.summary
+          OR OLD.source_refs IS NOT NEW.source_refs OR OLD.valid_until IS NOT NEW.valid_until
+          OR OLD.review_at IS NOT NEW.review_at OR OLD.artifact IS NOT NEW.artifact
+          OR OLD.verification IS NOT NEW.verification
+        BEGIN
+            UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1';
+        END;",
+    )?;
     // parent index: create after the column exists (new DBs already have it; old DBs add the column then reach here)
     connection.execute_batch(
         "
@@ -1177,11 +1308,13 @@ impl MemoryTransport for LocalStore {
     fn all(&self, include_deleted: bool) -> Result<Vec<StoredMemory>> {
         let sql = if include_deleted {
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
+                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories"
         } else {
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
+                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories WHERE deleted = 0"
         };
         let mut statement = self.connection.prepare(sql)?;
@@ -1282,6 +1415,7 @@ mod tests {
             local_chunks: Vec::new(),
             local_artifact: Vec::new(),
             local_modified_by: "test-dev".to_owned(),
+            local_meta: Default::default(),
         }
     }
 
@@ -1293,6 +1427,45 @@ mod tests {
         // put a new row
         assert!(MemoryTransport::put(&store, &sample("id-1"))?);
         assert_eq!(MemoryTransport::count(&store)?, 1);
+
+        store.meta_set("memory_metadata_v1_enabled", "1")?;
+        store.connection.execute(
+            "UPDATE memories SET memory_contract=1,summary='kept-summary',review_at='2026-12-01T00:00:00.000Z',
+             artifact='{\"path\":\"artifact.txt\",\"repo\":null,\"commit\":null,\"purpose\":null}' WHERE id='id-1'", [],
+        )?;
+        store.meta_set("memory_metadata_v1_enabled", "0")?;
+        let metadata_before: String = store.connection.query_row(
+            "SELECT json_array(memory_contract,summary,source_refs,valid_until,review_at,artifact,verification)
+             FROM memories WHERE id='id-1'", [], |row| row.get(0),
+        )?;
+        let outgoing_before = store.outgoing()?.len();
+        assert!(store.connection.execute(
+            "INSERT OR REPLACE INTO memories(id,ciphertext) VALUES('id-1','replacement')", [],
+        ).is_err());
+        assert_eq!(store.outgoing()?.len(), outgoing_before);
+        store.connection.execute("UPDATE memories SET dirty=0 WHERE id='id-1'", [])?;
+
+        // The actual put path, outbox trigger and review ledger share the outer transaction.
+        let current_meta = store.all(true)?[0].local_meta.clone();
+        let outgoing_before = store.outgoing()?.len();
+        let failed: anyhow::Result<()> = store.write_transaction(|| {
+            let mut changed = sample("id-1");
+            changed.local_meta = current_meta.clone();
+            changed.ciphertext = "changed".to_owned();
+            changed.updated_at = "2026-09-04T00:00:00.000Z".to_owned();
+            assert!(store.put_inner(&changed, true)?);
+            store.connection.execute(
+                "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at)
+                 VALUES('id-1','target-revision','reschedule','test','now')", [],
+            )?;
+            anyhow::bail!("simulated review failure");
+        });
+        assert!(failed.is_err());
+        assert_eq!(MemoryTransport::all(&store, false)?[0].ciphertext, "aabbcc");
+        assert_eq!(store.outgoing()?.len(), outgoing_before);
+        assert_eq!(store.connection.query_row(
+            "SELECT COUNT(*) FROM review_history", [], |row| row.get::<_, i64>(0),
+        )?, 0);
 
         // LWW: an older version does not overwrite
         let mut stale = sample("id-1");
@@ -1306,9 +1479,14 @@ mod tests {
         let mut fresh = sample("id-1");
         fresh.updated_at = "2026-09-03T00:00:00.000Z".to_owned();
         fresh.local_title = "新标题".to_owned();
+        fresh.local_meta = current_meta.clone();
         assert!(MemoryTransport::put(&store, &fresh)?);
         let all = MemoryTransport::all(&store, false)?;
         assert_eq!(all[0].local_title, "新标题");
+        assert_eq!(metadata_before, store.connection.query_row(
+            "SELECT json_array(memory_contract,summary,source_refs,valid_until,review_at,artifact,verification)
+             FROM memories WHERE id='id-1'", [], |row| row.get::<_, String>(0),
+        )?);
 
         // tombstone: after forget, count=0, but all(true) still sees it
         assert!(MemoryTransport::forget(&store, "id-1")?);
@@ -1319,6 +1497,125 @@ mod tests {
         // Legacy feature bytes are not returned through the public storage layer.
         let all = MemoryTransport::all(&store, true)?;
         assert!(all[0].local_embedding.is_none());
+        let outgoing_before = store.outgoing()?.len();
+        store.write_transaction(|| {
+            assert!(store.put_inner(&sample("id-2"), true)?);
+            store.connection.execute(
+                "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at)
+                 VALUES('id-2','target-revision','reschedule','test','now')", [],
+            )?;
+            Ok(())
+        })?;
+        assert_eq!(store.outgoing()?.len(), outgoing_before + 1);
+        assert_eq!(store.connection.query_row(
+            "SELECT COUNT(*) FROM review_history", [], |row| row.get::<_, i64>(0),
+        )?, 1);
+        let history = store.review_history("id-2", 1)?;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].entry_id, "id-2");
+        assert_eq!(history[0].seq, Some(1));
+        assert!(store.review_history("id-1", 20)?.is_empty());
+        assert!(store.review_history("", 20).is_err());
+        assert!(store.review_history("id-2", 0).is_err());
+        assert!(store.review_history("id-2", 201).is_err());
+
+        let mut reviewed = sample("id-2");
+        reviewed.ciphertext = "newly sealed review".into();
+        reviewed.updated_at = "2026-11-01T00:00:00.000Z".into();
+        reviewed.local_meta.memory_contract = 1;
+        reviewed.local_meta.review_at = Some("2026-12-01T00:00:00.000Z".into());
+        let review = ReviewHistoryRow {
+            seq: None, entry_id: reviewed.id.clone(),
+            record_revision: format!("sha256:{}", "a".repeat(64)),
+            action: "reschedule".into(), actor: r#"{"kind":"owner_client","id":"alice"}"#.into(),
+            happened_at: "2026-11-01T00:00:00.000Z".into(),
+            previous_verification: None, next_verification: None,
+            previous_review_at: None, next_review_at: reviewed.local_meta.review_at.clone(), reason: None,
+        };
+        store.connection.execute(
+            "INSERT INTO core_artifacts(memory_id,model,source,artifact)
+             VALUES('id-2','review-rollback','aabbcc',x'0102')", [],
+        )?;
+        let before_review = store.memory_revision()?;
+        let outgoing_before = store.outgoing()?.len();
+        assert!(store.commit_review(&before_review, &reviewed, &review).is_err());
+        assert_eq!(store.memory_revision()?, before_review);
+        store.meta_set("memory_metadata_v1_enabled", "1")?;
+        assert!(store.commit_review(&"0".repeat(32), &reviewed, &review).is_err());
+        let mut invalid = review.clone();
+        invalid.next_review_at = None;
+        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        invalid = review.clone();
+        invalid.previous_review_at = Some("2026-10-01T00:00:00.000Z".into());
+        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        invalid = review.clone();
+        invalid.action = "unsupported".into();
+        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        invalid.action = "revoke".into();
+        invalid.reason = Some("  ".into());
+        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        store.connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_review_history BEFORE INSERT ON review_history
+             BEGIN SELECT RAISE(ABORT,'simulated review history write failure'); END;",
+        )?;
+        assert!(store.commit_review(&before_review, &reviewed, &review).is_err());
+        assert_eq!(store.memory_revision()?, before_review);
+        assert_eq!(store.outgoing()?.len(), outgoing_before);
+        assert_eq!(store.review_history("id-2", 20)?.len(), 1);
+        let unchanged = store.all(false)?.into_iter().find(|row| row.id == "id-2")
+            .ok_or_else(|| anyhow::anyhow!("missing review target"))?;
+        assert_eq!(unchanged.ciphertext, "aabbcc");
+        assert_eq!(unchanged.local_meta, Default::default());
+        assert_eq!(store.connection.query_row(
+            "SELECT artifact FROM core_artifacts WHERE memory_id='id-2' AND model='review-rollback'",
+            [], |row| row.get::<_, Vec<u8>>(0),
+        )?, vec![1, 2]);
+        store.connection.execute_batch("DROP TRIGGER fail_review_history;")?;
+        store.commit_review(&before_review, &reviewed, &review)?;
+        assert_ne!(store.memory_revision()?, before_review);
+        assert_eq!(store.outgoing()?.len(), outgoing_before + 1);
+        let saved = store.all(false)?.into_iter().find(|row| row.id == "id-2")
+            .ok_or_else(|| anyhow::anyhow!("missing saved review target"))?;
+        assert_eq!(saved.ciphertext, reviewed.ciphertext);
+        assert_eq!(saved.local_meta, reviewed.local_meta);
+        let saved_history = store.review_history("id-2", 1)?;
+        let mut expected_history = review.clone();
+        expected_history.seq = Some(2);
+        assert_eq!(saved_history, vec![expected_history]);
+        let after_review = store.memory_revision()?;
+        let outgoing_after = store.outgoing()?.len();
+        assert!(store.commit_review(&before_review, &reviewed, &review).is_err());
+        let mut older = reviewed.clone();
+        older.updated_at = "2026-10-01T00:00:00.000Z".into();
+        older.ciphertext = "stale review payload".into();
+        let mut next_review = review.clone();
+        next_review.previous_review_at = review.next_review_at.clone();
+        assert!(store.commit_review(&after_review, &older, &next_review).is_err());
+        assert_eq!(store.memory_revision()?, after_review);
+        assert_eq!(store.outgoing()?.len(), outgoing_after);
+        assert_eq!(store.review_history("id-2", 20)?.len(), 2);
+        let (_, delta, _) = store.retrieval_delta(None)?;
+        assert!(delta.iter().any(|row| row.id == "id-2" && row.local_meta == reviewed.local_meta));
+        let snapshot = store.review_snapshot()?;
+        assert_eq!(snapshot.memory_revision, store.memory_revision()?);
+        assert!(snapshot.memories.iter().any(|row| row.id == "id-1" && row.deleted));
+        assert!(snapshot.unavailable_ids.is_empty());
+        let head = serde_json::to_string(&reviewed)?;
+        store.connection.execute(
+            "INSERT INTO sync_remote_heads(id,rev,wire) VALUES('id-2',1,?1)", [&head],
+        )?;
+        assert!(store.review_snapshot()?.unavailable_ids.is_empty());
+        let mut pending = reviewed.clone();
+        pending.ciphertext = "unmaterialized head".into();
+        store.connection.execute(
+            "UPDATE sync_remote_heads SET wire=?1 WHERE id='id-2'",
+            [serde_json::to_string(&pending)?],
+        )?;
+        assert_eq!(store.review_snapshot()?.unavailable_ids, vec!["id-2"]);
+        store.connection.execute("INSERT INTO sync_base(id,rev) VALUES('id-2',1)", [])?;
+        assert!(store.review_snapshot()?.unavailable_ids.is_empty());
+        store.connection.execute("UPDATE sync_remote_heads SET decode_error='unavailable key' WHERE id='id-2'", [])?;
+        assert_eq!(store.review_snapshot()?.unavailable_ids, vec!["id-2"]);
         Ok(())
     }
 
@@ -1440,6 +1737,65 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         assert_eq!(derived, (String::new(), None, 1));
+        let metadata: (i64, String, Option<String>) = connection.query_row(
+            "SELECT memory_contract,source_refs,verification FROM memories",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(metadata, (0, "[]".to_owned(), None));
+        let store = LocalStore { connection };
+        assert!(!store.has_memory_metadata()?);
+        assert!(!store.memory_metadata_v1_enabled()?);
+        for assignment in [
+            "memory_contract=1", "summary=''", "source_refs='[{\"id\":\"source\"}]'",
+            "valid_until='later'", "review_at='later'", "artifact='{}'", "verification='{}'",
+            "kind='hypothesis'", "kind='reflection'", "kind='self'",
+        ] {
+            store.meta_set("memory_metadata_v1_enabled", "1")?;
+            let transaction = store.connection.unchecked_transaction()?;
+            store.connection.execute(&format!("UPDATE memories SET {assignment}"), [])?;
+            store.meta_set("memory_metadata_v1_enabled", "0")?;
+            assert!(store.has_memory_metadata()?, "undetected metadata: {assignment}");
+            transaction.rollback()?;
+            assert!(!store.has_memory_metadata()?);
+        }
+        store.connection.execute(
+            "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at)
+             VALUES('deleted-entry','revision','reschedule','owner_client','now')", [],
+        )?;
+        assert!(store.has_memory_metadata()?);
+        store.connection.execute("DELETE FROM review_history", [])?;
+        assert!(!store.has_memory_metadata()?);
+        store.meta_set("memory_metadata_v1_enabled", "0")?;
+        assert!(!store.memory_metadata_v1_enabled()?);
+        assert!(store.connection.execute(
+            "UPDATE memories SET memory_contract=1 WHERE id='kept-id'", [],
+        ).is_err());
+        store.meta_set("memory_metadata_v1_enabled", "invalid")?;
+        assert!(store.memory_metadata_v1_enabled().is_err());
+        assert!(store.connection.execute(
+            "UPDATE memories SET review_at='later' WHERE id='kept-id'", [],
+        ).is_err());
+        store.meta_set("memory_metadata_v1_enabled", "1")?;
+        assert!(store.memory_metadata_v1_enabled()?);
+        let before = store.connection.query_row(
+            "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get::<_, String>(0),
+        )?;
+        store.connection.execute("UPDATE memories SET review_at='later' WHERE id='kept-id'", [])?;
+        assert_ne!(before, store.connection.query_row(
+            "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get::<_, String>(0),
+        )?);
+        store.meta_set("memory_metadata_v1_enabled", "0")?;
+        assert!(!store.memory_metadata_v1_enabled()?);
+        store.connection.execute("UPDATE memories SET dirty=0 WHERE id='kept-id'", [])?;
+        assert!(store.connection.execute(
+            "UPDATE memories SET review_at=NULL WHERE id='kept-id'", [],
+        ).is_err());
+        store.connection.execute("DROP TABLE review_history", [])?;
+        assert!(store.has_memory_metadata().is_err());
+        store.connection.execute("DROP TABLE meta", [])?;
+        assert!(store.memory_metadata_v1_enabled().is_err());
+        let connection = store.connection;
         assert_eq!(
             connection.query_row("SELECT COUNT(*) FROM memories", [], |row| row
                 .get::<_, i64>(0))?,
@@ -1465,6 +1821,10 @@ mod tests {
             .query_map([], |row| row.get(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         assert!(!columns.iter().any(|column| column == "embedding_enc"));
+        assert!(!columns.iter().any(|column| column == "memory_contract"));
+        assert!(!connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='review_history'",
+        )?.exists([])?);
         let original: (String, String) =
             connection.query_row("SELECT ciphertext,nonce FROM memories", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))

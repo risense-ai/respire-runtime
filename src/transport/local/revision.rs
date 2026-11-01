@@ -18,6 +18,13 @@ pub fn read_memory_revision(path: &Path) -> Result<String> {
     read_revision(&connection)
 }
 
+impl super::LocalStore {
+    /// Read the CAS token on this connection, including the active transaction.
+    pub fn memory_revision(&self) -> Result<String> {
+        read_revision(&self.connection)
+    }
+}
+
 fn read_revision(connection: &Connection) -> Result<String> {
     let revision: String = connection
         .query_row(
@@ -45,7 +52,9 @@ mod tests {
     fn initialized(connection: Connection) -> Result<LocalStore> {
         migrate(&connection)?;
         connection.execute_batch(include_str!("sync_schema.sql"))?;
-        Ok(LocalStore { connection })
+        let store = LocalStore { connection };
+        store.initialize_sync_storage()?;
+        Ok(store)
     }
 
     #[test]
@@ -225,6 +234,35 @@ mod tests {
         assert_eq!(outgoing[0].blob.ciphertext, updated.ciphertext);
         assert_eq!(outgoing[0].blob.nonce, updated.nonce);
         assert_eq!(outgoing[0].blob.updated_at, updated.updated_at);
+        let before_head = store.memory_revision()?;
+        store.connection.execute(
+            "INSERT INTO sync_remote_heads(id,rev,wire,decode_error) VALUES('pending',1,'wire','decode failed')", [],
+        )?;
+        assert_ne!(store.memory_revision()?, before_head);
+        let before_ack = store.memory_revision()?;
+        store.connection.execute(
+            "UPDATE sync_remote_heads SET rev=rev,wire=wire,decode_error=decode_error,op_id='ack' WHERE id='pending'", [],
+        )?;
+        assert_eq!(store.memory_revision()?, before_ack);
+        for statement in [
+            "UPDATE sync_remote_heads SET rev=2 WHERE id='pending'",
+            "UPDATE sync_remote_heads SET wire='new wire' WHERE id='pending'",
+            "UPDATE sync_remote_heads SET decode_error='' WHERE id='pending'",
+        ] {
+            let before = store.memory_revision()?;
+            store.connection.execute(statement, [])?;
+            assert_ne!(store.memory_revision()?, before);
+        }
+        let before_rollback = store.memory_revision()?;
+        let failed: Result<()> = store.write_transaction(|| {
+            store.connection.execute("DELETE FROM sync_remote_heads WHERE id='pending'", [])?;
+            assert_ne!(store.memory_revision()?, before_rollback);
+            anyhow::bail!("simulated review CAS rollback");
+        });
+        assert!(failed.is_err());
+        assert_eq!(store.memory_revision()?, before_rollback);
+        store.connection.execute("DELETE FROM sync_remote_heads WHERE id='pending'", [])?;
+        assert_ne!(store.memory_revision()?, before_rollback);
         Ok(())
     }
 
@@ -278,6 +316,7 @@ mod tests {
             before,
             "uncommitted writes are invisible"
         );
+        assert_ne!(store.memory_revision()?, before, "same-connection CAS sees the transaction");
         store.connection.execute_batch("COMMIT;")?;
         assert_ne!(read_memory_revision(&path)?, before);
         let bytes = std::fs::read(&path)?;

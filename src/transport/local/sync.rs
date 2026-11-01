@@ -68,6 +68,7 @@ impl LocalStore {
                 ))?;
             }
         }
+        self.connection.execute_batch(include_str!("sync_revision_schema.sql"))?;
         self.connection.execute(
             "UPDATE sync_remote_heads AS h SET (wire,op_id,decode_error)=(
                 SELECT i.wire,i.op_id,i.decode_error FROM sync_inbox i
@@ -868,7 +869,9 @@ mod tests {
             serde_json::to_string(&reopened.outgoing()?)?,
             expected_pending
         );
-        assert_eq!(reopened.meta_get("memory_revision_v1")?, expected_revision);
+        // Backfilling the newly available remote wire changes review CAS inputs.
+        let upgraded_revision = reopened.memory_revision()?;
+        assert_ne!(Some(&upgraded_revision), expected_revision.as_ref());
         assert_eq!(reopened.sync_counts()?, (1, 1, 1));
         assert_eq!(reopened.conflict_metrics()?, (2, 1, 0, 0));
         assert_eq!(reopened.meta_get("sync_v2_cursor")?.as_deref(), Some("1"));
@@ -892,7 +895,7 @@ mod tests {
             serde_json::to_string(&reopened.outgoing()?)?,
             expected_pending
         );
-        assert_eq!(reopened.meta_get("memory_revision_v1")?, expected_revision);
+        assert_eq!(reopened.memory_revision()?, upgraded_revision);
         Ok(())
     }
 
