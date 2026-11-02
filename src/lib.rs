@@ -6,7 +6,7 @@
 pub mod env;
 mod host;
 mod feedback_contract;
-pub use host::{query_settings_from_env,feedback_enabled};
+pub use host::{query_settings_from_env,feedback_enabled,legacy_effective_model_config};
 mod cpu_model;
 pub mod worker;
 #[cfg(windows)]
@@ -22,6 +22,7 @@ mod business;
 pub use business::*;
 mod inference_policy;
 mod model_selection;
+pub mod profiles;
 mod resident;
 pub use resident::{ResidentLease, ResidentScope, resident_scope_active, BackgroundIndexScope, defer_indexing, indexing_deferred};
 
@@ -445,9 +446,9 @@ mod ffi {
             let config_value: Value = serde_json::from_slice(config)?;
             let device_options = cfg!(windows) && config_value["engine"].as_str() != Some("cpu");
             let mut options = SessionOptionsContext { profiling:crate::env::var_os("RSRS_ORT_PROFILE").map(std::path::PathBuf::from),
-                device_options, cache:crate::onnx::host_cache_dir(), error:None };
+                device_options, native:if config_value["host_execution_provider"].as_bool() == Some(true) { crate::profiles::current()?.and_then(|s|s.backend_profile.native) } else {None}, cache:crate::onnx::host_cache_dir(), error:None };
             // Borrowed slices and host option callback remain alive through this call.
-            let options_required = options.profiling.is_some() || options.device_options;
+            let options_required = config_value["backend"].as_str() != Some("host_transport") && (options.profiling.is_some() || options.device_options || options.native.is_some());
             #[cfg(test)]
             let options_required = options_required || test_option_failure_armed();
             let code = if options_required {
@@ -483,6 +484,7 @@ mod ffi {
     }
 
     struct SessionOptionsContext { profiling: Option<std::path::PathBuf>, device_options:bool,
+        native:Option<crate::profiles::NativeProfile>,
         cache:std::path::PathBuf, error: Option<anyhow::Error> }
 
     #[cfg(test)]
@@ -516,7 +518,38 @@ mod ffi {
             #[cfg(test)]
             fail_options_for_test()?;
             let api = unsafe { &*api.cast::<ort_sys::OrtApi>() };
-            if !device.is_null() {
+            if let Some(native) = &context.native {
+                if native.provider == "CPUExecutionProvider" {
+                    anyhow::ensure!(native.device_id.as_deref().is_none_or(|id|id == "0"),"CPU provider accepts only device 0");
+                    for (key,value) in &native.provider_options {
+                        let enabled = match value.as_str() { "1" | "true" => true, "0" | "false" => false, _ => anyhow::bail!("CPU provider option {key} requires true/false or 1/0") };
+                        let status = match key.as_str() {
+                            "enable_cpu_mem_arena" => unsafe { if enabled {(api.EnableCpuMemArena)(options.cast())} else {(api.DisableCpuMemArena)(options.cast())} },
+                            "enable_mem_pattern" => unsafe { if enabled {(api.EnableMemPattern)(options.cast())} else {(api.DisableMemPattern)(options.cast())} },
+                            _ => anyhow::bail!("unsupported CPU provider option {key}"),
+                        };
+                        if !status.0.is_null() {
+                            let message = unsafe { std::ffi::CStr::from_ptr((api.GetErrorMessage)(status.0)) }.to_string_lossy().into_owned();
+                            unsafe { (api.ReleaseStatus)(status.0) };
+                            anyhow::bail!("configure custom CPU provider: {message}");
+                        }
+                    }
+                } else {
+                let name = std::ffi::CString::new(native.provider.trim_end_matches("ExecutionProvider"))?;
+                let mut entries = native.provider_options.clone();
+                if let Some(id) = &native.device_id { entries.entry("device_id".to_owned()).or_insert_with(||id.clone()); }
+                let keys = entries.keys().map(|s|std::ffi::CString::new(s.as_bytes())).collect::<std::result::Result<Vec<_>,_>>()?;
+                let values = entries.values().map(|s|std::ffi::CString::new(s.as_bytes())).collect::<std::result::Result<Vec<_>,_>>()?;
+                let key_ptrs = keys.iter().map(|s|s.as_ptr()).collect::<Vec<_>>();
+                let value_ptrs = values.iter().map(|s|s.as_ptr()).collect::<Vec<_>>();
+                let status = unsafe { (api.SessionOptionsAppendExecutionProvider)(options.cast(),name.as_ptr(),key_ptrs.as_ptr(),value_ptrs.as_ptr(),keys.len()) };
+                if !status.0.is_null() {
+                    let message = unsafe { std::ffi::CStr::from_ptr((api.GetErrorMessage)(status.0)) }.to_string_lossy().into_owned();
+                    unsafe { (api.ReleaseStatus)(status.0) };
+                    anyhow::bail!("configure custom host provider: {message}");
+                }
+                }
+            } else if !device.is_null() {
                 anyhow::ensure!(!environment.is_null(), "invalid Core native environment");
                 let name = unsafe { (api.EpDevice_EpName)(device.cast()) };
                 anyhow::ensure!(!name.is_null(), "missing Core selected provider name");

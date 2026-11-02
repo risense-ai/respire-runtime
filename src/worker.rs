@@ -45,6 +45,7 @@ struct RequestFrame<'a> {
     payload: &'a Value,
     index_root: Option<std::path::PathBuf>,
     transport: bool,
+    selection: Option<crate::profiles::Selection>,
 }
 
 #[derive(serde::Serialize)]
@@ -476,7 +477,7 @@ pub(crate) fn execute(
     }
     let root = crate::business::index_root().ok();
     if let Err(error) = process.send(&RequestFrame {
-        id, operation, payload, index_root: root, transport: transport.is_some(),
+        id, operation, payload, index_root: root, transport: transport.is_some(), selection: crate::profiles::current()?,
     })
     {
         let _ = process.retire(&format!("IPC write failed: {error:#}"));
@@ -686,7 +687,8 @@ pub fn run() -> Result<()> {
                     if operation == "test_worker_callback" {
                         return callback(&json!({"synthetic_fixture":true}));
                     }
-                    let result = if frame["transport"].as_bool() == Some(true) {
+                    let selection = frame.get("selection").filter(|v| !v.is_null()).cloned().map(serde_json::from_value::<crate::profiles::Selection>).transpose()?;
+                    let execute = || -> Result<Value> { if frame["transport"].as_bool() == Some(true) {
                         crate::business::execute_with_transport::<Value>(
                             operation,
                             payload,
@@ -694,8 +696,8 @@ pub fn run() -> Result<()> {
                         )
                     } else {
                         crate::business::execute::<Value>(operation, payload)
-                    }?;
-                    Ok(result)
+                    } };
+                    match selection { Some(selection) => crate::profiles::scoped(selection, execute), None => execute() }
                 })();
                 let body = match &result {
                     Ok(value) => ResponseBody::Result { result: value },
@@ -781,7 +783,7 @@ mod tests {
         let payload = json!({"nested":[null, {"body":"synthetic unicode fixture", "ids":[1,2,3]}]});
         let request = RequestFrame {
             id: u64::MAX, operation: "query", payload: &payload,
-            index_root: None, transport: true,
+            index_root: None, transport: true, selection: None,
         };
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &request)?;

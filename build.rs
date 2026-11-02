@@ -41,6 +41,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         println!("cargo:rustc-cfg=model_input_stream_contract");
     }
+    for capability in ["embedding_profile_contract", "embedding_transport_contract"] {
+        if manifest[capability].as_u64() != Some(1) {
+            return Err(format!("Core SDK lacks {capability} 1; install and pin the paired multi-model SDK").into());
+        }
+    }
     let target = env::var("TARGET")?;
     let lock_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");
     let lock: Value = serde_json::from_slice(&fs::read(&lock_path)?)?;

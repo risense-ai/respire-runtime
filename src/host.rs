@@ -215,6 +215,7 @@ fn model_cache() -> Result<std::sync::MutexGuard<'static, Option<LoadedModel>>> 
 }
 
 pub(crate) fn reset_model_cache() -> Result<()> {
+    crate::profiles::reset_cache()?;
     *model_cache()? = None;
     Ok(())
 }
@@ -247,44 +248,53 @@ fn model_diagnostics(fallback: &str, registration_errors: &[String]) -> Vec<Stri
 }
 
 #[cfg(any(windows, test))]
-fn register_selected_catalog(engine: crate::onnx::Engine,
+pub(crate) fn register_selected_catalog(engine: crate::onnx::Engine,
     register: impl FnOnce() -> Result<Vec<String>>) -> Result<Vec<String>> {
     // DirectML GPU sessions register their provider in Core. Only NPU discovery
     // needs the Windows ML catalog; a missing catalog must not block GPU/CPU.
     if engine == crate::onnx::Engine::Npu { register() } else { Ok(Vec::new()) }
 }
 
+struct LegacyModel {
+    engine: crate::onnx::Engine,
+    variant: crate::onnx::ModelVariant,
+    cpu_owned: bool,
+    fallback_note: String,
+}
+fn legacy_model(directory: &std::path::Path) -> Result<LegacyModel> {
+    let engine = crate::onnx::configured_engine()?;
+    let mut variant = crate::onnx::configured_variant(engine)?;
+    let cpu_owned = crate::bge::cpu_owned_mode(engine)?;
+    let mut fallback_note = String::new();
+    if !cpu_owned && engine != crate::onnx::Engine::Cpu && !crate::onnx::explicit_model_selection()?
+        && !directory.join(crate::onnx::variant_file_name(variant.name)).exists() {
+        fallback_note = format!("accelerator default {} is not installed; using quantized until rsrs model install --model {} completes",variant.name,variant.name);
+        variant = crate::onnx::parse_variant("quantized")?;
+    }
+    Ok(LegacyModel {engine,variant,cpu_owned,fallback_note})
+}
+pub fn legacy_effective_model_config() -> Result<Value> {
+    let selected = legacy_model(&crate::bge::discovered_model_dir())?;
+    let weights = if selected.cpu_owned { crate::bge::CPU_ORT_SHA256 } else { selected.variant.sha256 };
+    let tokenizer = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790";
+    Ok(json!({"model":"m3","backend":"onnx","engine":selected.engine,
+        "asset_id":format!("{weights}:{tokenizer}"),"execution_timeout_secs":120,
+        "model_sha256":weights,"tokenizer_sha256":tokenizer,
+        "cpu_owned_ort_experiment":selected.cpu_owned}))
+}
+
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
+    if let Some(selection) = crate::profiles::current()? { return crate::profiles::initialize(core, &selection); }
     let background_intra_threads = crate::inference_policy::background_threads(
         crate::env::var("RSRS_INTRA_THREADS").ok().as_deref(),
         std::thread::available_parallelism().map_or(2, |cores| cores.get()),
     )?;
     let directory = crate::bge::resolve_model_dir()?;
-    let engine = crate::onnx::configured_engine()?;
-    let selected_variant = crate::onnx::configured_variant(engine)?;
-    // The owned container is the fixed quantized model, not a container for
-    // arbitrary ONNX variants. Explicit non-quantized selections use legacy ORT.
-    let cpu_owned_experiment = crate::bge::cpu_owned_mode(engine)?;
-    anyhow::ensure!(!cpu_owned_experiment || cfg!(feature = "cpu-owned-ort-experiment"), "CPU owned ORT experiment requires an experimental SDK build");
-    anyhow::ensure!(!cpu_owned_experiment || engine == crate::onnx::Engine::Cpu, "CPU owned ORT experiment requires CPU; GPU/NPU remain legacy");
-    anyhow::ensure!(!cpu_owned_experiment || crate::env::var_os("RSRS_ORT_PROFILE").is_none(),
-        "CPU owned ORT experiment does not support host profiling callbacks; disable the experiment for legacy profiling");
-    let mut variant = selected_variant;
-    // Accelerator installs upgraded before variant selection existed may lack
-    // the fp16 default file. Keep them inferring on quantized until the
-    // operator picks a variant explicitly; explicit selections stay strict.
-    let mut fallback_note = String::new();
-    if !cpu_owned_experiment
-        && engine != crate::onnx::Engine::Cpu
-        && !crate::onnx::explicit_model_selection()?
-        && !directory.join(crate::onnx::variant_file_name(variant.name)).exists()
-    {
-        fallback_note = format!(
-            "accelerator default {} is not installed; using quantized until `rsrs model install --model {}` completes",
-            variant.name, variant.name
-        );
-        variant = crate::onnx::parse_variant("quantized")?;
-    }
+    let selected = legacy_model(&directory)?;
+    let engine = selected.engine;
+    let variant = selected.variant;
+    let cpu_owned_experiment = selected.cpu_owned;
+    let fallback_note = selected.fallback_note;
     let model_path = if cpu_owned_experiment {
         crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").map(std::path::PathBuf::from)
             .unwrap_or_else(|| crate::bge::cpu_ort_path(&directory))

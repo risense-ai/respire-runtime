@@ -21,12 +21,22 @@ pub fn set_index_root(root: &std::path::Path) -> Result<()> {
 }
 
 pub fn execute<T: DeserializeOwned>(operation: &str, mut payload: Value) -> Result<T> {
-    execute_inner(operation, &mut payload, None)
+    let selection = crate::profiles::current()?;
+    if let Some(selection) = selection.as_ref().filter(|s| s.backend_profile.backend == "host_transport") {
+        let mut transport = |request: &Value| crate::profiles::transport(request, selection);
+        execute_inner(operation, &mut payload, Some(&mut transport))
+    } else { execute_inner(operation, &mut payload, None) }
 }
 
 pub fn execute_with_transport<T: DeserializeOwned>(operation: &str, mut payload: Value,
     transport: &mut dyn FnMut(&Value) -> Result<Value>) -> Result<T> {
-    execute_inner(operation, &mut payload, Some(transport))
+    let selection = crate::profiles::current()?;
+    let mut combined = |request: &Value| {
+        if request["operation"] == "embedding" && crate::profiles::transport_available()? {
+            crate::profiles::transport(request, selection.as_ref().context("embedding selection missing")?)
+        } else { transport(request) }
+    };
+    execute_inner(operation, &mut payload, Some(&mut combined))
 }
 
 // The parent still submits one request with one worker deadline. Bound only
@@ -93,6 +103,16 @@ fn execute_index_batches(payload: &mut Value,
 
 fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
     transport: Option<&mut dyn FnMut(&Value) -> Result<Value>>) -> Result<T> {
+    let selected = crate::profiles::current()?;
+    if let Some(selection) = selected.as_ref() {
+        if !matches!(operation,"memory_evidence_evaluate" | "memory_metadata_validate" | "classify_business") && payload.get("config").is_none() && payload["model"].as_str() == Some(&selection.model) {
+            payload["config"] = selection.config()?;
+        }
+    }
+    if selected.is_none() && payload["model"].as_str() == Some("m3") && payload.get("config").is_none()
+        && !matches!(operation,"memory_evidence_evaluate" | "memory_metadata_validate" | "classify_business") {
+        payload["config"] = crate::legacy_effective_model_config()?;
+    }
     let reset = operation == "engine_control" && payload["action"] == "reset";
     let _gate = crate::model_selection::gate(operation == "host_load_selection" || reset)?;
     crate::resident::apply_scope(operation, payload);
@@ -131,7 +151,11 @@ fn execute_inner<T: DeserializeOwned>(operation: &str, payload: &mut Value,
             *slot = Some(crate::Core::new()?);
         }
         let core = slot.as_mut().context("Core not initialized")?;
-        if payload["model"].as_str() == Some("m3")
+        if operation == "index_generation" && payload.get("config").is_some() {
+            let capabilities = core.capabilities()?;
+            anyhow::ensure!(capabilities["embedding_profile_contract"].as_u64() == Some(1), "paired Core SDK with embedding profile contract 1 is required");
+        }
+        if payload["model"].as_str().is_some_and(|model| model == "m3" || selected.as_ref().is_some_and(|s| s.model == model))
             && matches!(operation, "prepare" | "query" | "query_business" | "remember_candidates" | "candidate_report" | "taxonomy_classify" | "model_probe" | "model_status")
             && payload["lexical_only"].as_bool() != Some(true) {
             crate::host::initialize_model(core)?;
@@ -353,19 +377,23 @@ pub mod bge {
     use super::*;
     use std::path::{Path, PathBuf};
     #[derive(Clone)]
-    pub struct BgeEmbedder { model: String, dims: usize }
+    pub struct BgeEmbedder { model: String, dims: usize, generation: String }
     impl BgeEmbedder {
-        pub fn load() -> Result<Self> { Self::load_model("m3") }
+        pub fn load() -> Result<Self> { Self::load_model(&crate::profiles::current()?.map(|s| s.model).unwrap_or_else(|| "m3".to_owned())) }
         pub fn load_model(model: &str) -> Result<Self> {
+            let selected = crate::profiles::current()?;
+            let model = if model == "m3" { selected.as_ref().map(|s|s.model.as_str()).unwrap_or(model) } else { model };
+            anyhow::ensure!(selected.as_ref().is_none_or(|selection| selection.model == model),"requested model does not match the selected profile");
             if crate::indexing_deferred() || crate::resident::resident_lexical_only() {
-                anyhow::ensure!(model == "m3", "only BGE-M3 is supported");
-                return Ok(Self { model:model.to_owned(), dims:1024 });
+                let dims = crate::profiles::current()?.map(|s| s.profile.embedding["dimensions"].as_u64().unwrap_or(1024) as usize).unwrap_or(1024);
+                return Ok(Self { model:model.to_owned(), dims, generation:crate::generation_key(model)? });
             }
             let value: Value = execute("model_status", json!({"model":model}))?;
             let dims = value["dimensions"].as_u64().context("missing model dimensions")? as usize;
-            Ok(Self { model:model.to_owned(), dims })
+            Ok(Self { model:model.to_owned(), dims, generation:crate::generation_key(model)? })
         }
         pub fn model_name(&self) -> &str { &self.model }
+        pub fn generation_key(&self) -> &str { &self.generation }
         pub fn probe(&self, text: &str) -> Result<Value> { execute("model_probe", json!({"model":self.model,"text":text})) }
     }
     impl search::Embedder for BgeEmbedder {
@@ -383,23 +411,20 @@ pub mod bge {
     pub fn m3_model_dir() -> PathBuf { crate::env::var("RSRS_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
     pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file() }
     pub fn resolve_model_dir() -> Result<PathBuf> {
-        let explicit = crate::env::var("RSRS_M3_DIR").ok().filter(|value| !value.trim().is_empty());
+        let directory = discovered_model_dir();
+        anyhow::ensure!(model_files_present(&directory), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR",directory.display());
+        Ok(directory)
+    }
+
+    pub(crate) fn discovered_model_dir() -> PathBuf {
         let user = m3_model_dir();
-        if explicit.is_some() {
-            anyhow::ensure!(model_files_present(&user), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3", user.display());
-            return Ok(user);
-        }
+        if crate::env::var("RSRS_M3_DIR").is_ok_and(|value| !value.trim().is_empty()) { return user; }
         let mut legacy = Vec::new();
         if crate::env::var_os("RSRS_DATA_DIR").is_none() {
-            if let Some(home) = dirs::home_dir() {
-                legacy.extend([home.join(".respire/models/bge-m3"), home.join(".onememory/models/bge-m3")]);
-            }
+            if let Some(home) = dirs::home_dir() { legacy.extend([home.join(".respire/models/bge-m3"),home.join(".onememory/models/bge-m3")]); }
         }
-        let packaged = std::env::current_exe().ok()
-            .and_then(|exe| exe.parent().map(|parent| parent.join("models/bge-m3")));
-        let candidates = model_directory_candidates(user.clone(), legacy, packaged);
-        for directory in candidates { if model_files_present(&directory) { return Ok(directory); } }
-        bail!("BGE-M3 quantized files missing; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR (expected {})", user.display())
+        let packaged = std::env::current_exe().ok().and_then(|exe|exe.parent().map(|parent|parent.join("models/bge-m3")));
+        model_directory_candidates(user.clone(),legacy,packaged).into_iter().find(|directory|model_files_present(directory)).unwrap_or(user)
     }
     pub(crate) fn model_directory_candidates(user: PathBuf, legacy: Vec<PathBuf>, packaged: Option<PathBuf>) -> Vec<PathBuf> {
         // Installers write the user model first. Packaged/system models remain
@@ -539,6 +564,7 @@ pub mod onnx {
     }
     /// Validate, load, infer and persist without ever downloading assets.
     pub fn load_selection(engine: Engine, variant: &str) -> Result<Value> {
+        anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
         let variant = parse_variant(variant)?;
         crate::model_selection::check_overrides(engine, variant)?;
@@ -546,12 +572,14 @@ pub mod onnx {
     }
     pub fn save_engine(engine: Engine) -> Result<()> { save_engine_with_variant(engine, None) }
     pub fn save_engine_with_variant(engine: Engine, model: Option<&str>) -> Result<()> {
+        anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
         let (path, value) = engine_settings(engine, false, model)?;
         commit_engine_settings(&path, &value, reset_sessions)
     }
     /// Persist an explicit model variant selection without touching the engine.
     pub fn save_model_variant(model: &str) -> Result<()> {
+        anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
         let (path, mut value) = read_inference_json()?;
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }

@@ -49,14 +49,14 @@ pub(crate) fn scoped<T>(engine: Engine, variant: ModelVariant, action: impl FnOn
     let _restore = Restore(SELECTION.with(|slot| slot.replace(Some((engine, variant)))));
     action()
 }
-fn verify(path: &Path, size: u64, hash: &str) -> Result<()> {
+pub(crate) fn verify(path: &Path, size: u64, hash: &str) -> Result<()> {
     let mut file = std::fs::File::open(path).with_context(|| format!("missing weights/dependency: {}; download first", path.display()))?;
     anyhow::ensure!(file.metadata()?.is_file() && file.metadata()?.len() == size,
         "invalid size: {}; download the pinned model again", path.display());
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
     loop { let count = file.read(&mut buffer)?; if count == 0 { break; } digest.update(&buffer[..count]); }
-    anyhow::ensure!(format!("{:x}",digest.finalize()) == hash,
+    anyhow::ensure!(format!("{:x}",digest.finalize()).eq_ignore_ascii_case(hash),
         "SHA-256/model identity mismatch: {}", path.display());
     Ok(())
 }
