@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn private_frames_preserve_values_and_reject_truncation() {
-        let value = json!({"id":9,"result":{"text":"synthetic unicode fixture 中文"}});
+        let value = json!({"id":9,"result":{"text":"synthetic unicode fixture \u{4e2d}\u{6587}"}});
         let mut bytes = Vec::new();
         assert!(write_frame(&mut bytes, &value).is_ok());
         assert_eq!(read_frame(&mut bytes.as_slice()).ok(), Some(value));

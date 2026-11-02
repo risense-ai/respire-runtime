@@ -243,7 +243,7 @@ mod core_wire_tests {
 
     #[test]
     fn borrowed_request_and_moved_result_preserve_protocol() -> Result<()> {
-        for payload in [Value::Null, json!({"nested":[1,"你好",{"flag":true}]}), json!([1,2,3])] {
+        for payload in [Value::Null, json!({"nested":[1,"\u{4f60}\u{597d}",{"flag":true}]}), json!([1,2,3])] {
             let bytes = serde_json::to_vec(&CoreRequest {
                 schema_version:1, request_id:"42", operation:"query", payload:&payload,
             })?;

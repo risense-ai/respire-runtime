@@ -79,7 +79,7 @@ fn probe() -> Result<Value> {
     if tests::FAIL_PROBES.with(|fail| { let count = fail.get(); fail.set(count.saturating_sub(1)); count > 0 }) {
         anyhow::bail!("injected post-reset trial failure");
     }
-    let result = bge::BgeEmbedder::load_model("m3")?.probe("Respire model load verification 本地推理验证")?;
+    let result = bge::BgeEmbedder::load_model("m3")?.probe("Respire model load verification \u{672c}\u{5730}\u{63a8}\u{7406}\u{9a8c}\u{8bc1}")?;
     anyhow::ensure!(result["ready"] == true && result["cosine"].as_f64().is_some_and(|v| v.is_finite() && v >= 0.99),
         "actual model inference receipt rejected: {result}");
     Ok(result)
