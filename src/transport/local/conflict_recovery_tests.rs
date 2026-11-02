@@ -1,4 +1,4 @@
-// 合成密文与临时数据库，不读取真实账号、记忆或 Runtime。
+// Synthetic ciphertext and a temporary database; never reads a real account, memory or Runtime.
 fn unreadable_head(store: &LocalStore, keys: &SessionKeys) -> Result<()> {
     unreadable_head_at(store, keys, "2026-09-19T00:00:00.004Z")
 }
@@ -172,7 +172,7 @@ fn sync_unreadable_head_recovery_preserves_pending_and_dirty_local_edits() -> Re
         let (_dir, store, keys) = fixture()?;
         unreadable_head(&store, &keys)?;
         if dirty_only {
-            // 覆盖旧库仅 dirty 标记、尚无 outbox 的情况。
+            // Covers the legacy store that has only the dirty flag set and no outbox yet.
             store
                 .connection
                 .execute("UPDATE memories SET dirty=1 WHERE id='entry'", [])?;
@@ -229,7 +229,7 @@ fn sync_recovery_server_race_is_not_resolved_and_retry_does_not_duplicate() -> R
     unreadable_head(&store, &keys)?;
     store.queue_conflict_resolution(&keys, "epoch", 2, 4, "take_incoming", None)?;
     let ops = store.outgoing()?;
-    // 模拟服务端 CAS 拒绝：服务端 head 已由 4 变为 5。
+    // Simulate a server-side CAS rejection: the server head already moved from 4 to 5.
     assert_eq!(ops[0].base_rev, Some(4));
     store.acknowledge(
         &ops,

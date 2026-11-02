@@ -217,7 +217,8 @@ impl LocalStore {
         action: &str,
         content: Option<&str>,
     ) -> Result<()> {
-        // epoch 检查与读取 head、创建操作必须共享写锁，避免换库快照插入其间。
+        // The epoch check, the head read and the op creation must share one write lock so a
+        // swapped-database snapshot cannot slip in between them.
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         if self.meta_get("sync_v2_epoch")?.as_deref() != Some(epoch) {
             bail!("sync the current epoch first; older epoch versions can be restored with sync-restore");
@@ -248,8 +249,9 @@ impl LocalStore {
         }
         let wire:String=self.connection.query_row("SELECT wire FROM sync_inbox WHERE epoch=?1 AND rev=?2 AND status IN ('conflict_saved','legacy_rejected')",params![epoch,rev],|r|r.get(0))?;
         let candidate: StoredMemory = serde_json::from_str(&wire)?;
-        // 对同一候选和已审阅 head 的重试复用不可变操作。服务端拒绝后也不能
-        // 再造新 op_id，否则重复调用会不断累积 conflict_saved 历史。
+        // A retry for the same candidate against the reviewed head reuses the immutable op. A
+        // server rejection must not mint a new op_id either, or repeated calls keep piling up
+        // conflict_saved history.
         if action == "take_incoming" {
             let prior: Option<bool> = self
                 .connection

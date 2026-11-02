@@ -42,8 +42,8 @@ fn fixture() -> Result<Fixture> {
     let provider = crate::memory::search::HashingEmbedder::default();
     // Concise remember uses the ordinary Context default as well as explicit Time.
     let mut entry: MemoryEntry = serde_json::from_value(serde_json::json!({
-        "id":ID,"kind":"Context","tags":[],"title":"活动轨迹 2026-10-27",
-        "content":"【09:00】synthetic common event","user":"synthetic-account",
+        "id":ID,"kind":"Context","tags":[],"title":"\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-27",
+        "content":"\u{3010}09:00\u{3011}synthetic common event","user":"synthetic-account",
         "computer":"device-a","project":"synthetic","created_at":"2026-10-27T09:00:00.000Z",
         "updated_at":"2026-10-27T09:00:00.000Z","modified_by":"device-a",
         "emotion":-1.0,"parent_id":"","importance":"trivial"
@@ -62,7 +62,7 @@ fn fixture() -> Result<Fixture> {
     )?;
     entry
         .content
-        .push_str("\n【09:16】synthetic locally confirmed append");
+        .push_str("\n\u{3010}09:16\u{3011}synthetic locally confirmed append");
     entry.updated_at = "2026-10-27T09:16:00.000Z".into();
     entry.modified_by = "device-b".into();
     let appended = MemoryEngine::seal(&keys, &provider, &entry, "synthetic-account")?;
@@ -71,7 +71,7 @@ fn fixture() -> Result<Fixture> {
     let outgoing = store.outgoing()?;
     let mut remote = entry.clone();
     remote.content =
-        "【09:00】synthetic common event\n【09:09】synthetic independent remote event".into();
+        "\u{3010}09:00\u{3011}synthetic common event\n\u{3010}09:09\u{3011}synthetic independent remote event".into();
     remote.updated_at = "2026-10-27T09:09:00.000Z".into();
     remote.modified_by = "device-a".into();
     let head = MemoryEngine::seal(&keys, &provider, &remote, "synthetic-account")?;

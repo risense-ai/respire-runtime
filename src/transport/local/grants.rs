@@ -27,7 +27,7 @@ impl LocalStore {
     pub fn create_grant(&self, root: &str, label: &str) -> Result<(AccessGrant, String)> {
         uuid::Uuid::parse_str(root)?;
         if label.trim().is_empty() || label.len() > 128 {
-            bail!("grant label must be 1–128 bytes of non-empty text");
+            bail!("grant label must be 1\u{2013}128 bytes of non-empty text");
         }
         let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
         let exists = self.connection.query_row(
@@ -74,7 +74,7 @@ impl LocalStore {
                 .query_map(params![like], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             match hits.len() {
-                0 => bail!("no such grant (or already revoked): {id} — run rsrs grant list"),
+                0 => bail!("no such grant (or already revoked): {id} \u{2014} run rsrs grant list"),
                 1 => hits
                     .into_iter()
                     .next()

@@ -1396,8 +1396,8 @@ mod tests {
             updated_at: "2026-09-02T00:00:00.000Z".to_owned(),
             deleted: false,
             local_kind: "context".to_owned(),
-            local_tags: "rust,加密".to_owned(),
-            local_title: "标题".to_owned(),
+            local_tags: "rust,\u{52a0}\u{5bc6}".to_owned(),
+            local_title: "\u{6807}\u{9898}".to_owned(),
             local_project: "respire".to_owned(),
             local_computer: "pc1".to_owned(),
             local_embedding: Some(
@@ -1408,7 +1408,7 @@ mod tests {
             ),
             local_parent_id: String::new(),
             local_created_at: "2026-09-02T00:00:00.000Z".to_owned(),
-            local_content_head: "旧备份库关系边 演示内容".to_owned(),
+            local_content_head: "\u{65e7}\u{5907}\u{4efd}\u{5e93}\u{5173}\u{7cfb}\u{8fb9} \u{6f14}\u{793a}\u{5185}\u{5bb9}".to_owned(),
             local_recall_count: 0,
             local_importance: "normal".to_owned(),
             local_device: "test-dev".to_owned(),
@@ -1470,19 +1470,19 @@ mod tests {
         // LWW: an older version does not overwrite
         let mut stale = sample("id-1");
         stale.updated_at = "2026-01-01T00:00:00.000Z".to_owned();
-        stale.local_title = "旧标题".to_owned();
+        stale.local_title = "\u{65e7}\u{6807}\u{9898}".to_owned();
         assert!(!MemoryTransport::put(&store, &stale)?);
         let all = MemoryTransport::all(&store, false)?;
-        assert_eq!(all[0].local_title, "标题");
+        assert_eq!(all[0].local_title, "\u{6807}\u{9898}");
 
         // a newer version overwrites
         let mut fresh = sample("id-1");
         fresh.updated_at = "2026-09-03T00:00:00.000Z".to_owned();
-        fresh.local_title = "新标题".to_owned();
+        fresh.local_title = "\u{65b0}\u{6807}\u{9898}".to_owned();
         fresh.local_meta = current_meta.clone();
         assert!(MemoryTransport::put(&store, &fresh)?);
         let all = MemoryTransport::all(&store, false)?;
-        assert_eq!(all[0].local_title, "新标题");
+        assert_eq!(all[0].local_title, "\u{65b0}\u{6807}\u{9898}");
         assert_eq!(metadata_before, store.connection.query_row(
             "SELECT json_array(memory_contract,summary,source_refs,valid_until,review_at,artifact,verification)
              FROM memories WHERE id='id-1'", [], |row| row.get::<_, String>(0),
@@ -1913,7 +1913,7 @@ mod lww_tie_tests {
         let dir = tempfile::tempdir()?;
         let store = LocalStore::open(&dir.path().join("t.db"))?;
         let mut m = sample("11111111-2222-3333-4444-555555555555");
-        m.local_title = "旧".into();
+        m.local_title = "\u{65e7}".into();
         store.put(&m)?;
 
         // Local reparent (set_parent bumps updated_at and marks dirty)
@@ -1925,7 +1925,7 @@ mod lww_tie_tests {
         let mut remote = local.clone();
         remote.local_parent_id = String::new();
         let took = store.put_synced(&remote)?;
-        assert!(!took, "tie + local dirty → pull must be refused");
+        assert!(!took, "tie + local dirty \u{2192} pull must be refused");
         assert_eq!(store.all(false)?[0].local_parent_id, "p1");
         Ok(())
     }

@@ -383,30 +383,30 @@ mod tests {
 
     #[test]
     fn unicode_short_queries_window_and_legacy_marks_are_supported() -> Result<()> {
-        assert_eq!(similarity("中文记忆", "中文记忆"), 1.0);
-        assert_eq!(similarity("中", "中"), 1.0);
+        assert_eq!(similarity("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}"), 1.0);
+        assert_eq!(similarity("\u{4e2d}", "\u{4e2d}"), 1.0);
         assert_eq!(similarity("", ""), 0.0);
         assert!(similarity("enable feature", "do not enable feature") < 1.0); // Not semantic negation detection.
         let root = tempfile::tempdir()?;
         let store = LocalStore::open(&root.path().join("db"))?;
         let id = "full-entry".to_string();
-        store.log_query("中文记忆", "p", "s", &[id.clone()], &[1.0])?;
+        store.log_query("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &[id.clone()], &[1.0])?;
         store.mark_verdict(&[id.clone()], true)?;
         let now = chrono::Utc::now().timestamp();
         let allowed = BTreeSet::from([id.clone()]);
         assert_eq!(
             store
-                .feedback_counts("中文记忆", "p", "s", &allowed, 0.5, now)?
+                .feedback_counts("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &allowed, 0.5, now)?
                 .good
                 .get(&id),
             Some(&1)
         );
         assert!(store
-            .feedback_counts("中文记忆", "p", "s", &allowed, 0.5, now + 181 * 86400)?
+            .feedback_counts("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &allowed, 0.5, now + 181 * 86400)?
             .good
             .is_empty());
         assert!(store
-            .feedback_counts("中文记忆", "p", "s", &allowed, f64::NAN, now)
+            .feedback_counts("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &allowed, f64::NAN, now)
             .is_err());
         Ok(())
     }

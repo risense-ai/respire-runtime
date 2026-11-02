@@ -1,4 +1,4 @@
--- 恢复请求的持久幂等键；只保存版本与操作标识，不保存正文或密钥。
+-- Durable idempotency key for a recovery request; stores only the revision and op id, never the body or keys.
 CREATE TABLE IF NOT EXISTS sync_recovery_intents (
     epoch TEXT NOT NULL, conflict_rev INTEGER NOT NULL, head_rev INTEGER NOT NULL,
     op_id TEXT NOT NULL,
