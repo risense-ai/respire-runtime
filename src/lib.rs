@@ -160,17 +160,17 @@ impl Kind {
     /// Chinese kind label (display).
     pub fn display_zh(&self) -> &'static str {
         match self {
-            Kind::Context => "上下文",
-            Kind::Decision => "决策",
-            Kind::Preference => "偏好",
-            Kind::Task => "任务",
-            Kind::Emotion => "情绪",
-            Kind::Time => "时间",
-            Kind::Skill => "技能",
-            Kind::Knowledge => "知识",
-            Kind::Hypothesis => "假设",
-            Kind::Reflection => "反思",
-            Kind::SelfNote => "自我说明",
+            Kind::Context => "\u{4e0a}\u{4e0b}\u{6587}",
+            Kind::Decision => "\u{51b3}\u{7b56}",
+            Kind::Preference => "\u{504f}\u{597d}",
+            Kind::Task => "\u{4efb}\u{52a1}",
+            Kind::Emotion => "\u{60c5}\u{7eea}",
+            Kind::Time => "\u{65f6}\u{95f4}",
+            Kind::Skill => "\u{6280}\u{80fd}",
+            Kind::Knowledge => "\u{77e5}\u{8bc6}",
+            Kind::Hypothesis => "\u{5047}\u{8bbe}",
+            Kind::Reflection => "\u{53cd}\u{601d}",
+            Kind::SelfNote => "\u{81ea}\u{6211}\u{8bf4}\u{660e}",
         }
     }
 }
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(Kind::from_str("knowledge"), Kind::Knowledge);
         assert_eq!(Kind::from_str("whatever"), Kind::Context);
         assert_eq!(Kind::Decision.as_str(), "decision");
-        assert_eq!(Kind::Knowledge.display_zh(), "知识");
+        assert_eq!(Kind::Knowledge.display_zh(), "\u{77e5}\u{8bc6}");
     }
 
     #[test]
@@ -416,10 +416,10 @@ mod tests {
     #[test]
     fn stored_serde_drops_local_fields() -> anyhow::Result<()> {
         let mut s = StoredMemory::new_pending("id-1".to_owned(), "u".to_owned());
-        s.local_title = "秘密标题".to_owned();
+        s.local_title = "\u{79d8}\u{5bc6}\u{6807}\u{9898}".to_owned();
         s.local_embedding = Some(vec![1, 2]);
         let json = serde_json::to_string(&s)?;
-        assert!(!json.contains("秘密标题"));
+        assert!(!json.contains("\u{79d8}\u{5bc6}\u{6807}\u{9898}"));
         assert!(!json.contains("local_title"));
         assert!(!json.contains("local_embedding"));
         Ok(())
