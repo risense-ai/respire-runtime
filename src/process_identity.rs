@@ -393,7 +393,7 @@ mod tests {
         for (command, expected) in [
             (r#""C:\space path\rsrs.exe" --runtime-internal"#, true),
             (
-                r#""C:\中文\rsrs.exe" --json --direct runtime run --managed example"#,
+                "\"C:\\\u{4e2d}\u{6587}\\rsrs.exe\" --json --direct runtime run --managed example",
                 true,
             ),
             (r#""C:\rsrs.exe" web --internal"#, true),
