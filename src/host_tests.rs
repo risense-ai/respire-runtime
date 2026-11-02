@@ -48,17 +48,34 @@ fn model_reads_are_bounded_and_fallback_diagnostics_do_not_accumulate() -> Resul
 }
 
 #[test]
-fn failed_second_session_reloads_the_prior_configuration_without_restart() -> Result<()> {
+#[ignore = "requires pinned model fixtures; injects legacy native-options callback only"]
+fn legacy_failed_second_session_reloads_the_prior_configuration_without_restart() -> Result<()> {
     recover_after_options_failure(2)
 }
 
 #[test]
-fn failed_first_session_reloads_the_prior_configuration_without_restart() -> Result<()> {
+#[ignore = "requires pinned model fixtures; injects legacy native-options callback only"]
+fn legacy_failed_first_session_reloads_the_prior_configuration_without_restart() -> Result<()> {
     recover_after_options_failure(1)
 }
 
 fn recover_after_options_failure(failure_at: usize) -> Result<()> {
-    if std::env::var_os("RSRS_CORE_TEST_MODEL_DIR").is_none() { return Ok(()); }
+    anyhow::ensure!(std::env::var_os("RSRS_CORE_TEST_MODEL_DIR").is_some(),
+        "explicit pinned model fixture required for legacy native-options recovery test");
+    // Stream commit bypasses this callback; owned non-stream loads reject it.
+    // Keep this fixture explicitly legacy without changing product defaults or
+    // leaking the override into later owned/stream tests, including on panic.
+    struct LegacyMode(Option<std::ffi::OsString>);
+    impl Drop for LegacyMode {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("RSRS_CPU_OWNED_ORT_EXPERIMENT", value),
+                None => std::env::remove_var("RSRS_CPU_OWNED_ORT_EXPERIMENT"),
+            }
+        }
+    }
+    let _legacy = LegacyMode(std::env::var_os("RSRS_CPU_OWNED_ORT_EXPERIMENT"));
+    std::env::set_var("RSRS_CPU_OWNED_ORT_EXPERIMENT", "0");
     struct Cleanup;
     impl Drop for Cleanup {
         fn drop(&mut self) {
