@@ -312,6 +312,7 @@ fn process() -> Result<Arc<Process>> {
         "RSRS_DATA_DIR",
         "RSRS_M3_DIR",
         "RSRS_ENGINE",
+        "RSRS_MODEL_VARIANT",
         "RSRS_ORT_PROFILE",
         #[cfg(feature = "cpu-owned-ort-experiment")]
         "RSRS_CPU_OWNED_ORT_EXPERIMENT",
@@ -640,8 +641,6 @@ pub fn run() -> Result<()> {
                     let operation = operation_value
                         .as_str()
                         .context("Core worker operation missing")?;
-                    let reset_model_cache = operation == "engine_control"
-                        && frame["payload"]["action"] == "reset";
                     #[cfg(feature = "native-fault-tests")]
                     if operation == "test_worker_hold" {
                         loop {
@@ -685,9 +684,6 @@ pub fn run() -> Result<()> {
                     } else {
                         crate::business::execute::<Value>(operation, payload)
                     }?;
-                    if reset_model_cache {
-                        crate::host::reset_model_cache()?;
-                    }
                     Ok(result)
                 })();
                 let body = match &result {

@@ -21,6 +21,7 @@ use std::{marker::PhantomData, rc::Rc};
 mod business;
 pub use business::*;
 mod inference_policy;
+mod model_selection;
 mod resident;
 pub use resident::{ResidentLease, ResidentScope, resident_scope_active, BackgroundIndexScope, defer_indexing, indexing_deferred};
 
