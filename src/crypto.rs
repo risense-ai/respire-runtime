@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(urk, urk2);
         // Data encryption
         let data_key = derive_subkey(&urk, b"onememory:data:v1")?;
-        let original = "跨设备共享的记忆！";
+        let original = "\u{8de8}\u{8bbe}\u{5907}\u{5171}\u{4eab}\u{7684}\u{8bb0}\u{5fc6}\u{ff01}";
         let (d_nonce, ct) = encrypt_item(&data_key, original)?;
         assert_eq!(decrypt_item(&data_key, &ct, &d_nonce)?, original);
         Ok(())
