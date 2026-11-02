@@ -71,7 +71,7 @@ impl LocalStore {
         let ids = self.connection.prepare("SELECT memory_id FROM retrieval_changes WHERE revision>?1")?
             .query_map([since], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let generation = respire_core_sdk::generation_key(&self.retrieval_model()?)?;
+        let generation = self.active_generation_key()?;
         let mut changed = Vec::new();
         let mut removed = Vec::new();
         for id in ids {

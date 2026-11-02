@@ -401,7 +401,7 @@ impl LocalStore {
                  memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
              FROM memories WHERE deleted = 0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=memories.id AND a.source=memories.ciphertext AND a.model=?1)",
         )?;
-        let rows = statement.query_map([respire_core_sdk::generation_key(&self.retrieval_model()?)?], Self::row_to_memory)?;
+        let rows = statement.query_map([self.active_generation_key()?], Self::row_to_memory)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -880,7 +880,7 @@ impl LocalStore {
         let n = self.connection.execute(
             "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
              SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
-            params![id, respire_core_sdk::generation_key(&self.retrieval_model()?)?, source_ciphertext, artifact],
+            params![id, self.active_generation_key()?, source_ciphertext, artifact],
         )?;
         Ok(n > 0)
     }

@@ -28,7 +28,6 @@ impl LocalStore {
         &self,
         out: &mut [crate::memory::model::StoredMemory],
     ) -> Result<()> {
-        let model = self.retrieval_model()?;
         let mut stmt = self.connection.prepare(
             "SELECT a.memory_id,a.source,a.artifact FROM core_artifacts a
              JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source
@@ -39,7 +38,7 @@ impl LocalStore {
         let positions: std::collections::HashMap<String, usize> = out.iter()
             .enumerate().map(|(index, memory)| (memory.id.clone(), index)).collect();
         debug_assert_eq!(positions.len(), out.len(), "catalog IDs must be unique");
-        let mut rows = stmt.query(params![generation_key(&model)?])?;
+        let mut rows = stmt.query(params![self.active_generation_key()?])?;
         while let Some(row) = rows.next()? {
             let id = row.get_ref(0)?.as_str()?;
             let source = row.get_ref(1)?.as_str()?;
@@ -140,9 +139,16 @@ impl LocalStore {
         keys: &crate::memory::SessionKeys,
         embedder: &E,
         model: &str,
-        mut progress: impl FnMut(usize, usize) -> Result<()>,
+        progress: impl FnMut(usize, usize) -> Result<()>,
     ) -> Result<usize> {
-        anyhow::ensure!(model == "m3", "unknown index model");
+        self.build_index_with_progress(keys, embedder, model, true, progress)
+    }
+
+    /// Checkpoint a candidate generation without publishing an active model.
+    pub fn build_index_with_progress<E: crate::memory::search::Embedder>(
+        &self, keys: &crate::memory::SessionKeys, embedder: &E, model: &str,
+        activate: bool, mut progress: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<usize> {
         progress(0, 0)?;
         let missing = self.index_missing(model)?;
         if !missing && self.meta_get("retrieval_model")?.as_deref() == Some(model)
@@ -202,16 +208,50 @@ impl LocalStore {
         if missing != 0 {
             return Err(IndexSourceChanged { pending: missing }.into());
         }
-        tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)",
-            params![model],
-        )?;
+        if activate {
+            tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)", params![model])?;
+        }
         tx.commit()?;
         Ok(completed)
     }
 
     pub fn retrieval_model(&self) -> Result<String> {
-        Ok("m3".to_owned())
+        let selection = self.active_selection()?;
+        Ok(selection.map(|s| s.model).unwrap_or_else(|| "m3".to_owned()))
+    }
+
+    pub fn active_selection(&self) -> Result<Option<respire_core_sdk::profiles::Selection>> {
+        self.meta_get(respire_core_sdk::profiles::ACTIVE_SELECTION_KEY)?.map(|v| serde_json::from_str(&v).map_err(Into::into)).transpose()
+    }
+
+    pub fn active_generation_key(&self) -> Result<String> {
+        match self.active_selection()? {
+            Some(selection) => respire_core_sdk::profiles::generation_key_for_profile(&selection),
+            None => respire_core_sdk::execute("index_generation",serde_json::json!({"model":"m3","config":respire_core_sdk::legacy_effective_model_config()?})),
+        }
+    }
+
+    pub fn queue_selection(&self, selection: &respire_core_sdk::profiles::Selection, task_id: &str) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.connection,rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_pending_selection_v1',?1)",[serde_json::to_string(selection)?])?;
+        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_pending_task_v1',?1)",[serde_json::to_string(&serde_json::json!({"id":task_id,"phase":"queued"}))?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Only the library transaction publishes the complete immutable selection.
+    pub fn activate_selection(&self, selection: &respire_core_sdk::profiles::Selection, source_revision: &str) -> Result<()> {
+        anyhow::ensure!(!selection.generation.is_empty(),"candidate generation is missing");
+        let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let revision: String = tx.query_row("SELECT value FROM meta WHERE key='memory_revision_v1'", [], |r| r.get(0))?;
+        anyhow::ensure!(revision == source_revision, "library sources changed before model activation; resume the switch");
+        let missing: i64 = tx.query_row("SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=m.id AND a.model=?1 AND a.source=m.ciphertext)",[&selection.generation],|row|row.get(0))?;
+        anyhow::ensure!(missing == 0,"candidate main index is incomplete");
+        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", [respire_core_sdk::profiles::ACTIVE_SELECTION_KEY.to_owned(),serde_json::to_string(selection)?])?;
+        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)", [&selection.model])?;
+        tx.execute("DELETE FROM meta WHERE key IN ('embedding_pending_selection_v1','embedding_pending_task_v1')", [])?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
