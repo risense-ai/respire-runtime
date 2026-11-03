@@ -8,10 +8,10 @@ const requireValue = (ok, message) => { if (!ok) throw new Error(message); };
 export function assertTrustedDownloadContext(env) {
   requireValue(!['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME), 'Private SDK credentials are forbidden in PR contexts');
   if (env.GITHUB_ACTIONS === 'true') {
-    requireValue(env.GITHUB_REPOSITORY === 'risense-ai/respire-cli'
+    requireValue(env.GITHUB_REPOSITORY === 'risense-ai/respire-runtime'
       && env.GITHUB_REF === 'refs/heads/main'
       && ['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME),
-    'Private SDK download requires a trusted main-branch CLI workflow');
+    'Private SDK download requires a trusted main-branch runtime workflow');
   }
 }
 
