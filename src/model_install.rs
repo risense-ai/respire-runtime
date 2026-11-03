@@ -45,9 +45,9 @@ const TOKENIZER_SHA256: &str = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0
 fn write_model_notices(dest: &Path, model: &str, repo: &str, revision: &str) -> Result<()> {
     let source = serde_json::json!({"repository":repo,"revision":revision});
     std::fs::write(dest.join("MODEL-SOURCE.json"), serde_json::to_vec_pretty(&source)?)?;
-    std::fs::write(dest.join("MODEL-CARD.md"), include_str!("../../docs/model-notices/bge-m3-MODEL-CARD.md"))?;
-    std::fs::write(dest.join("LICENSE.txt"), include_str!("../../docs/model-notices/FlagEmbedding-LICENSE.txt"))?;
-    std::fs::write(dest.join("NOTICE-SOURCES.json"), include_str!("../../docs/model-notices/sources.json"))?;
+    std::fs::write(dest.join("MODEL-CARD.md"), include_str!("../../../docs/model-notices/bge-m3-MODEL-CARD.md"))?;
+    std::fs::write(dest.join("LICENSE.txt"), include_str!("../../../docs/model-notices/FlagEmbedding-LICENSE.txt"))?;
+    std::fs::write(dest.join("NOTICE-SOURCES.json"), include_str!("../../../docs/model-notices/sources.json"))?;
     let _ = model;
     Ok(())
 }

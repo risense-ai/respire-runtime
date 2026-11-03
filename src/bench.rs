@@ -356,7 +356,7 @@ pub fn snapshot_params() -> anyhow::Result<BTreeMap<String, String>> {
     m.insert("feedback_contract".into(),respire_app::core_sdk::FEEDBACK_CONTRACT.to_string());
     {
         use sha2::{Digest,Sha256};
-        m.insert("sdk_lock_sha256".into(),format!("{:x}",Sha256::digest(include_bytes!("../../sdk/core-sdk.lock.json"))));
+        m.insert("sdk_lock_sha256".into(),format!("{:x}",Sha256::digest(include_bytes!("../../../sdk/core-sdk.lock.json"))));
     }
     m.insert("cli_version".into(),env!("CARGO_PKG_VERSION").into());
     Ok(m)
