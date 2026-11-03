@@ -452,7 +452,19 @@ jobs:
             while (Date.now() < deadline) {
               try {
                 const response = await fetch(`http://127.0.0.1:${port}/api/health`, {signal: AbortSignal.timeout(3000)});
-                if (response.ok) { health = await response.json(); break; }
+                if (response.ok) {
+                  const candidate = await response.json();
+                  const compat = candidate.runtime?.runtime_compat || {};
+                  if (candidate.store_ready === true && candidate.runtime_version === version &&
+                      compat.min_cli === process.env.EXPECTED_MIN_CLI &&
+                      compat.max_cli === process.env.EXPECTED_MAX_CLI) {
+                    health = candidate;
+                    break;
+                  }
+                  console.log(`runtime is reachable but not ready: ${JSON.stringify({
+                    store_ready: candidate.store_ready, runtime_version: candidate.runtime_version, runtime_compat: compat,
+                  })}`);
+                }
               } catch {}
               await new Promise(resolve => setTimeout(resolve, 1000));
             }
