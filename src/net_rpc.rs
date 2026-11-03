@@ -467,9 +467,9 @@ fn linux_stat_is_running(stat: &str, pid: u32) -> Result<bool> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeProcessIdentity {
-    started_at: String,
-    executable: String,
+pub struct RuntimeProcessIdentity {
+    pub started_at: String,
+    pub executable: String,
 }
 
 /// An endpoint PID is only a locator. Verify runtime arguments and creation time
