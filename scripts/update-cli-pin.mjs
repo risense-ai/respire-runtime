@@ -40,6 +40,11 @@ if (builds) {
     if (!existsSync(path)) throw new Error(`Missing ${path}; download all release assets first`);
     const report = JSON.parse(readFileSync(path, 'utf8'));
     if (report.runtime_version !== version || report.triple !== target) throw new Error(`Build report mismatch in ${path}`);
+    const binaryFile = `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`;
+    if (report.binary_file !== binaryFile || !/^[a-f0-9]{64}$/.test(report.binary_sha256 || '')) {
+      throw new Error(`Invalid binary identity/digest in ${path}`);
+    }
+    if (!/^[a-f0-9]{64}$/.test(report.sha256 || '')) throw new Error(`Invalid archive digest in ${path}`);
     digests[target] = report.sha256;
   }
   const unique = new Set(Object.values(digests));

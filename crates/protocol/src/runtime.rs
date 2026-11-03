@@ -67,9 +67,10 @@ pub struct RuntimeBuildMeta {
     pub triple: String,
     /// sha256 of `rsrs-runtime-<triple>.tar.gz`.
     pub sha256: String,
-    /// Bare binary name inside the tarball, e.g. `rsrs-runtime.exe`.
+    /// Triple-qualified binary name inside the tarball and release inventory,
+    /// e.g. `rsrs-runtime-x86_64-pc-windows-msvc.exe`.
     pub binary_file: String,
-    /// sha256 of the bare binary.
+    /// sha256 of the triple-qualified binary.
     pub binary_sha256: String,
     pub compat: RuntimeCompat,
 }
@@ -121,7 +122,7 @@ mod tests {
             tag: "v1.0.21-dev.1".to_owned(),
             triple: "x86_64-pc-windows-msvc".to_owned(),
             sha256: "abc".to_owned(),
-            binary_file: "rsrs-runtime.exe".to_owned(),
+            binary_file: "rsrs-runtime-x86_64-pc-windows-msvc.exe".to_owned(),
             binary_sha256: "def".to_owned(),
             compat: RuntimeCompat { min_cli: "1.0.20".to_owned(), max_cli: "*".to_owned() },
         };
