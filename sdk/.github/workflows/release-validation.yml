@@ -1,0 +1,299 @@
+name: Release validation
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        default: ''
+        type: string
+      full_validation:
+        default: true
+        type: boolean
+    outputs:
+      sha:
+        value: ${{ jobs.resolve.outputs.sha }}
+      version:
+        value: ${{ jobs.resolve.outputs.version }}
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: CLI commit, branch or tag to validate without publishing
+        required: true
+        default: main
+        type: string
+      full_validation:
+        description: Run historical native upgrades as well as build/package checks
+        default: true
+        type: boolean
+
+cache-mode: read
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          fetch-depth: 0
+      - id: source
+        env:
+          BUILD_VERSION: ${{ inputs.version }}
+          BUILD_REF: ${{ inputs.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Manual branch candidates need a fresh dev identity; a stale checked-in
+          # prerelease would correctly fail the live registry version diagnostic.
+          if [ -z "$BUILD_VERSION" ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [[ ! "$BUILD_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BUILD_VERSION="$(node npm/scripts/next-dev-version.mjs)"
+          fi
+          if [ -n "$BUILD_VERSION" ]; then node npm/scripts/set-build-version.mjs "$BUILD_VERSION"; fi
+          node -e 'const fs=require("fs"); const m=require("./npm/artifact-manifest.json"); fs.appendFileSync(process.env.GITHUB_OUTPUT,`version=${m.cliVersion}\n`)'
+
+  binaries:
+    needs: resolve
+    name: Release (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Key release compilation dependencies before version rewriting
+        id: release-key
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TARGET" == *-musl ]]; then
+            bash scripts/build-linux-musl.sh "$RELEASE_TARGET" key
+          else
+            node scripts/rust-ci-cache.mjs key release "$RELEASE_TARGET"
+          fi
+      - uses: actions/cache/restore@v4
+        id: release-cache
+        with:
+          path: .rust-release-cache
+          key: ${{ steps.release-key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Restore native release compilation dependencies
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: node scripts/rust-ci-cache.mjs restore release ${{ matrix.target }}
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
+      - name: Validate release manifests
+        run: |
+          node npm/scripts/check-manifest.mjs
+          node scripts/check-sdk-release.mjs
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-1-restore
+        if: steps.sdk-cache-1.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
+          key: ${{ steps.sdk-cache-1.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-1.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Prepare pinned binary Core SDK
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: node scripts/fetch-core-sdk.mjs ${{ matrix.target }}
+      - name: Preserve the Intel macOS deployment baseline
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=13.4' >> "$GITHUB_ENV"
+      - name: Match the Apple MLX deployment baseline
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=14.0' >> "$GITHUB_ENV"
+      - name: Build release binary
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+      - name: Build and verify static musl binary
+        if: contains(matrix.target, '-musl')
+        env:
+          RELEASE_DEPENDENCY_CACHE: '1'
+        run: bash scripts/build-linux-musl.sh ${{ matrix.target }}
+      - name: Stage Core runtime and notices
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: node scripts/stage-core-runtime.mjs target/ci/${{ matrix.target }}/release
+      - name: Verify the native executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          "$exe" --version
+          bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
+      - uses: actions/cache/restore@v4
+        if: runner.os == 'macOS'
+        with:
+          path: ${{ runner.temp }}/release-probe/models/bge-m3
+          key: release-m3-quantized-0826f8c1-macos
+      - name: Verify real macOS CPU inference before DEV publication
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          RSRS_ENGINE: cpu
+          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          "$exe" --direct model install-m3 --json
+          "$exe" --direct model probe --json
+      - name: Prepare versioned binary and runtime artifacts
+        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+      - name: Stage only release compilation dependencies after consuming binaries
+        id: release-cache-pack
+        continue-on-error: true
+        if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/main' && needs.resolve.outputs.sha == github.sha && steps.release-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TARGET" == *-musl ]]; then
+            bash scripts/build-linux-musl.sh "$RELEASE_TARGET" pack
+          else
+            node scripts/rust-ci-cache.mjs pack release "$RELEASE_TARGET"
+          fi
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/main' && needs.resolve.outputs.sha == github.sha && steps.release-cache.outputs.cache-hit != 'true' && steps.release-cache-pack.outcome == 'success' }}
+        with:
+          name: release-dependency-cache-${{ matrix.target }}
+          path: .rust-release-save.tar.gz
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  native-regression:
+    if: inputs.full_validation
+    needs: [resolve, binaries]
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      version: ${{ needs.resolve.outputs.version }}
+      validation_profile: full
+
+  npm-dry-run:
+    needs: [resolve, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Pin the publication npm pack tool
+        run: npm install --global npm@11.5.1
+      - name: Assemble all four native packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          node npm/scripts/test-wrapper.mjs
+          python3 scripts/test-dev-smoke-gate.py
+          node npm/scripts/verify-packages.mjs release-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs release-assets target/ci
+          node npm/scripts/pack.mjs --root target/ci
+          node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: npm-release-validation
+          path: npm/dist/**/*.pack.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: npm-release-packages
+          path: npm/release-packages/*
+          if-no-files-found: error

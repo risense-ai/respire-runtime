@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+language: en-US
+tone_instructions: >-
+  Focus on reproducible bugs, security, data loss, synchronization, and release
+  reliability. Explain concrete consequences and minimal fixes. Avoid cosmetic changes.
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  path_filters:
+    - '!**/node_modules/**'
+    - '!**/target/**'
+    - '!**/dist/**'
+    - '!web-dist/**'
+    - '!service/src/http/admin.html'
+  path_instructions:
+    - path: '**/*.rs'
+      instructions: >-
+        Prioritize correctness, lock scope, async blocking, database transactions,
+        and error propagation. New or modified Rust code must not use unwrap() or expect().
+    - path: '**/*'
+      instructions: >-
+        Preserve existing API and stored-data compatibility. Flag credentials,
+        plaintext user data, or cryptographic keys in logs, artifacts, and network
+        requests. Keep repository comments and documentation in English.
+        Recommend the smallest justified change.
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    drafts: false
+    base_branches:
+      - '.*'
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    simplify:
+      enabled: false

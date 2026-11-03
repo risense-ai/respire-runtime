@@ -1,0 +1,351 @@
+name: Native release regression
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+
+      validation_profile:
+        default: full
+        type: string
+      producer_prefix:
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native (${{ matrix.target }})
+    permissions:
+      contents: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate the selected native profile
+        env:
+          VALIDATION_PROFILE: ${{ inputs.validation_profile }}
+        run: node -e "if(!['critical','full'].includes(process.env.VALIDATION_PROFILE))throw Error('Unknown native validation profile')"
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ inputs.version }}
+      - name: Wait only for this target's successful producer and unique artifact
+        id: artifact
+        if: inputs.validation_profile == 'critical'
+        timeout-minutes: 46
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TARGET: ${{ matrix.target }}
+          PRODUCER_PREFIX: ${{ inputs.producer_prefix }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process'),fs=require('fs');
+          const repo=process.env.GITHUB_REPOSITORY,run=process.env.GITHUB_RUN_ID,attempt=Number(process.env.GITHUB_RUN_ATTEMPT);
+          const name='cli-release-'+process.env.CLI_TARGET,producer=process.env.PRODUCER_PREFIX+'Release ('+process.env.CLI_TARGET+')';
+          const read=path=>JSON.parse(cp.execFileSync('gh',['api','repos/'+repo+'/actions/runs/'+run+path],{encoding:'utf8',timeout:30000}));
+          async function wait(){
+            const deadline=Date.now()+45*60*1000;
+            while(Date.now()<deadline){
+              const current=read('');
+              if(current.id!==Number(run))throw Error('Native producer run ID mismatch: expected '+run+', got '+current.id);
+              if(current.run_attempt!==attempt)throw Error('Native producer run attempt mismatch: expected '+attempt+', got '+current.run_attempt);
+              if(current.head_sha!==process.env.GITHUB_SHA)throw Error('Native producer workflow SHA mismatch: expected '+process.env.GITHUB_SHA+', got '+current.head_sha);
+              if(current.status==='queued'){
+                console.log('Native producer run is queued; waiting before reading producer jobs or artifacts');
+                await new Promise(resolve=>setTimeout(resolve,10000));continue;
+              }
+              if(current.status!=='in_progress')throw Error('Native producer run status refused: '+current.status);
+              const page=read('/attempts/'+attempt+'/jobs?per_page=100');
+              if(page.total_count!==page.jobs.length)throw Error('Incomplete producer job inventory');
+              const jobs=page.jobs.filter(j=>j.name===producer);
+              if(jobs.length>1)throw Error('Duplicate target producer');
+              const job=jobs[0];
+              if(job){
+                if(!Number.isSafeInteger(job.id)||job.id<=0)throw Error('Target producer job ID is invalid');
+                if(job.run_id!==Number(run))throw Error('Target producer run ID mismatch: expected '+run+', got '+job.run_id);
+                if(job.run_attempt!==attempt)throw Error('Target producer attempt mismatch: expected '+attempt+', got '+job.run_attempt);
+                if(job.head_sha!==current.head_sha)throw Error('Target producer workflow SHA mismatch: expected '+current.head_sha+', got '+job.head_sha);
+              }
+              if(job?.status==='completed'&&job.conclusion!=='success')throw Error('Target producer concluded '+job.conclusion);
+              if(job?.status==='completed'&&job.conclusion==='success'){
+                const inventory=read('/artifacts?per_page=100');
+                if(inventory.total_count!==inventory.artifacts.length)throw Error('Incomplete target artifact inventory');
+                const artifacts=inventory.artifacts.filter(a=>a.name===name);
+                if(artifacts.length>1)throw Error('Duplicate target artifact');
+                if(artifacts.length===1){
+                  const a=artifacts[0];
+                  if(a.expired!==false||!Number.isSafeInteger(a.id)||a.id<=0||a.size_in_bytes<=0||!/^sha256:[a-f0-9]{64}$/.test(a.digest)||a.workflow_run?.id!==Number(run)||a.workflow_run.head_sha!==current.head_sha)throw Error('Target artifact identity differs');
+                  fs.appendFileSync(process.env.GITHUB_OUTPUT,'artifact_id='+a.id+'\n');return;
+                }
+              }
+              console.log('Waiting only for '+producer);
+              await new Promise(resolve=>setTimeout(resolve,10000));
+            }
+            throw Error('Target producer/artifact unavailable within 45 minutes');
+          }
+          wait().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - uses: actions/download-artifact@v4
+        if: inputs.validation_profile == 'critical'
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.artifact_id }}
+          path: validated-cli
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: inputs.validation_profile == 'full'
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: validated-cli
+      - name: Verify and extract the release binary
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_SHA: ${{ inputs.ref }}
+          CLI_VERSION: ${{ inputs.version }}
+        run: node npm/scripts/extract-artifact.mjs validated-cli target/ci/${{ matrix.target }}/release
+      - name: Key the four fixed public model inputs
+        id: model-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$(python scripts/native-model-cache.py key)"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: model-cache
+        with:
+          path: .native-model-cache
+          key: ${{ steps.model-key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Require an exact cache and verify every public model byte before restoring
+        if: steps.model-cache.outputs.cache-matched-key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.model-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.model-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test "$MATCHED_KEY" = "$EXPECTED_KEY"
+          python scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
+      - name: Install and probe BGE CPU inference
+        shell: bash
+        env:
+          RSRS_ENGINE: cpu
+          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          "$exe" --version
+          bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
+          "$exe" --direct model install-m3 --json
+          "$exe" --direct model probe --json
+          bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
+      - name: Prepare isolated upgrade Python and the fixed Windows wheel key
+        id: wheel-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/upgrade-python"
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          if [ "$RUNNER_OS" = Windows ]; then py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"; fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            "$py" -m pip install --only-binary=:all: pip==26.2.2 setuptools==84.2.1 wheel==0.48.0
+          fi
+          "$py" -m pip install --only-binary=:all: cryptography==46.0.3
+          if [ "$RUNNER_OS" = Windows ]; then
+            key="$("$py" scripts/native-psutil-wheel-cache.py key)"
+            echo "key=$key" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/cache/restore@v4
+        id: wheel-cache
+        if: runner.os == 'Windows'
+        with:
+          path: .native-psutil-wheels
+          key: ${{ steps.wheel-key.outputs.key }}
+          enableCrossOsArchive: false
+      - name: Verify or build the exact Windows wheel and install it offline
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.wheel-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.wheel-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+          if [ -n "$MATCHED_KEY" ]; then
+            test "$MATCHED_KEY" = "$EXPECTED_KEY"
+          else
+            "$py" scripts/native-psutil-wheel-cache.py build --directory .native-psutil-wheels
+          fi
+          "$py" scripts/native-psutil-wheel-cache.py validate --directory .native-psutil-wheels
+          "$py" scripts/native-psutil-wheel-cache.py install --directory .native-psutil-wheels
+      - name: Require every upgrade selected by the native validation profile
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          exe="target/ci/${{ matrix.target }}/release/rsrs"
+          if [ "$RUNNER_OS" = Windows ]; then
+            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+            exe="$exe.exe"
+          fi
+          if [ "$RUNNER_OS" != Windows ]; then
+            "$py" -m pip install --only-binary=:all: psutil==7.1.0
+          fi
+          # Historical sources use FP16; newer stable sources also need the prepared CPU container.
+          mkdir -p native-legacy-model/onnx
+          cp "$RUNNER_TEMP/release-probe/models/bge-m3/tokenizer.json" native-legacy-model/tokenizer.json
+          cp "$RUNNER_TEMP/release-probe/models/bge-m3/onnx/model_quantized.onnx" native-legacy-model/onnx/model_quantized.onnx
+          cp "$RUNNER_TEMP/release-probe/models/bge-m3/onnx/model_quantized.cpu-v1.ort" native-legacy-model/onnx/model_quantized.cpu-v1.ort
+          if [ "$MODEL_CACHE_HIT" != true ]; then
+            curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+              'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' \
+              --output native-legacy-model/onnx/model_fp16.onnx
+          fi
+          "$py" scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
+          "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
+            --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
+            --legacy-model-dir native-legacy-model \
+            --output-dir "$RUNNER_TEMP/published-upgrades" --profile '${{ inputs.validation_profile }}'
+      - name: Verify resident foreground and background inference under concurrent CLI load
+        if: inputs.validation_profile == 'full'
+        shell: bash
+        run: |
+          set -euo pipefail
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          exe="target/ci/${{ matrix.target }}/release/rsrs"
+          if [ "$RUNNER_OS" = Windows ]; then
+            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+            exe="$exe.exe"
+          fi
+          "$py" scripts/test-native-fixture-process.py --output-dir "$RUNNER_TEMP/native-fixture-bounds"
+          RSRS_INTRA_THREADS=2 "$py" scripts/test-real-m3-account-switch.py --binary "$exe" \
+            --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
+            --output-dir "$RUNNER_TEMP/resident-concurrency" --expect-supervised-worker --resident-stress --expect-background-threads 2
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.validation_profile == 'full'
+        with:
+          retention-days: 1
+          name: resident-concurrency-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/resident-concurrency/real-account-return-verification.json
+            ${{ runner.temp }}/resident-concurrency/resident-stress-metrics.json
+            ${{ runner.temp }}/resident-concurrency/fixture-dependencies.json
+            ${{ runner.temp }}/resident-concurrency/**/boundary-inspector/inspector.log
+            ${{ runner.temp }}/resident-concurrency/**/boundary-inspector/inspection-failure.json
+            ${{ runner.temp }}/native-fixture-bounds/fixture-process-verification.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: published-upgrades-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/published-upgrades/published-upgrades.json
+            ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
+          if-no-files-found: error
+      - name: Verify GNU login interruption recovery with this release binary
+        if: inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/login-regression-python"
+          "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath target/ci/${{ matrix.target }}/release/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
+        with:
+          retention-days: 1
+          name: gnu-login-interruption
+          path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
+          if-no-files-found: error
+      - name: Allow public input cache saves only for trusted sources
+        id: cache-write
+        shell: bash
+        env:
+          TRUSTED_SOURCE: ${{ github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        run: |
+          set -euo pipefail
+          # Cache actions enforce cache-mode; shell steps may not receive ACTIONS_CACHE_MODE.
+          if [ "$TRUSTED_SOURCE" = true ]; then
+            echo 'may_save=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'may_save=false' >> "$GITHUB_OUTPUT"
+            echo 'Public input cache saves are disabled for this untrusted source'
+          fi
+      - name: Stage only verified public model inputs for the next run
+        id: model-cache-stage
+        continue-on-error: true
+        if: ${{ steps.cache-write.outputs.may_save == 'true' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.model-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: python scripts/native-model-cache.py stage --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
+      - uses: actions/cache/save@v4
+        continue-on-error: true
+        if: ${{ steps.cache-write.outputs.may_save == 'true' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.model-cache-stage.outcome == 'success' }}
+        with:
+          path: .native-model-cache
+          key: ${{ steps.model-key.outputs.key }}
+          enableCrossOsArchive: true
+      - uses: actions/cache/save@v4
+        continue-on-error: true
+        if: ${{ steps.cache-write.outputs.may_save == 'true' && runner.os == 'Windows' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.wheel-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: .native-psutil-wheels
+          key: ${{ steps.wheel-key.outputs.key }}
+          enableCrossOsArchive: false

@@ -1,0 +1,1205 @@
+{
+  "schema_version": 1,
+  "inventory_source_sha": "b18ade542bdb3bb00094d8427fa811f4d0a4d46a",
+  "command_paths": [
+    {
+      "command": "prompt",
+      "source": "cli/src/main.rs:521",
+      "options": []
+    },
+    {
+      "command": "v",
+      "source": "cli/src/main.rs:524",
+      "options": []
+    },
+    {
+      "command": "grant create",
+      "source": "cli/src/main.rs:1196",
+      "options": [
+        "--root",
+        "--label"
+      ]
+    },
+    {
+      "command": "grant list",
+      "source": "cli/src/main.rs:1202",
+      "options": []
+    },
+    {
+      "command": "grant revoke",
+      "source": "cli/src/main.rs:1203",
+      "options": []
+    },
+    {
+      "command": "session list",
+      "source": "cli/src/main.rs:1262",
+      "options": []
+    },
+    {
+      "command": "session revoke",
+      "source": "cli/src/main.rs:1264",
+      "options": []
+    },
+    {
+      "command": "keygen",
+      "source": "cli/src/main.rs:536",
+      "options": [
+        "--pass",
+        "--force"
+      ]
+    },
+    {
+      "command": "remember",
+      "source": "cli/src/main.rs:549",
+      "options": [
+        "--type",
+        "--tags",
+        "--title",
+        "--project",
+        "--computer",
+        "--emotion",
+        "--importance",
+        "--parent",
+        "--force",
+        "--merge-ids"
+      ]
+    },
+    {
+      "command": "import",
+      "source": "cli/src/main.rs:576",
+      "options": []
+    },
+    {
+      "command": "recall",
+      "source": "cli/src/main.rs:578",
+      "options": [
+        "--mode",
+        "--limit",
+        "--type",
+        "--project",
+        "--trace",
+        "--titles"
+      ]
+    },
+    {
+      "command": "query-log",
+      "source": "cli/src/main.rs:598",
+      "options": [
+        "--limit",
+        "--stats",
+        "--json"
+      ]
+    },
+    {
+      "command": "query-log mark",
+      "source": "cli/src/main.rs:1213",
+      "options": [
+        "--good",
+        "--bad"
+      ]
+    },
+    {
+      "command": "bench run",
+      "source": "cli/src/main.rs:1229",
+      "options": [
+        "--topk",
+        "--save",
+        "--baseline",
+        "--verbose"
+      ]
+    },
+    {
+      "command": "bench mine",
+      "source": "cli/src/main.rs:1246",
+      "options": [
+        "--out",
+        "--limit",
+        "--strict"
+      ]
+    },
+    {
+      "command": "classify",
+      "source": "cli/src/main.rs:617",
+      "options": [
+        "--limit",
+        "--all",
+        "--root",
+        "--max-chars",
+        "--min-confidence",
+        "--save",
+        "--dry-run",
+        "--ds",
+        "--backend",
+        "--samples",
+        "--tree",
+        "--batch",
+        "--tree-depth",
+        "--causal",
+        "--min-kids",
+        "--segments",
+        "--out",
+        "--auto",
+        "--plan",
+        "--rounds",
+        "--api-base",
+        "--model"
+      ]
+    },
+    {
+      "command": "list",
+      "source": "cli/src/main.rs:688",
+      "options": [
+        "--limit",
+        "--since",
+        "--since-resort"
+      ]
+    },
+    {
+      "command": "forget",
+      "source": "cli/src/main.rs:700",
+      "options": []
+    },
+    {
+      "command": "purge",
+      "source": "cli/src/main.rs:702",
+      "options": []
+    },
+    {
+      "command": "restore",
+      "source": "cli/src/main.rs:704",
+      "options": []
+    },
+    {
+      "command": "promote",
+      "source": "cli/src/main.rs:706",
+      "options": []
+    },
+    {
+      "command": "demote",
+      "source": "cli/src/main.rs:708",
+      "options": [
+        "--parent"
+      ]
+    },
+    {
+      "command": "show",
+      "source": "cli/src/main.rs:714",
+      "options": []
+    },
+    {
+      "command": "chain",
+      "source": "cli/src/main.rs:717",
+      "options": [
+        "--depth"
+      ]
+    },
+    {
+      "command": "attach",
+      "source": "cli/src/main.rs:724",
+      "options": [
+        "--parent"
+      ]
+    },
+    {
+      "command": "tree",
+      "source": "cli/src/main.rs:730",
+      "options": [
+        "--from",
+        "--depth",
+        "--outline",
+        "--material"
+      ]
+    },
+    {
+      "command": "resort",
+      "source": "cli/src/main.rs:742",
+      "options": [
+        "--go",
+        "--spec",
+        "--status",
+        "--reset",
+        "--threshold"
+      ]
+    },
+    {
+      "command": "agent-config",
+      "source": "cli/src/main.rs:758",
+      "options": [
+        "--set"
+      ]
+    },
+    {
+      "command": "retitle",
+      "source": "cli/src/main.rs:764",
+      "options": [
+        "--title"
+      ]
+    },
+    {
+      "command": "retitle-many",
+      "source": "cli/src/main.rs:771",
+      "options": []
+    },
+    {
+      "command": "sync",
+      "source": "cli/src/main.rs:773",
+      "options": []
+    },
+    {
+      "command": "sync-conflicts",
+      "source": "cli/src/main.rs:775",
+      "options": [
+        "--id",
+        "--all",
+        "--refresh"
+      ]
+    },
+    {
+      "command": "sync-resolve",
+      "source": "cli/src/main.rs:785",
+      "options": [
+        "--epoch",
+        "--rev",
+        "--head-rev",
+        "--action",
+        "--content"
+      ]
+    },
+    {
+      "command": "sync-history",
+      "source": "cli/src/main.rs:800",
+      "options": [
+        "--id",
+        "--remote"
+      ]
+    },
+    {
+      "command": "sync-restore",
+      "source": "cli/src/main.rs:807",
+      "options": [
+        "--op-id",
+        "--rev",
+        "--epoch"
+      ]
+    },
+    {
+      "command": "sync-reset",
+      "source": "cli/src/main.rs:816",
+      "options": []
+    },
+    {
+      "command": "status",
+      "source": "cli/src/main.rs:818",
+      "options": []
+    },
+    {
+      "command": "memory-revision",
+      "source": "cli/src/main.rs:823",
+      "options": []
+    },
+    {
+      "command": "reembed",
+      "source": "cli/src/main.rs:820",
+      "options": []
+    },
+    {
+      "command": "defrag",
+      "source": "cli/src/main.rs:822",
+      "options": [
+        "--min",
+        "--top"
+      ]
+    },
+    {
+      "command": "split",
+      "source": "cli/src/main.rs:830",
+      "options": [
+        "--go",
+        "--spec"
+      ]
+    },
+    {
+      "command": "tree-deepen",
+      "source": "cli/src/main.rs:840",
+      "options": [
+        "--root",
+        "--go",
+        "--titles",
+        "--auto",
+        "--min"
+      ]
+    },
+    {
+      "command": "inject",
+      "source": "cli/src/main.rs:858",
+      "options": [
+        "--targets",
+        "--tui",
+        "--all",
+        "--id",
+        "--remove",
+        "--preview",
+        "--expected"
+      ]
+    },
+    {
+      "command": "tree-cure",
+      "source": "cli/src/main.rs:880",
+      "options": [
+        "--top",
+        "--id",
+        "--parent",
+        "--auto",
+        "--min"
+      ]
+    },
+    {
+      "command": "tree-float",
+      "source": "cli/src/main.rs:896",
+      "options": [
+        "--go",
+        "--min"
+      ]
+    },
+    {
+      "command": "doctor",
+      "source": "cli/src/main.rs:905",
+      "options": [
+        "--remote",
+        "--check-update",
+        "--fix"
+      ]
+    },
+    {
+      "command": "audit",
+      "source": "cli/src/main.rs:917",
+      "options": [
+        "--json"
+      ]
+    },
+    {
+      "command": "web",
+      "source": "cli/src/web.rs",
+      "options": [
+        "--no-open"
+      ]
+    },
+    {
+      "command": "model install",
+      "source": "cli/src/main.rs:469",
+      "options": [
+        "--mirror"
+      ]
+    },
+    {
+      "command": "model activate",
+      "source": "cli/src/main.rs:474",
+      "options": []
+    },
+    {
+      "command": "model reset-cpu",
+      "source": "cli/src/main.rs:479",
+      "options": []
+    },
+    {
+      "command": "model engine",
+      "source": "cli/src/main.rs:481",
+      "options": []
+    },
+    {
+      "command": "model install-engines",
+      "source": "cli/src/main.rs:486",
+      "options": []
+    },
+    {
+      "command": "model probe",
+      "source": "cli/src/main.rs:488",
+      "options": [
+        "--model",
+        "--text"
+      ]
+    },
+    {
+      "command": "model uninstall",
+      "source": "cli/src/main.rs:502",
+      "options": []
+    },
+    {
+      "command": "config",
+      "source": "cli/src/main.rs:940",
+      "options": [
+        "--data-dir",
+        "--addr",
+        "--autosync",
+        "--cure-auto",
+        "--rpc-parallelism"
+      ]
+    },
+    {
+      "command": "candidates",
+      "source": "cli/src/main.rs:958",
+      "options": []
+    },
+    {
+      "command": "passport",
+      "source": "cli/src/main.rs:960",
+      "options": []
+    },
+    {
+      "command": "history",
+      "source": "cli/src/main.rs:962",
+      "options": [
+        "--limit"
+      ]
+    },
+    {
+      "command": "plugin list",
+      "source": "cli/src/main.rs:1271",
+      "options": []
+    },
+    {
+      "command": "plugin test",
+      "source": "cli/src/main.rs:1273",
+      "options": [
+        "--payload"
+      ]
+    },
+    {
+      "command": "mcp",
+      "source": "cli/src/main.rs:974",
+      "options": []
+    },
+    {
+      "command": "update-check",
+      "source": "cli/src/main.rs:976",
+      "options": [
+        "--force",
+        "--clear"
+      ]
+    },
+    {
+      "command": "repack",
+      "source": "cli/src/main.rs:985",
+      "options": []
+    },
+    {
+      "command": "diary",
+      "source": "cli/src/main.rs:987",
+      "options": [
+        "--limit",
+        "--date",
+        "--from",
+        "--to",
+        "--contains"
+      ]
+    },
+    {
+      "command": "taxonomy",
+      "source": "cli/src/main.rs:1004",
+      "options": [
+        "--list",
+        "--ensure"
+      ]
+    },
+    {
+      "command": "root-create",
+      "source": "cli/src/main.rs:1013",
+      "options": [
+        "--content",
+        "--yes"
+      ]
+    },
+    {
+      "command": "update",
+      "source": "cli/src/main.rs:1023",
+      "options": [
+        "--title",
+        "--content",
+        "--tags",
+        "--kind",
+        "--importance"
+      ]
+    },
+    {
+      "command": "export",
+      "source": "cli/src/main.rs:1038",
+      "options": []
+    },
+    {
+      "command": "backup",
+      "source": "cli/src/main.rs:1040",
+      "options": []
+    },
+    {
+      "command": "secret",
+      "source": "cli/src/main.rs:1042",
+      "options": [
+        "--reveal"
+      ]
+    },
+    {
+      "command": "keys-export",
+      "source": "cli/src/main.rs:1048",
+      "options": [
+        "--out"
+      ]
+    },
+    {
+      "command": "super-reset",
+      "source": "cli/src/main.rs:1054",
+      "options": [
+        "--super"
+      ]
+    },
+    {
+      "command": "fivekeys",
+      "source": "cli/src/main.rs:1060",
+      "options": [
+        "--addr",
+        "--user",
+        "--pass",
+        "--secret",
+        "--kdf-salt",
+        "--wrapped-urk",
+        "--urk-nonce",
+        "--super"
+      ]
+    },
+    {
+      "command": "register",
+      "source": "cli/src/main.rs:1082",
+      "options": [
+        "--addr",
+        "--user",
+        "--pass",
+        "--super"
+      ]
+    },
+    {
+      "command": "logout",
+      "source": "cli/src/main.rs:1131",
+      "options": [
+        "--full"
+      ]
+    },
+    {
+      "command": "login",
+      "source": "cli/src/main.rs:1139",
+      "options": [
+        "--addr",
+        "--user",
+        "--pass",
+        "--super",
+        "--secret-key",
+        "--reset-vault"
+      ]
+    },
+    {
+      "command": "book-material",
+      "source": "cli/src/main.rs:1156",
+      "options": []
+    },
+    {
+      "command": "portrait-material",
+      "source": "cli/src/main.rs:1158",
+      "options": [
+        "--limit"
+      ]
+    },
+    {
+      "command": "share",
+      "source": "cli/src/main.rs:1163",
+      "options": [
+        "--root",
+        "--raw",
+        "--out"
+      ]
+    },
+    {
+      "command": "share-import",
+      "source": "cli/src/main.rs:1175",
+      "options": [
+        "--parent",
+        "--go",
+        "--title",
+        "--force"
+      ]
+    },
+    {
+      "command": "account list",
+      "source": "cli/src/main.rs:4340",
+      "options": [
+        "--yes"
+      ]
+    },
+    {
+      "command": "account use",
+      "source": "cli/src/main.rs:4366",
+      "options": [
+        "--yes"
+      ]
+    },
+    {
+      "command": "account remove",
+      "source": "cli/src/main.rs:4374",
+      "options": [
+        "--yes"
+      ]
+    },
+    {
+      "command": "space list",
+      "source": "cli/src/main.rs:4427",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space create",
+      "source": "cli/src/main.rs:4442",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space use",
+      "source": "cli/src/main.rs:4451",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space invite",
+      "source": "cli/src/main.rs:4459",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space join",
+      "source": "cli/src/main.rs:4467",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space members",
+      "source": "cli/src/main.rs:4477",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space kick",
+      "source": "cli/src/main.rs:4487",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "space remove",
+      "source": "cli/src/main.rs:4500",
+      "options": [
+        "--note",
+        "--readonly",
+        "--code",
+        "--session",
+        "--all",
+        "--yes"
+      ]
+    },
+    {
+      "command": "classify-config",
+      "source": "cli/src/classify_config.rs",
+      "options": [
+        "--backend",
+        "--api-base",
+        "--model",
+        "--set",
+        "--key-stdin"
+      ]
+    }
+  ],
+  "mcp_tools": [
+    {
+      "name": "memory_status",
+      "line": 295
+    },
+    {
+      "name": "memory_remember",
+      "line": 296
+    },
+    {
+      "name": "memory_recall",
+      "line": 319
+    },
+    {
+      "name": "memory_list",
+      "line": 327
+    },
+    {
+      "name": "memory_show",
+      "line": 335
+    },
+    {
+      "name": "memory_update",
+      "line": 339
+    },
+    {
+      "name": "memory_attach",
+      "line": 359
+    },
+    {
+      "name": "memory_tree",
+      "line": 369
+    },
+    {
+      "name": "memory_history",
+      "line": 382
+    },
+    {
+      "name": "memory_diary",
+      "line": 392
+    },
+    {
+      "name": "memory_chain",
+      "line": 411
+    },
+    {
+      "name": "memory_query_log_mark",
+      "line": 419
+    },
+    {
+      "name": "memory_forget",
+      "line": 430
+    },
+    {
+      "name": "memory_restore",
+      "line": 434
+    },
+    {
+      "name": "memory_taxonomy",
+      "line": 438
+    }
+  ],
+  "required_assertions": [
+    "account-live-client-only-preserves-host",
+    "account-live-main-library-preserved",
+    "account-live-main-takeover",
+    "account-live-other-identity",
+    "account-live-rejected-restores-service",
+    "account-live-restore-main-takeover",
+    "account-live-shorthand-takeover",
+    "account-remove-profile-gone",
+    "backup-file-sqlite-header",
+    "cloud-full-logout-recovery-preserves-library",
+    "cloud-full-logout-removes-session",
+    "config-live-profile-takeover",
+    "config-live-restore-main-takeover",
+    "config-settings-persisted",
+    "diary-filter-contains-marker",
+    "doctor-mcp-bin-item",
+    "doctor-mcp-http-item",
+    "doctor-remote-health-reachable",
+    "exact-artifact-version",
+    "forget-hides-entry",
+    "full-logout-session-file-removed",
+    "grant-created-persisted",
+    "grant-delete-root-auto-revoked",
+    "grant-revocation-persisted",
+    "help-account-list-contract",
+    "help-account-remove-contract",
+    "help-account-use-contract",
+    "help-agent-config-contract",
+    "help-attach-contract",
+    "help-audit-contract",
+    "help-backup-contract",
+    "help-bench-mine-contract",
+    "help-bench-run-contract",
+    "help-book-material-contract",
+    "help-candidates-contract",
+    "help-chain-contract",
+    "help-classify-config-contract",
+    "help-classify-contract",
+    "help-config-contract",
+    "help-defrag-contract",
+    "help-demote-contract",
+    "help-diary-contract",
+    "help-doctor-contract",
+    "help-export-contract",
+    "help-fivekeys-contract",
+    "help-forget-contract",
+    "help-grant-create-contract",
+    "help-grant-list-contract",
+    "help-grant-revoke-contract",
+    "help-history-contract",
+    "help-import-contract",
+    "help-inject-contract",
+    "help-keygen-contract",
+    "help-keys-export-contract",
+    "help-list-contract",
+    "help-login-contract",
+    "help-logout-contract",
+    "help-mcp-contract",
+    "help-model-activate-contract",
+    "help-model-engine-contract",
+    "help-model-install-contract",
+    "help-model-install-engines-contract",
+    "help-model-probe-contract",
+    "help-model-reset-cpu-contract",
+    "help-model-uninstall-contract",
+    "help-passport-contract",
+    "help-plugin-list-contract",
+    "help-plugin-test-contract",
+    "help-portrait-material-contract",
+    "help-promote-contract",
+    "help-prompt-contract",
+    "help-purge-contract",
+    "help-query-log-contract",
+    "help-query-log-mark-contract",
+    "help-recall-contract",
+    "help-reembed-contract",
+    "help-register-contract",
+    "help-remember-contract",
+    "help-repack-contract",
+    "help-resort-contract",
+    "help-restore-contract",
+    "help-retitle-contract",
+    "help-retitle-many-contract",
+    "help-root-create-contract",
+    "help-secret-contract",
+    "help-session-list-contract",
+    "help-session-revoke-contract",
+    "help-share-contract",
+    "help-share-import-contract",
+    "help-show-contract",
+    "help-space-create-contract",
+    "help-space-invite-contract",
+    "help-space-join-contract",
+    "help-space-kick-contract",
+    "help-space-list-contract",
+    "help-space-members-contract",
+    "help-space-remove-contract",
+    "help-space-use-contract",
+    "help-split-contract",
+    "help-status-contract",
+    "help-memory-revision-contract",
+    "memory-revision-profile-token",
+    "memory-revision-reads-stable",
+    "memory-revision-after-write",
+    "list-profile-contract",
+    "help-super-reset-contract",
+    "help-sync-conflicts-contract",
+    "help-sync-contract",
+    "help-sync-history-contract",
+    "help-sync-reset-contract",
+    "help-sync-resolve-contract",
+    "help-sync-restore-contract",
+    "help-taxonomy-contract",
+    "help-tree-contract",
+    "help-tree-cure-contract",
+    "help-tree-deepen-contract",
+    "help-tree-float-contract",
+    "help-update-check-contract",
+    "help-update-contract",
+    "help-v-contract",
+    "help-web-contract",
+    "keygen-force-rotates-material",
+    "keygen-local-memory-readable",
+    "keygen-local-overwrite-guard",
+    "keygen-local-v4-material",
+    "mcp-bin-file",
+    "mcp-http-attach-envelope",
+    "mcp-http-attach-readback-envelope",
+    "mcp-http-business-recall-envelope",
+    "mcp-http-business-recall-hit",
+    "mcp-http-foreign-origin",
+    "mcp-http-forget-envelope",
+    "mcp-http-initialize",
+    "mcp-http-initialize-version",
+    "mcp-http-malformed-json",
+    "mcp-http-memory_chain-envelope",
+    "mcp-http-memory_diary-envelope",
+    "mcp-http-memory_history-envelope",
+    "mcp-http-memory_list-envelope",
+    "mcp-http-memory_status-envelope",
+    "mcp-http-memory_taxonomy-envelope",
+    "mcp-http-memory_tree-envelope",
+    "mcp-http-parent-persisted",
+    "mcp-http-ping",
+    "mcp-http-query-log-mark-envelope",
+    "mcp-http-query-log-marked",
+    "mcp-http-recall",
+    "mcp-http-recall-hit",
+    "mcp-http-remember-created-id",
+    "mcp-http-remember-envelope",
+    "mcp-http-restore-content-persisted",
+    "mcp-http-restore-envelope",
+    "mcp-http-restore-readback-envelope",
+    "mcp-http-show-content",
+    "mcp-http-show-envelope",
+    "mcp-http-sse",
+    "mcp-http-tools-complete",
+    "mcp-http-tools-list",
+    "mcp-http-unknown-tool",
+    "mcp-http-unknown-tool-is-error",
+    "mcp-http-update-envelope",
+    "mcp-http-update-readback-envelope",
+    "mcp-http-update-title-persisted",
+    "mcp-stdio-attach-envelope",
+    "mcp-stdio-chain-envelope",
+    "mcp-stdio-diary-envelope",
+    "mcp-stdio-forget-envelope",
+    "mcp-stdio-history-envelope",
+    "mcp-stdio-initialize-version",
+    "mcp-stdio-list-envelope",
+    "mcp-stdio-ping",
+    "mcp-stdio-query-log-mark-ran",
+    "mcp-stdio-recall-hit",
+    "mcp-stdio-remember-id",
+    "mcp-stdio-remember-missing-is-error",
+    "mcp-stdio-restore-envelope",
+    "mcp-stdio-show-hit",
+    "mcp-stdio-status-envelope",
+    "mcp-stdio-taxonomy-envelope",
+    "mcp-stdio-tools-complete",
+    "mcp-stdio-tree-envelope",
+    "mcp-stdio-unknown-is-error",
+    "mcp-stdio-update-envelope",
+    "model-bge-installed",
+    "model-bge-removed",
+    "model-engine-cpu-selected",
+    "model-engine-gpu-selection-persisted",
+    "model-engine-npu-selection-persisted",
+    "model-m3-default-probe-success",
+    "model-retired-request-preserves-content",
+    "model-m3-index-and-recall",
+    "model-m3-installed-without-activation",
+    "model-m3-probe-success",
+    "model-rerank-command-rejected",
+    "model-reset-cpu-engine",
+    "prompt-instructions-present",
+    "purge-removes-current-entry",
+    "recall-filtered-marker-title",
+    "reembed-cached-zero",
+    "reembed-count-dimensions",
+    "reembed-entry-preserved",
+    "reembed-progress-contract",
+    "login-key-mismatch-original-session-preserved",
+    "reset-vault-mismatch-guard",
+    "reset-vault-mismatched-fixture-written",
+    "login-key-mismatch-original-data-readable",
+    "resolve-keep-current-acknowledged",
+    "resolve-keep-current-content-converged",
+    "resolve-keep-current-distinct-conflict",
+    "resolve-keep-current-fixture-id",
+    "resolve-keep-current-history-kept",
+    "resolve-merge-acknowledged",
+    "resolve-merge-content-converged",
+    "resolve-merge-distinct-conflict",
+    "resolve-merge-fixture-id",
+    "resolve-merge-history-kept",
+    "resolve-take-incoming-acknowledged",
+    "resolve-take-incoming-content-converged",
+    "resolve-take-incoming-distinct-conflict",
+    "resolve-take-incoming-fixture-id",
+    "resolve-take-incoming-history-kept",
+    "resort-parent-persisted",
+    "restore-preserves-content",
+    "runtime-cli-config-approved-server",
+    "runtime-cli-created-id",
+    "runtime-cli-diary-mode-contract",
+    "runtime-cli-parent-persisted",
+    "runtime-cli-retired-rerank-rejected",
+    "runtime-cli-restore-preserved-content",
+    "runtime-cli-status-approved-server",
+    "runtime-cli-update-persisted",
+    "runtime-cli-workspace-mode-normal",
+    "runtime-endpoint-without-token",
+    "runtime-health-protocol-version",
+    "runtime-http-foreign-origin",
+    "runtime-http-health",
+    "runtime-http-malformed-json",
+    "runtime-http-missing-command",
+    "runtime-http-loopback-ignores-token",
+    "secret-reveal-current-recovery-code",
+    "session-owner-personal-readonly-cleared",
+    "session-owner-personal-readonly-readback",
+    "session-revocation-preserves-local-decryption",
+    "session-revoke-secondary-confirmed",
+    "session-revoked-access-denied",
+    "session-revoked-personal-readonly-marked",
+    "session-secondary-id-present",
+    "session-secondary-listed",
+    "space-invite-code-session-present",
+    "space-kick-all-member-sessions",
+    "space-kick-real-member",
+    "space-kicked-readonly-session-denied",
+    "space-kicked-session-denied",
+    "space-live-library-preserved",
+    "space-live-main-takeover",
+    "space-live-rejected-restores-service",
+    "space-live-return-takeover",
+    "space-member-can-read-owner-entry",
+    "space-owner-entry-synced",
+    "space-readonly-can-read",
+    "space-readonly-invite-present",
+    "space-readonly-self-unlock-guard",
+    "space-readonly-write-guard",
+    "split-created-two-children",
+    "split-fixture-id",
+    "super-reset-new-code-recovers-cloud-content",
+    "super-reset-old-code-rejected",
+    "super-reset-preserves-memory",
+    "sync-resolve-merge-content-persisted",
+    "sync-restore-fixture-id",
+    "sync-restore-local-revision-exists",
+    "sync-restore-op-content-persisted",
+    "sync-restore-remote-content-persisted",
+    "sync-restore-remote-revision-exists",
+    "tree-cure-parent-persisted",
+    "tree-mutations-no-orphans",
+    "update-title-content-persisted",
+    "web-dashboard-fixed-url",
+    "web-dashboard-no-runtime",
+    "web-legacy-lifecycle-flags-rejected",
+    "mcp-stdio-default-memory_forget-denied",
+    "mcp-stdio-default-memory_restore-denied",
+    "mcp-stdio-default-denial-preserved-content",
+    "mcp-http-default-memory_forget-denied",
+    "mcp-http-default-memory_restore-denied",
+    "mcp-http-default-denial-preserved-content",
+    "mcp-http-explicit-policy-limited",
+    "mcp-http-default-policy-restored"
+  ],
+  "required_remaining": [],
+  "conditional_unverified": [
+    {
+      "feature": "GPU/NPU engine installation and actual accelerated inference",
+      "reason": "GitHub hosted CPU runners do not provide supported GPU/NPU hardware. Saving GPU/NPU engine selection is explicitly asserted by the base suite; actual accelerated inference remains unverified."
+    },
+    {
+      "feature": "Interactive TUI and actual third-party agent integration",
+      "reason": "Requires an interactive desktop or an external agent installation. Browser dashboard acceptance belongs to risense-ai/respire-site and is not a CLI release gate."
+    },
+    {
+      "feature": "External paid/provider credentials and provider-specific LLM quality",
+      "reason": "Must use an explicitly approved provider/capability fixture; no real user credential is read."
+    },
+    {
+      "feature": "Windows WinML accelerator provider installation / GPU / NPU execution",
+      "commands": [
+        "model install-engines",
+        "model engine gpu",
+        "model engine npu"
+      ],
+      "source": "docs/inference.md:29",
+      "reason": "This operation requires a supported Windows WinML catalog/provider and accelerator hardware. Headless hosted CPU evidence cannot assert acceleration or optional provider download support. Saving GPU/NPU engine selection is explicitly asserted by the base suite; actual accelerated inference remains unverified."
+    }
+  ],
+  "gate": "Default fails until all required base observations and five named supplemental suites pass for the exact CI artifact. Retained dashboard business functions require observed CLI/RPC equivalents; six UI-only functions are explicitly retired by requirement.",
+  "excluded_not_implemented": [
+    {
+      "feature": "Grant token consumption through CLI/Web/MCP/RPC",
+      "source": "crates/storage/src/transport/local/grants.rs:91",
+      "reason": "grant_snapshot has no callable public transport consumer; no nonexistent endpoint is added. Existing CLI CRUD, persistence and automatic root revocation remain required."
+    }
+  ],
+  "coverage_scope": "Existing callable operations and semantic effects; not an infinite Cartesian product of flags. Historical vault input formats require controlled legacy fixtures before claiming compatibility coverage.",
+  "supplemental_required": [
+    "runtime",
+    "ai_inject",
+    "outbox",
+    "legacy_vault",
+    "profile_migration"
+  ],
+  "supplemental_features": [
+    {
+      "suite": "ai_inject",
+      "feature": "Classification apply/auto/causal/tree and large-tree deepen positive apply",
+      "commands": [
+        "classify --save",
+        "classify --auto",
+        "classify --causal",
+        "classify --tree",
+        "tree-deepen --go",
+        "tree-deepen --auto",
+        "tree-cure --auto"
+      ],
+      "source": "cli/src/main.rs:617",
+      "reason": "Requires sufficiently large deterministic tree fixtures and a declared local or dev-hosted AI provider; existing preview calls do not cover writes."
+    },
+    {
+      "suite": "runtime",
+      "feature": "Authenticated runtime RPC/MCP, dashboard launch and persistent settings",
+      "source": "cli/src/runtime_http.rs",
+      "reason": "Retained business actions require actual CLI/RPC evidence. Removed UI endpoints must return authenticated 404 and the dashboard command must not start a runtime."
+    },
+    {
+      "suite": "outbox",
+      "feature": "Autosync/concurrency/cancellation/restart and finite sync boundary/reset stale response",
+      "source": "cli/src/rpc.rs:814",
+      "reason": "Needs deterministic controlled dev fault fixtures; unit tests are not end-to-end release evidence."
+    },
+    {
+      "suite": "ai_inject",
+      "feature": "Inject install/remove/revision guard on isolated fake target configs",
+      "commands": [
+        "inject --id",
+        "inject --remove",
+        "inject --expected",
+        "inject --all"
+      ],
+      "source": "cli/src/main.rs:858",
+      "reason": "Real external agent homes are forbidden; isolated fake hosts can cover file contracts, but actual external integration stays conditional."
+    },
+    {
+      "suite": "legacy_vault",
+      "feature": "Login/vault v1/v2/v3 to v4 upgrades and secret-key two-factor recovery",
+      "source": "crates/app/src/auth.rs:541",
+      "reason": "Current disposable users are v4. Must provision controlled genuine legacy wrap material through approved development API; passing --secret-key on v4 does not prove historical upgrades."
+    },
+    {
+      "suite": "profile_migration",
+      "feature": "Encrypted legacy home/profile migration, WAL/outbox retention and restart recovery",
+      "source": "crates/app/src/migration.rs",
+      "reason": "Genuine disposable accounts and original keyring credentials must remain readable without a SUPER environment override; original roots must be preserved."
+    }
+  ],
+  "business_equivalence_catalog": "scripts/dev-runtime-business-coverage.json",
+  "historical_dashboard_action_count": 72
+}
