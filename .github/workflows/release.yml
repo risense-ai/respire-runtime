@@ -229,12 +229,43 @@ jobs:
           binary="rsrs-runtime-$target$suffix"
           test -f "$BUILD_DIR/$built" || { echo "::error::Built binary missing at $BUILD_DIR/$built"; exit 1; }
           test -f "$BUILD_DIR/core-runtime.json" || { echo "::error::Staged core-runtime.json missing; the SDK staging step failed silently"; exit 1; }
+          test -d "$BUILD_DIR/runtime" || { echo "::error::Staged native runtime libraries missing"; exit 1; }
+          test -d "$BUILD_DIR/core-notices" || { echo "::error::Staged Core SDK notices missing"; exit 1; }
           rm -rf payload; mkdir payload
           cp "$BUILD_DIR/$built" "payload/$binary"
           cp "$BUILD_DIR/core-runtime.json" payload/core-runtime.json
           cp -R "$BUILD_DIR/runtime" payload/runtime
           cp -R "$BUILD_DIR/core-notices" payload/core-notices
+          if [ -n "$(find payload -type l -print -quit)" ]; then
+            echo "::error::Symlinked release payloads are forbidden"
+            exit 1
+          fi
           tar -czf "rsrs-runtime-$target.tar.gz" -C payload .
+          node - <<'NODE'
+          const cp = require('child_process');
+          const binary = process.env.RUNTIME_BINARY_FILE;
+          const archive = `rsrs-runtime-${process.env.RUNTIME_TARGET}.tar.gz`;
+          const entries = cp.execFileSync('tar', ['-tzf', archive], {encoding: 'utf8'})
+            .split(/\r?\n/).filter(Boolean);
+          let runtimeFiles = 0, noticeFiles = 0;
+          for (const raw of entries) {
+            const entry = raw.replace(/^\.\//, '').replace(/\/$/, '');
+            if (!entry || entry === '.') continue;
+            const safePath = !entry.includes('\\') && !entry.startsWith('/') &&
+              entry.split('/').every(part => part && part !== '.' && part !== '..');
+            const withinWhitelist = entry === binary || entry === 'core-runtime.json' ||
+              entry === 'runtime' || entry === 'core-notices' ||
+              entry.startsWith('runtime/') || entry.startsWith('core-notices/');
+            if (!safePath || !withinWhitelist) throw new Error(`Unsafe archive path: ${entry}`);
+            if (entry.startsWith('runtime/')) ++runtimeFiles;
+            if (entry.startsWith('core-notices/')) ++noticeFiles;
+          }
+          for (const name of [binary, 'core-runtime.json']) {
+            if (!entries.some(entry => entry.replace(/^\.\//, '') === name)) throw new Error(`Archive is missing ${name}`);
+          }
+          if (!runtimeFiles || !noticeFiles) throw new Error('Archive is missing native libraries or notices');
+          console.log(`Verified archive whitelist: ${entries.length} entries`);
+          NODE
           tar_sha256="$(sha256sum "rsrs-runtime-$target.tar.gz" | cut -d ' ' -f 1)"
           binary_sha256="$(sha256sum "payload/$binary" | cut -d ' ' -f 1)"
           export RUNTIME_TAR_SHA256="$tar_sha256" RUNTIME_BINARY_SHA256="$binary_sha256" RUNTIME_BINARY_FILE="$binary"
