@@ -39,6 +39,8 @@ pub type UpdateEnabled = fn() -> bool;
 pub type UpdateCheckRun = fn(bool) -> Option<UpdateStatus>;
 pub type MaterializeBin = fn() -> std::result::Result<PathBuf, String>;
 pub type ForegroundProgress = fn(&str) -> anyhow::Result<serde_json::Value>;
+pub type RuntimeBrief = fn() -> Option<(u32, String, String)>;
+pub type HostCommand = fn(&crate::cli_def::Cli) -> Option<anyhow::Result<()>>;
 
 #[derive(Default)]
 pub struct HostHooks {
@@ -52,6 +54,8 @@ pub struct HostHooks {
     pub update_check_run: Option<UpdateCheckRun>,
     pub materialize_bin: Option<MaterializeBin>,
     pub foreground_progress: Option<ForegroundProgress>,
+    pub runtime_brief: Option<RuntimeBrief>,
+    pub host_command: Option<HostCommand>,
 }
 
 static BACKGROUND_PAUSED: OnceLock<BackgroundPaused> = OnceLock::new();
@@ -64,6 +68,8 @@ static UPDATE_ENABLED: OnceLock<UpdateEnabled> = OnceLock::new();
 static UPDATE_CHECK_RUN: OnceLock<UpdateCheckRun> = OnceLock::new();
 static MATERIALIZE_BIN: OnceLock<MaterializeBin> = OnceLock::new();
 static FOREGROUND_PROGRESS: OnceLock<ForegroundProgress> = OnceLock::new();
+static RUNTIME_BRIEF: OnceLock<RuntimeBrief> = OnceLock::new();
+static HOST_COMMAND: OnceLock<HostCommand> = OnceLock::new();
 
 /// Install the host implementations. Returns `false` when a previous installer
 /// already ran; the first installation wins.
@@ -79,6 +85,8 @@ pub fn install(hooks: HostHooks) -> bool {
         update_check_run,
         materialize_bin,
         foreground_progress,
+        runtime_brief,
+        host_command,
     } = hooks;
     let installed = [
         background_paused.map(|hook| BACKGROUND_PAUSED.set(hook).is_ok()),
@@ -91,6 +99,8 @@ pub fn install(hooks: HostHooks) -> bool {
         update_check_run.map(|hook| UPDATE_CHECK_RUN.set(hook).is_ok()),
         materialize_bin.map(|hook| MATERIALIZE_BIN.set(hook).is_ok()),
         foreground_progress.map(|hook| FOREGROUND_PROGRESS.set(hook).is_ok()),
+        runtime_brief.map(|hook| RUNTIME_BRIEF.set(hook).is_ok()),
+        host_command.map(|hook| HOST_COMMAND.set(hook).is_ok()),
     ];
     installed.iter().all(|slot| slot.as_ref().is_none_or(|ok| *ok))
 }
@@ -159,5 +169,19 @@ pub fn foreground_progress(id: &str) -> anyhow::Result<serde_json::Value> {
     match FOREGROUND_PROGRESS.get() {
         Some(hook) => hook(id),
         None => Err(anyhow::anyhow!("runtime progress is unavailable in this process")),
+    }
+}
+
+/// Pid, web URL and binary version of the resident runtime, if it answers.
+pub fn runtime_brief() -> Option<(u32, String, String)> {
+    RUNTIME_BRIEF.get().and_then(|hook| hook())
+}
+
+/// Route a host-managed command before the shared engine match; `None` lets
+/// the engine arm handle the command.
+pub fn host_command(args: &crate::cli_def::Cli) -> Option<anyhow::Result<()>> {
+    match HOST_COMMAND.get() {
+        Some(hook) => hook(args),
+        None => None,
     }
 }
