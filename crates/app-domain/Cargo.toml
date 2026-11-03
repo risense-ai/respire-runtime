@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["cli", "spawn", "runtime", "crates/core-sdk", "crates/protocol", "crates/crypto", "crates/app", "crates/app-domain", "crates/storage", "crates/commands"]
+default-members = ["cli"]
+
+# Keep real PBKDF2 iteration counts fast without optimizing workspace test code.
+[profile.dev.package.sha2]
+opt-level = 3
+
+# Match the separately linked Core's unwind runtime and avoid host cross-crate LTO.
+[profile.release]
+strip = "debuginfo"
+lto = false
+codegen-units = 1
+panic = "unwind"
+
+# Keep the derived clap command builder within the default test-thread stack.
+# The builder now lives in respire_commands; both entries stay pinned while the
+# CLI still carries command-shaped code from earlier split steps.
+[profile.test.package.respire]
+opt-level = 1
+
+[profile.test.package.respire_commands]
+opt-level = 1
