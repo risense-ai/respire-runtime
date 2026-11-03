@@ -95,7 +95,7 @@ fn text(zh: &str, en: &str) -> String {
     if crate::i18n::lang() == crate::i18n::Lang::Zh { zh } else { en }.to_owned()
 }
 
-pub(crate) fn inference_progress_text(status: &serde_json::Value) -> Option<String> {
+pub fn inference_progress_text(status: &serde_json::Value) -> Option<String> {
     if status["host_recovery_required"] == true {
         return Some(text("\u{63a8}\u{7406}\u{65e0}\u{54cd}\u{5e94}\u{ff0c}\u{9700}\u{8981}\u{5bbf}\u{4e3b}\u{6062}\u{590d}", "Inference unresponsive; host recovery required"));
     }

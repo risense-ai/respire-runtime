@@ -528,7 +528,7 @@ pub(crate) fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentit
     }
 }
 
-pub(crate) fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
+pub fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
     crate::runtime_policy::require_host("runtime recovery")?;
     anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid),
         "refusing to terminate an unverified runtime process {pid}");
@@ -550,7 +550,7 @@ pub(crate) fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Resul
     Ok(())
 }
 
-pub(crate) fn kill_pid(pid: u32) {
+pub fn kill_pid(pid: u32) {
     if pid == 0 || pid == std::process::id() {
         return;
     }
