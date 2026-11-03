@@ -64,7 +64,7 @@ fn credential_entry(service: &str, label: &str, backend: Backend) -> Result<keyr
 }
 
 /// Read every applicable legacy backend without writing or self-healing it.
-pub(crate) fn read_credentials(service: &str, label: &str) -> Vec<String> {
+pub fn read_credentials(service: &str, label: &str) -> Vec<String> {
     let mut values = Vec::new();
     for backend in backends() {
         if let Ok(entry) = credential_entry(service, label, *backend) {
@@ -138,12 +138,12 @@ fn credential_account(user: &str) -> String {
 }
 
 /// Import into a separate namespace. Existing credentials are never overwritten.
-pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Result<&'static str> {
+pub fn import_credential(account: &str, slot: &str, value: &str) -> Result<&'static str> {
     import_credential_checkpoint(account, slot, value, |_| Ok(()))
 }
 
 /// Record the selected backend before a credential can be created.
-pub(crate) fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut checkpoint: impl FnMut(&str) -> Result<()>) -> Result<&'static str> {
+pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut checkpoint: impl FnMut(&str) -> Result<()>) -> Result<&'static str> {
     let label = format!("{slot}:{account}");
     if read_credentials(VAULT_SERVICE, &label)
         .iter()
@@ -209,7 +209,7 @@ pub(crate) fn import_credential_checkpoint(account: &str, slot: &str, value: &st
 }
 
 /// Remove only the entry created by this login when its transaction rolls back.
-pub(crate) fn remove_imported(account: &str, slot: &str, backend_name: &str) -> Result<()> {
+pub fn remove_imported(account: &str, slot: &str, backend_name: &str) -> Result<()> {
     let backend = backends().iter().find(|backend| backend.name() == backend_name)
         .ok_or_else(|| anyhow!("credential backend is unavailable during login rollback"))?;
     let entry = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?;
@@ -221,7 +221,7 @@ pub(crate) fn remove_imported(account: &str, slot: &str, backend_name: &str) -> 
 
 /// Classification settings are global per endpoint, unlike per-library vaults.
 /// Preserve an existing new setting; import known legacy slots into new entries.
-pub(crate) fn import_classification(services: &[&str]) -> Result<()> {
+pub fn import_classification(services: &[&str]) -> Result<()> {
     let mut slots = vec![
         "typesafe".to_owned(),
         "ds".to_owned(),

@@ -885,10 +885,63 @@ pub fn env_root_dir() -> Option<PathBuf> {
     if v.is_empty() {
         return None;
     }
-    if crate::migration::internally_configured_root(v) {
+    if internally_configured_root(v) {
         return None;
     }
     Some(expand_tilde(v))
+}
+
+// Sunk from the client-side migration module (WP-2c): engine flows must classify the
+// internally configured default home, and the domain crate cannot reach back into the
+// client crate. The client migration module re-imports this function.
+const DEFAULT_ENV: &str = "RSRS_DEFAULT_DATA_DIR";
+
+/// The SDK accepts the original data-root environment variable. This marker lets
+/// app configuration retain its default-home and active-profile semantics.
+pub fn internally_configured_root(value: &str) -> bool {
+    crate::env::var(DEFAULT_ENV).ok().is_some_and(|marker| {
+        equivalent_path(
+            &crate::service::expand_tilde(&marker),
+            &crate::service::expand_tilde(value),
+        ) && equivalent_path(
+            &crate::service::expand_tilde(value),
+            &crate::service::default_data_dir(),
+        )
+    })
+}
+
+fn equivalent_path(left: &Path, right: &Path) -> bool {
+    let absolute = |path: &Path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|root| root.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    };
+    let normalize = |path: PathBuf| {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                _ => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
+    };
+    let left = normalize(absolute(left));
+    let right = normalize(absolute(right));
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
+    } else {
+        left == right
+    }
 }
 
 /// client.json path is special: it itself decides data_dir, so **usually** we always read the copy in the default dir
@@ -2907,6 +2960,40 @@ pub fn database_path(root: &Path) -> Result<PathBuf> {
     Ok(if current.exists() || !legacy.exists() { current } else { legacy })
 }
 
+/// Read the selected source as one committed snapshot, without creating plaintext files.
+/// Sunk from the client-side login_transaction module (WP-2c): the engine-side service
+/// tests and the login flow both read this committed snapshot; the client module
+/// re-exports the call through `crate::service::local_snapshot`.
+pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
+    let session = crate::auth::read_session_json()?;
+    let user = session["user"].as_str().unwrap_or("local");
+    let alias = session["keyring_account"].as_str().unwrap_or(user);
+    let version = session["vault_version"].as_i64().unwrap_or(1);
+    let password = if version == 1 {
+        source_secret.map(str::to_owned)
+            .or_else(|| session["pass"].as_str().map(str::to_owned))
+            .or_else(|| crate::keystore::load_login_pass(alias)).unwrap_or_default()
+    } else { String::new() };
+    let keys = crate::auth::unlock_session_keys(&session, &password,
+        if version == 1 { None } else { source_secret }, alias)?;
+    let directory = crate::service::data_dir();
+    let path = crate::service::database_path(&directory)?;
+    anyhow::ensure!(path.is_file(), "selected source has no local library; nothing was migrated");
+    let database = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = database.prepare("SELECT id,ciphertext,nonce,COALESCE(parent_id,'') FROM memories WHERE COALESCE(deleted,0)=0 ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut stored = crate::memory::model::StoredMemory::new_pending(row.get(0)?, String::new());
+        stored.ciphertext = row.get(1)?;
+        stored.nonce = row.get(2)?;
+        stored.local_parent_id = row.get(3)?;
+        entries.push(crate::memory::MemoryEngine::open(&keys, &stored)
+            .context("source record cannot be decrypted; original library was preserved")?);
+    }
+    Ok(serde_json::to_string(&entries)?)
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     if let Ok(home) = crate::env::var("HOME") {
         if !home.trim().is_empty() {
@@ -3834,7 +3921,7 @@ mod tests {
             assert_eq!(child.see_also, vec![parent.id.clone()]);
             assert!(import_json_text(r#"[{"id":"a","content":"a","parent_id":"b"},{"id":"b","content":"b","parent_id":"a"}]"#).is_err());
             assert_eq!(open_store()?.all(false)?.len(), 3);
-            let snapshot = crate::login_transaction::local_snapshot(Some(&code))?;
+            let snapshot = local_snapshot(Some(&code))?;
             assert_eq!(serde_json::from_str::<Vec<MemoryEntry>>(&snapshot)?.len(), 3);
             let extra = r#"[{"id":"existing","content":"unique parent"},{"id":"new","content":"fourth body","supersedes":"existing","see_also":["existing"]}]"#;
             assert_eq!((import_json_text(extra)?.imported, import_json_text(extra)?.duplicates), (1, 2));

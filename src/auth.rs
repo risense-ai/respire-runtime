@@ -126,14 +126,14 @@ pub fn try_session() -> Result<Option<SessionKeys>> {
     }
 }
 
-pub(crate) fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
+pub fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
     let kdf_salt = crypto::random_hex(16);
     let kek = crypto::derive_kek_v4(super_pass, &kdf_salt)?;
     let (urk_nonce, wrapped_urk) = crypto::wrap_key(urk, &kek)?;
     Ok((kdf_salt, wrapped_urk, urk_nonce))
 }
 
-pub(crate) fn wrap_with_rsrs(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
+pub fn wrap_with_rsrs(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
     let salt = crypto::random_hex(16);
     let kek = crypto::derive_rsrs_kek(super_pass, &salt)?;
     let (nonce, wrapped) = crypto::wrap_key(urk, &kek)?;
@@ -242,7 +242,7 @@ pub fn keygen() -> Result<(PathBuf, String)> {
     Ok((path, super_pass))
 }
 
-pub(crate) fn unlock_session_keys(
+pub fn unlock_session_keys(
     data: &serde_json::Value,
     login_pass: &str,
     super_arg: Option<&str>,
