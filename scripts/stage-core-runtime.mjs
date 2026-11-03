@@ -94,10 +94,6 @@ if (manifest.target.includes('windows')) {
   stage(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
-// Redistribution notices must remain readable by the host packaging step.
-for (const file of files) {
-  if (file.path.startsWith('core-notices/')) chmodSync(join(output,file.path),0o644);
-}
 stage(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
   sdk_version:manifest.sdk_version,redistribution:manifest.redistribution,files},null,2)+'\n');
 console.log(`Staged ${files.length} runtime/notice files next to the runtime binary`);
