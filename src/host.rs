@@ -477,7 +477,7 @@ pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
             settings = serde_json::from_value(json!({"cos_min":0.0,"sim_min":0.30,
                 "recall_min_score":0.25,"lexical_weight":0.30,"semantic_power":1.3,
                 "bm25":false,"max_fusion":false,"normalize_ablation":false,
-                "aux_cap_ratio":null,"rrf_cap":0.0,"heat_cap":15}))?;
+                "aux_cap_ratio":null,"rrf_cap":0.0,"heat_cap":15,"fusion":"legacy"}))?;
         }
         Ok(value) if value == "calibrated" => {}
         Ok(_) => anyhow::bail!("RSRS_RECALL_PROFILE must be calibrated or legacy"),
@@ -506,6 +506,15 @@ pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
         ("lexical_weight", "RSRS_RECALL_LEXICAL_WEIGHT"), ("semantic_power", "RSRS_RECALL_SEMANTIC_POWER"),
         ("aux_cap_ratio", "RSRS_RECALL_AUX_CAP_RATIO"), ("rrf_cap", "RSRS_RECALL_RRF_CAP"),
     ] { explicit_setting::<f32>(&mut settings, key, name)?; }
+    explicit_setting::<String>(&mut settings, "fusion", "RSRS_RECALL_FUSION")?;
+    explicit_setting::<f32>(&mut settings, "fusion_alpha", "RSRS_RECALL_FUSION_ALPHA")?;
+    explicit_setting::<f32>(&mut settings, "fusion_beta", "RSRS_RECALL_FUSION_BETA")?;
+    explicit_setting::<f32>(&mut settings, "fusion_temperature", "RSRS_RECALL_FUSION_TEMPERATURE")?;
+    explicit_setting::<f32>(&mut settings, "fusion_gate_recency", "RSRS_RECALL_FUSION_GATE_RECENCY")?;
+    explicit_setting::<f32>(&mut settings, "fusion_gate_recency_temporal", "RSRS_RECALL_FUSION_GATE_RECENCY_TEMPORAL")?;
+    explicit_setting::<f32>(&mut settings, "fusion_gate_hot", "RSRS_RECALL_FUSION_GATE_HOT")?;
+    explicit_setting::<f32>(&mut settings, "fusion_gate_tree", "RSRS_RECALL_FUSION_GATE_TREE")?;
+    explicit_setting::<f32>(&mut settings, "fusion_temporal_alpha", "RSRS_RECALL_FUSION_TEMPORAL_ALPHA")?;
     for (key, name, default) in [
         ("bm25", "RSRS_RECALL_BM25", true), ("max_fusion", "RSRS_RECALL_MAX_FUSION", false),
         ("normalize_ablation", "RSRS_RECALL_NORMALIZE_ABLATION", true), ("debug_score", "RSRS_DEBUG_SCORE", false),
