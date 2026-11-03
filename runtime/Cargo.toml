@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 respire_commands = { path = "../crates/commands" }
+respire_core_sdk = { path = "../crates/core-sdk" }
 respire_protocol = { path = "../crates/protocol" }
 # Boot-token consumption stays aligned with the spawner semantics (P2 moves
 # this crate into the runtime repository together with respire_spawn).

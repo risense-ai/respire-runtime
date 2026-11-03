@@ -87,6 +87,15 @@ fn usage() -> &'static str {
 }
 
 fn run() -> Result<i32> {
+    if std::env::args().nth(1).is_some_and(|arg| arg == "--core-worker-internal") {
+        return match respire_core_sdk::worker::run() {
+            Ok(()) => Ok(0),
+            Err(error) => {
+                eprintln!("core worker: {error:#}");
+                Ok(2)
+            }
+        };
+    }
     let mut flags = Flags::default();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
