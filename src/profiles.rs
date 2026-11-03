@@ -87,7 +87,7 @@ impl Selection {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.model.trim().is_empty() && self.model == self.profile.id, "selection model/profile mismatch");
         anyhow::ensure!(self.backend == self.backend_profile.id, "selection backend/profile mismatch");
-        anyhow::ensure!(matches!(self.backend_profile.backend.as_str(), "onnx" | "host_transport"), "unsupported embedding backend");
+        anyhow::ensure!(matches!(self.backend_profile.backend.as_str(), "onnx" | "host_transport" | "mlx"), "unsupported embedding backend");
         if let Some(native) = &self.backend_profile.native {
             anyhow::ensure!(!native.provider.is_empty(),"native provider name is empty");
             anyhow::ensure!(self.backend_profile.backend == "onnx","native options require ONNX backend");
@@ -100,12 +100,17 @@ impl Selection {
         anyhow::ensure!(embedding["dimensions"].as_u64().is_some_and(|v| v > 0 && v <= 65536) && embedding["max_tokens"].as_u64().is_some_and(|v| v >= 4 && v <= 131072), "invalid embedding dimensions/window");
         anyhow::ensure!(matches!(embedding["pooling"].as_str(), Some("cls" | "mean" | "sentence_embedding")) && embedding["normalize"].is_boolean(), "invalid pooling/normalization");
         for field in ["query_prefix", "document_prefix"] { anyhow::ensure!(embedding[field].is_string(), "embedding {field} must be a string"); }
-        if self.backend_profile.backend == "onnx" {
+        if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
             for resource in [&self.profile.weights, &self.profile.tokenizer] {
-                let resource = resource.as_ref().context("ONNX weights and tokenizer are required")?;
+                let resource = resource.as_ref().context("local embedding weights and tokenizer are required")?;
                 anyhow::ensure!(resource.size > 0 && resource.sha256.len() == 64 && resource.sha256.bytes().all(|b| b.is_ascii_hexdigit()), "resource requires exact size and SHA-256");
             }
-            for name in ["input_ids"] { anyhow::ensure!(self.profile.onnx[name].as_str().is_some_and(|v| !v.is_empty()), "missing ONNX tensor name {name}"); }
+            if self.backend_profile.backend == "onnx" {
+                for name in ["input_ids"] { anyhow::ensure!(self.profile.onnx[name].as_str().is_some_and(|v| !v.is_empty()), "missing ONNX tensor name {name}"); }
+            } else {
+                anyhow::ensure!(matches!(self.engine, Engine::Cpu | Engine::Gpu), "MLX backend accepts cpu or gpu");
+                anyhow::ensure!(!self.profile.onnx.is_object() || self.profile.onnx.as_object().is_some_and(|fields| fields.is_empty()), "MLX profiles must not declare ONNX tensor names");
+            }
         } else {
             anyhow::ensure!(self.engine == Engine::Cpu, "host_transport does not accept a local accelerator engine");
             anyhow::ensure!(self.backend_profile.protocol.as_deref() == Some("openai_embeddings") && self.backend_profile.provider.as_deref().is_some_and(|v| !v.is_empty()), "host transport requires provider and openai_embeddings protocol");
@@ -114,16 +119,17 @@ impl Selection {
     }
     pub fn config(&self) -> Result<Value> {
         self.validate()?;
-        let asset_id = if self.backend_profile.backend == "onnx" {
+        let asset_id = if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
             format!("{}:{}", self.profile.weights.as_ref().context("weights missing")?.sha256, self.profile.tokenizer.as_ref().context("tokenizer missing")?.sha256)
         } else { format!("{}:{}", self.profile.embedding["model_id"].as_str().context("model_id missing")?, self.profile.embedding["revision"].as_str().context("revision missing")?) };
         use sha2::{Digest,Sha256};
         let native_id = self.backend_profile.native.as_ref().map(|native| serde_json::to_vec(native).map(|bytes| format!("{:x}",Sha256::digest(bytes)))).transpose()?;
         let mut config = json!({"model":self.model,"backend":self.backend_profile.backend,"engine":self.engine,
             "asset_id":asset_id,"session_options_id":format!("profile-v1:{:?}:{:?}",self.engine,native_id),
-            "embedding":self.profile.embedding,"onnx":self.profile.onnx,
+            "embedding":self.profile.embedding,
             "execution_timeout_secs":120});
-        if self.backend_profile.backend == "onnx" {
+        if !self.profile.onnx.is_null() && !self.profile.onnx.as_object().is_some_and(|fields| fields.is_empty()) { config["onnx"] = self.profile.onnx.clone(); }
+        if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
             config["model_sha256"] = json!(self.profile.weights.as_ref().context("weights missing")?.sha256.to_ascii_lowercase());
             config["tokenizer_sha256"] = json!(self.profile.tokenizer.as_ref().context("tokenizer missing")?.sha256.to_ascii_lowercase());
         }
@@ -139,7 +145,7 @@ impl Selection {
     }
     pub fn verify(&self) -> Result<()> {
         self.validate()?;
-        if self.backend_profile.backend == "onnx" {
+        if matches!(self.backend_profile.backend.as_str(), "onnx" | "mlx") {
             for resource in [&self.profile.weights, &self.profile.tokenizer] {
                 let resource = resource.as_ref().context("resource missing")?;
                 crate::model_selection::verify(&resource.path, resource.size, &resource.sha256)?;
@@ -173,6 +179,9 @@ pub(crate) fn initialize(core: &mut crate::Core, selection: &Selection) -> Resul
     selection.validate()?;
     let capabilities = core.capabilities()?;
     anyhow::ensure!(capabilities["embedding_profile_contract"].as_u64() == Some(1) && capabilities["embedding_transport_contract"].as_u64() == Some(1), "paired Core SDK with embedding profile/transport contract 1 is required");
+    if selection.backend_profile.backend == "mlx" {
+        anyhow::ensure!(capabilities["mlx_backend_contract"].as_u64() == Some(1), "the paired Core SDK was built without the Apple MLX backend; install a Core SDK built with the mlx feature");
+    }
     let mut config = selection.config()?;
     let mut loaded = LOADED_CONFIG.lock().map_err(|_| anyhow::anyhow!("profile model cache poisoned"))?;
     if loaded.as_ref() == Some(&config) {
