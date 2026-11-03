@@ -194,7 +194,7 @@ jobs:
         if: ${{ !contains(matrix.target, '-musl') }}
         shell: bash
         run: |
-          cargo build --release --locked -p respire-runtime --bin rsrs-runtime \
+          cargo build --release --locked -p respire_runtime --bin rsrs-runtime \
             --target '${{ matrix.target }}' --target-dir target/release-build
       - uses: actions/cache/restore@v4
         if: contains(matrix.target, '-musl')

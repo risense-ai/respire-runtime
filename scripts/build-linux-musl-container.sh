@@ -18,7 +18,7 @@ case "${RELEASE_CACHE_ACTION:-build}" in
   build)
     node scripts/fetch-core-sdk.mjs "$TARGET"
     if [ "${RELEASE_DEPENDENCY_CACHE:-}" = 1 ]; then node scripts/rust-ci-cache.mjs restore release "$TARGET"; fi
-    cargo build --release --locked -p respire-runtime --bin rsrs-runtime --target "$TARGET" --target-dir target/ci
+    cargo build --release --locked -p respire_runtime --bin rsrs-runtime --target "$TARGET" --target-dir target/ci
     node scripts/stage-core-runtime.mjs "target/ci/$TARGET/release"
     ;;
   *) echo 'Invalid release cache action' >&2; exit 1 ;;
