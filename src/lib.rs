@@ -21,10 +21,12 @@ pub mod cli_def;
 pub mod gates;
 pub mod i18n;
 pub mod metadata;
+pub mod net_rpc;
 pub mod output;
 pub mod output_state;
 pub mod review;
 pub mod rpc_worker;
+pub mod runtime_error;
 pub mod runtime_policy;
 pub mod util;
 
