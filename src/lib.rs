@@ -14,6 +14,9 @@ pub use metadata::{
     RequestScope, Scope, SourceRef, Verification,
 };
 
+pub mod runtime;
+pub use runtime::{AssetRequirement, AssetsStatus, RuntimeBuildMeta, RuntimeCompat, RuntimeIdentity};
+
 pub const VERSION_TAG: &str = env!("CARGO_PKG_VERSION");
 
 /// Recall routing receipt; no intermediate ranking features are exposed.
