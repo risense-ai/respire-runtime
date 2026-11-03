@@ -1,0 +1,302 @@
+# Sweep an approved development server after explicitly configuring its address.
+# Windows, macOS, and Linux run the same isolated script.
+name: Dev server sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_salt_only:
+        description: Only test real legacy authentication salt migration and fresh CLI login
+        type: boolean
+        default: false
+      api_only:
+        description: Run cloud API diagnostics only; does not validate all CLI features or publish
+        type: boolean
+        default: false
+      local_api_only:
+        description: Diagnose authenticated runtime contracts only; never validates the complete release gate
+        type: boolean
+        default: false
+      cli_run_id:
+        description: Validated Release run whose exact artifacts will be tested without rebuilding
+        required: true
+        type: string
+      cli_sha:
+        description: Exact 40-character CLI source SHA for cli_run_id
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      auth_salt_only:
+        type: boolean
+        default: false
+      api_only:
+        type: boolean
+        default: false
+      local_api_only:
+        type: boolean
+        default: false
+      cli_run_id:
+        required: true
+        type: string
+      cli_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sweep:
+    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.auth_salt_only }}
+    name: ${{ inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.os) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON((inputs.local_api_only || inputs.auth_salt_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require the approved development server
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          CLI_SHA: ${{ inputs.cli_sha }}
+          API_ONLY: ${{ inputs.api_only }}
+          LOCAL_API_ONLY: ${{ inputs.local_api_only }}
+          AUTH_SALT_ONLY: ${{ inputs.auth_salt_only }}
+        run: |
+          node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
+          node -e 'if(process.env.AUTH_SALT_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
+          node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("CLI smoke requires https://api-dev.rsrs.rs"); if(!process.env.CLI_RUN_ID||!process.env.CLI_SHA) throw new Error("Pass the exact CI run ID and source SHA; mutable npm tags are not smoke artifacts")'
+      - name: Verify the original release build
+        if: inputs.cli_run_id != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          CLI_SHA: ${{ inputs.cli_sha }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process'),m=require('./npm/artifact-manifest.json');
+          const id=process.env.CLI_RUN_ID,sha=process.env.CLI_SHA,repo=process.env.GITHUB_REPOSITORY;
+          if(!/^\d+$/.test(id)||!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Pass an exact validated run ID and full CLI SHA');
+          const api=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
+          const run=api(`actions/runs/${id}`);
+          if(run.head_sha!==sha||!['.github/workflows/release.yml','.github/workflows/release-validation.yml'].includes(run.path)) throw new Error('Unexpected release source or workflow');
+          const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${id}/jobs?per_page=10`],{encoding:'utf8'})).flatMap(page=>page.jobs);
+          const required=[...m.targets.map(t=>`Release (${t.triple})`),'npm-dry-run'];
+          for(const name of required) if(!jobs.some(j=>(j.name===name||j.name.endsWith(` / ${name}`))&&j.conclusion==='success')) throw new Error(`Original release validation did not pass: ${name}`);
+          NODE
+      - uses: actions/download-artifact@v4
+        if: inputs.cli_run_id != ''
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: original-artifact
+          run-id: ${{ inputs.cli_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify and extract the original binary
+        id: verified_artifact
+        if: inputs.cli_run_id != ''
+        shell: bash
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_SHA: ${{ inputs.cli_sha }}
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const metadata=JSON.parse(fs.readFileSync(`original-artifact/cli-build-${process.env.CLI_TARGET}.json`,'utf8'));
+          cp.execFileSync(process.execPath,['npm/scripts/set-build-version.mjs',metadata.version],{stdio:'inherit'});
+          cp.execFileSync(process.execPath,['npm/scripts/extract-artifact.mjs','original-artifact','validated-cli'],{env:{...process.env,CLI_VERSION:metadata.version},stdio:'inherit'});
+          fs.appendFileSync(process.env.GITHUB_ENV,`CLI_VERSION=${metadata.version}\n`);
+          NODE
+      - name: Install PowerShell
+        if: ${{ !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null 2>&1; then
+            exit 0
+          fi
+          if [ "$(uname -s)" = Linux ]; then
+            . /etc/os-release
+            curl -fsSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update
+            sudo apt-get install -y powershell
+          else
+            brew install powershell
+          fi
+      - name: Sweep the exact CI binary
+        if: ${{ !inputs.local_api_only && !inputs.auth_salt_only }}
+        shell: pwsh
+        env:
+          RSRS_LANG: en
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          RSRS_ENGINE: cpu
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RSRS_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
+          $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+      - name: Upload base smoke diagnostics
+        if: ${{ always() && !inputs.local_api_only && !inputs.auth_salt_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: base-sweep-report-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/om-sweep/report.md
+            ${{ runner.temp }}/om-sweep/coverage.json
+          if-no-files-found: warn
+      - uses: actions/setup-python@v5
+        id: supplement_python
+        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' }}
+        with:
+          python-version: '3.12'
+      - name: Verify all supplementary CLI contracts
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath validated-cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
+      - name: Verify historical Secret Service profile migration
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          binary="$(realpath validated-cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          root="$RUNNER_TEMP/secret-service-profile-migration"
+          fixture_status=0
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
+          python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
+          test "$fixture_status" -eq 0
+      - name: Verify native encrypted profile migration
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: pwsh
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --only-binary=:all: cryptography==46.0.3
+          if ($LASTEXITCODE -ne 0) { throw 'Native migration fixture dependencies failed' }
+          $binary = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
+          $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'dev-supplements') | Out-Null
+          $migrationRoot = Join-Path $env:RUNNER_TEMP 'dev-supplements/profile-migration'
+          python scripts/dev-profile-migration-smoke.py --binary $binary --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA --root $migrationRoot
+          $migrationExit = $LASTEXITCODE
+          python scripts/dev-smoke-gate.py --migration-only --cli-report (Join-Path $env:RUNNER_TEMP 'om-sweep/coverage.json') --profile-migration (Join-Path $migrationRoot 'migration-coverage.json') --report (Join-Path $env:RUNNER_TEMP 'dev-supplements/migration-platform-gate.json') --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA
+          if ($migrationExit -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Native migration or artifact gate failed.' }
+      - name: Verify real legacy authentication salt migration
+        if: ${{ !cancelled() && inputs.auth_salt_only && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath validated-cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          mkdir -p "$RUNNER_TEMP/dev-supplements"
+          python3 scripts/dev-legacy-vault-smoke.py --auth-salt-only --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
+      - name: Diagnose runtime contracts without a full release claim
+        if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          binary="$(realpath validated-cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          python3 scripts/dev-runtime-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/runtime-diagnostics" --report "$RUNNER_TEMP/dev-supplements/runtime-coverage.json"
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: sweep-report-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/om-sweep/report.md
+            ${{ runner.temp }}/om-sweep/coverage.json
+            ${{ runner.temp }}/dev-supplements/suite-results.json
+            ${{ runner.temp }}/dev-supplements/combined-coverage.json
+            ${{ runner.temp }}/dev-supplements/outbox/outbox-coverage.json
+            ${{ runner.temp }}/dev-supplements/ai-inject/ai-inject-coverage.json
+            ${{ runner.temp }}/dev-supplements/runtime-coverage.json
+            ${{ runner.temp }}/dev-supplements/legacy-vault/legacy-vault-coverage.json
+            ${{ runner.temp }}/dev-supplements/profile-migration/migration-coverage.json
+            ${{ runner.temp }}/dev-supplements/migration-platform-gate.json
+            ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
+            ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json
+          if-no-files-found: error
+
+  api-smoke:
+    if: ${{ !inputs.auth_salt_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: respire-dev-mailbox-fixture
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check all baseline CLI API contracts and GitHub transport
+        env:
+          RSRS_DEV_MAIL_ADDRESS: ${{ vars.RESPIRE_DEV_MAIL_ADDRESS }}
+          RSRS_DEV_IMAP_HOST: ${{ vars.RESPIRE_DEV_IMAP_HOST }}
+          RSRS_DEV_IMAP_USERNAME: ${{ secrets.RESPIRE_DEV_IMAP_USERNAME }}
+          RSRS_DEV_IMAP_PASSWORD: ${{ secrets.RESPIRE_DEV_IMAP_PASSWORD }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
+          RSRS_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          sleep 61
+          python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
+          python3 scripts/dev-github-api-smoke.py --report "$RUNNER_TEMP/dev-github-api-coverage.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: dev-api-coverage
+          path: |
+            ${{ runner.temp }}/dev-api-coverage.json
+            ${{ runner.temp }}/dev-github-api-coverage.json
+          if-no-files-found: error
