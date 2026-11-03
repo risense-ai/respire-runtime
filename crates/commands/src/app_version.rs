@@ -1,7 +1,7 @@
 //! Embedded CLI version. Printed by `--version`, `-v`, and `rsrs v`.
 //!
 //! The version is the rsrs CLI release version, supplied at build time by this
-//! crate's build script as `RSRS_CLI_VERSION` (read from the CLI manifest),
+//! crate's build script as `RSRS_CLI_VERSION` (read from the workspace manifest),
 //! because this crate keeps its own independent package version.
 
 use crate::output::{Item as OutputItem, ResultEnvelope, Status};
