@@ -41,6 +41,9 @@ pub type MaterializeBin = fn() -> std::result::Result<PathBuf, String>;
 pub type ForegroundProgress = fn(&str) -> anyhow::Result<serde_json::Value>;
 pub type RuntimeBrief = fn() -> Option<(u32, String, String)>;
 pub type HostCommand = fn(&crate::cli_def::Cli) -> Option<anyhow::Result<()>>;
+pub type ExtractTuiRun = fn() -> anyhow::Result<()>;
+pub type RuntimeIsUp = fn() -> bool;
+pub type ChangeProfile = fn(Box<dyn FnOnce() -> anyhow::Result<()>>) -> anyhow::Result<()>;
 
 #[derive(Default)]
 pub struct HostHooks {
@@ -56,6 +59,9 @@ pub struct HostHooks {
     pub foreground_progress: Option<ForegroundProgress>,
     pub runtime_brief: Option<RuntimeBrief>,
     pub host_command: Option<HostCommand>,
+    pub extract_tui_run: Option<ExtractTuiRun>,
+    pub runtime_is_up: Option<RuntimeIsUp>,
+    pub change_profile: Option<ChangeProfile>,
 }
 
 static BACKGROUND_PAUSED: OnceLock<BackgroundPaused> = OnceLock::new();
@@ -70,6 +76,9 @@ static MATERIALIZE_BIN: OnceLock<MaterializeBin> = OnceLock::new();
 static FOREGROUND_PROGRESS: OnceLock<ForegroundProgress> = OnceLock::new();
 static RUNTIME_BRIEF: OnceLock<RuntimeBrief> = OnceLock::new();
 static HOST_COMMAND: OnceLock<HostCommand> = OnceLock::new();
+static EXTRACT_TUI_RUN: OnceLock<ExtractTuiRun> = OnceLock::new();
+static RUNTIME_IS_UP: OnceLock<RuntimeIsUp> = OnceLock::new();
+static CHANGE_PROFILE: OnceLock<ChangeProfile> = OnceLock::new();
 
 /// Install the host implementations. Returns `false` when a previous installer
 /// already ran; the first installation wins.
@@ -87,6 +96,9 @@ pub fn install(hooks: HostHooks) -> bool {
         foreground_progress,
         runtime_brief,
         host_command,
+        extract_tui_run,
+        runtime_is_up,
+        change_profile,
     } = hooks;
     let installed = [
         background_paused.map(|hook| BACKGROUND_PAUSED.set(hook).is_ok()),
@@ -101,6 +113,9 @@ pub fn install(hooks: HostHooks) -> bool {
         foreground_progress.map(|hook| FOREGROUND_PROGRESS.set(hook).is_ok()),
         runtime_brief.map(|hook| RUNTIME_BRIEF.set(hook).is_ok()),
         host_command.map(|hook| HOST_COMMAND.set(hook).is_ok()),
+        extract_tui_run.map(|hook| EXTRACT_TUI_RUN.set(hook).is_ok()),
+        runtime_is_up.map(|hook| RUNTIME_IS_UP.set(hook).is_ok()),
+        change_profile.map(|hook| CHANGE_PROFILE.set(hook).is_ok()),
     ];
     installed.iter().all(|slot| slot.as_ref().is_none_or(|ok| *ok))
 }
@@ -183,5 +198,26 @@ pub fn host_command(args: &crate::cli_def::Cli) -> Option<anyhow::Result<()>> {
     match HOST_COMMAND.get() {
         Some(hook) => hook(args),
         None => None,
+    }
+}
+
+/// Open the interactive extract TUI; host-owned terminal UI.
+pub fn extract_tui_run() -> anyhow::Result<()> {
+    match EXTRACT_TUI_RUN.get() {
+        Some(hook) => hook(),
+        None => Err(anyhow::anyhow!("the extract TUI runs in the host terminal")),
+    }
+}
+
+/// Whether a resident runtime answers right now (host client surface).
+pub fn runtime_is_up() -> bool {
+    RUNTIME_IS_UP.get().map(|hook| hook()).unwrap_or(false)
+}
+
+/// Run a profile change under the host lifecycle coordinator.
+pub fn change_profile(change: Box<dyn FnOnce() -> anyhow::Result<()>>) -> anyhow::Result<()> {
+    match CHANGE_PROFILE.get() {
+        Some(hook) => hook(change),
+        None => Err(anyhow::anyhow!("profile changes are host-managed")),
     }
 }

@@ -548,3 +548,28 @@ pub fn request_index() -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("runtime did not acknowledge background indexing"))
 }
 
+
+// ---- Recall-statistics enqueue bridge ----
+// The write queue itself (WriteJob/WRITE_TX) still lives beside the runtime
+// Job/admission machinery in the CLI binary; the engine reaches it through
+// this installed hook so the shared recall path has one call spelling.
+
+pub type EnqueueRecallStats = fn(RecallStats, usize);
+
+static RECALL_STATS_ENQUEUE: OnceLock<EnqueueRecallStats> = OnceLock::new();
+
+/// Install the host write-queue enqueue implementation. First installer wins.
+pub fn install_recall_stats_enqueue(hook: EnqueueRecallStats) -> bool {
+    RECALL_STATS_ENQUEUE.set(hook).is_ok()
+}
+
+/// Statistics are best effort; never wait for queue capacity on the recall reply path.
+pub fn queue_recall_stats(stats: RecallStats, generation: usize) {
+    match RECALL_STATS_ENQUEUE.get() {
+        Some(enqueue) => enqueue(stats, generation),
+        None => {
+            STATS_REJECTED.fetch_add(1, Ordering::AcqRel);
+            eprintln!("recall statistics rejected: recall statistics queue is not installed");
+        }
+    }
+}
