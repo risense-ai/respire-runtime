@@ -1,0 +1,45 @@
+[package]
+name = "respire_app"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "respire app layer: auth, service, sync, inject, and transport"
+license-file = "../../LICENSE"
+repository = "https://github.com/risense-ai/respire-cli"
+publish = false
+
+[features]
+default = ["cpu-owned-ort-experiment"]
+native-fault-tests = ["respire_core_sdk/native-fault-tests"]
+cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]
+
+[dependencies]
+respire_spawn = { path = "../../spawn" }
+respire_app_domain = { path = "../app-domain" }
+crossterm = "0.28"
+rpassword = "7"
+keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
+base64 = "0.22"
+flate2 = "1.1"
+respire_protocol = { path = "../protocol" }
+respire_storage = { path = "../storage" }
+respire_crypto = { path = "../crypto" }
+respire_core_sdk = { path = "../core-sdk", default-features = false }
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6.0"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ureq = { version = "2.12", features = ["json"] }
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+whoami = "2.1"
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[lints.rust]
+unsafe_code = "forbid"

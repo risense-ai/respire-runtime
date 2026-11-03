@@ -1,0 +1,17 @@
+[
+  {
+    "model": "bge-m3",
+    "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "license": "mit",
+    "files": []
+  },
+  {
+    "model": "bge-small-zh-v1.5",
+    "repository": "Xenova/bge-small-zh-v1.5",
+    "revision": "75c43b069aac4d136ba6bc1122f995fedcfd2781",
+    "license": "mit",
+    "license_file": "FlagEmbedding-LICENSE.txt",
+    "model_card": "bge-small-zh-v1.5-MODEL-CARD.md",
+    "files": ["tokenizer.json", "onnx/model_quantized.onnx"]
+  }
+]

@@ -1,10 +1,7 @@
 [workspace]
 resolver = "2"
-# P2 migration targets. Every member below arrives via `git subtree add` from
-# risense-ai/respire-cli (see MIGRATION-RUNBOOK.md; prepared at c5d7e1e on
-# integrate/runtime-split-20261103). Paths are pre-listed so the workspace
-# becomes valid as each subtree lands; until then cargo commands on this
-# branch fail with missing-member errors, which is expected.
+# P2 migration targets imported from risense-ai/respire-cli. crates/app is a
+# compatibility facade only; domain ownership remains in crates/app-domain.
 members = [
     "runtime",            # P2 import: bin rsrs-runtime (lands after WP-3 merges in respire-cli)
     "spawn",              # P2 import: durable spawn / boot token / job object (respire_spawn)
@@ -13,6 +10,7 @@ members = [
     "crates/storage",     # P2 import: respire_storage
     "crates/core-sdk",    # P2 import: respire_core_sdk — closed-source Core binding (+ core-sdk.lock.json)
     "crates/app-domain",  # P2 import: respire_app_domain — engine-side app layer
+    "crates/app",         # P2 transition: compatibility facade consumed by commands
     "crates/commands",    # P2 import: respire_commands — shared command engine (plan §3.3; gated on host-side residue cleanup)
 ]
 default-members = ["runtime"]
@@ -22,6 +20,7 @@ default-members = ["runtime"]
 
 [workspace.package]
 edition = "2021"
+version = "1.0.20"
 repository = "https://github.com/risense-ai/respire-runtime"
 
 [workspace.dependencies]
@@ -31,6 +30,7 @@ repository = "https://github.com/risense-ai/respire-runtime"
 respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.3" }
 respire_core_sdk = { path = "crates/core-sdk" }
 respire_app_domain = { path = "crates/app-domain" }
+respire_app = { path = "crates/app" }
 respire_storage = { path = "crates/storage" }
 respire_crypto = { path = "crates/crypto" }
 respire_commands = { path = "crates/commands" }
