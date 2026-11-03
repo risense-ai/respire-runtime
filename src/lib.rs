@@ -18,10 +18,13 @@ pub mod app_version;
 pub mod autostart;
 pub mod classify;
 pub mod cli_def;
+pub mod gates;
 pub mod i18n;
 pub mod metadata;
 pub mod output;
+pub mod output_state;
 pub mod review;
+pub mod util;
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
