@@ -243,6 +243,7 @@ jobs:
             echo "::error::Symlinked release payloads are forbidden"
             exit 1
           fi
+          export RUNTIME_BINARY_FILE="$binary"
           tar -czf "rsrs-runtime-$target.tar.gz" -C payload .
           node - <<'NODE'
           const cp = require('child_process');
