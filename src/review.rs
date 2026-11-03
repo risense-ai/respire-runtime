@@ -110,7 +110,7 @@ impl ReviewArgs {
         Ok(())
     }
 }
-//! CLI review shell (migrated): dispatch and emission for the shared inputs.
+// CLI review shell (migrated): dispatch and emission for the shared inputs.
 
 use anyhow::{Context, Result};
 use respire_app::review::{ReviewInput, ReviewService};

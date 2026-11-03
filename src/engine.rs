@@ -16,7 +16,10 @@ use respire_app::transport::remote::{RemoteConfig, RemoteTransport};
 use respire_app::{MemoryTransport, SessionKeys};
 
 
+/// Assemble transport: RSRS_ADDR (or session.json addr) -> remote backup store; else local store.
 pub fn build_transport() -> Result<Arc<dyn MemoryTransport>> {
+    if let Some((addr, token)) = remote_config_from_session_or_env()? {
+        return Ok(Arc::new(RemoteTransport::new(RemoteConfig {
             address: addr,
             token,
         })));
@@ -154,6 +157,8 @@ impl Drop for EmbedderHold {
         if let Ok(mut slot) = EMBEDDER_SLOT.lock() {
             *slot = self.0.take();
         }
+    }
+}
 
 pub fn scoped_candidates(store: &LocalStore) -> Result<Vec<respire_app::StoredMemory>> {
     let candidates = store.all(false)?;
@@ -3797,6 +3802,7 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
             "enabled":matches!(command,metadata::Command::Enable{..})}), Vec::new());
     result.details = details;
     emit_result(result)
+}
 
 pub fn run_local(args: Cli) -> Result<()> {
     set_json_mode(args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));

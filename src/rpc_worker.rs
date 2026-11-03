@@ -133,7 +133,7 @@ pub fn endpoint_pid() -> Option<u32> {
 // plumbing, verbatim from their extraction source apart from rebinding
 // app-core paths rebind to respire_app and CLI-host services go through host_hooks.
 
-pub thread_local! {
+thread_local! {
     static WORKER: Cell<bool> = const { Cell::new(false) };
     pub static SYNC_CONTEXT: Cell<Option<(usize, i64)>> = const { Cell::new(None) };
 }

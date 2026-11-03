@@ -2,7 +2,7 @@
 //! across the crate boundary for clap defaults.
 
 pub const DEFAULT_MODEL: &str = "jev-latest";
-//! Host credentials and network transport. Core owns classification policy.
+// Host credentials and network transport. Core owns classification policy.
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
