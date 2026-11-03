@@ -187,7 +187,7 @@ impl WriteGate {
         state.foreground -= 1;
         self.changed.notify_all();
     }
-    pub(crate) fn acquire_reserved(&self) -> WriteGuard<'_> {
+    pub fn acquire_reserved(&self) -> WriteGuard<'_> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         while state.held {
             state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -196,7 +196,7 @@ impl WriteGate {
         state.held = true;
         WriteGuard(self)
     }
-    pub(crate) fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
+    pub fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if foreground {
             state.foreground += 1;
