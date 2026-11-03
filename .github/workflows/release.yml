@@ -391,12 +391,7 @@ jobs:
           NODE
       - uses: actions/download-artifact@v4
         with:
-          pattern: runtime-release-${{ matrix.target }}
-          path: release-assets
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-release-binary-${{ matrix.target }}
+          pattern: runtime-release*-${{ matrix.target }}
           path: release-assets
           merge-multiple: true
       - name: Verify archive and binary digests against the build report
