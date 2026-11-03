@@ -9,6 +9,7 @@ pub fn now_stamp() -> String {
 
 pub fn current_user() -> String {
     respire_app::env::var("RSRS_USER").unwrap_or_else(|_| "local".to_owned())
+}
 
 /// Local-timezone YYYY-MM-DD (parse failure falls back to the first 10 chars of the original).
 pub fn local_day_of(s: &str) -> String {
