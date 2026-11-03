@@ -28,6 +28,7 @@ pub mod model_install;
 pub mod model_progress;
 pub mod net_rpc;
 pub mod output;
+pub mod output_emit;
 pub mod output_state;
 pub mod progress;
 pub mod review;
