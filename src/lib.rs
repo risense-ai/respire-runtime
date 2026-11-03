@@ -41,7 +41,9 @@ pub mod memory {
     pub use respire_crypto::{crypto, engine};
     pub use respire_crypto::{hydrate_local, reembed_embedding, MemoryEngine, SessionKeys};
     pub use respire_protocol as model;
-    pub use respire_protocol::{Kind, MemoryEntry, MemoryQuery, VERSION_TAG};
+    pub use respire_protocol::{
+        Kind, MemoryEntry, MemoryQuery, PayloadV2, StoredMemory, VERSION_TAG,
+    };
 }
 
 pub use memory::{hydrate_local, MemoryEngine, SessionKeys};
