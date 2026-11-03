@@ -8,14 +8,18 @@
 //! and the machine-readable output contract (`output`).
 //!
 //! Boundaries:
-//! - depends on `respire_app` (app-core), never on the `respire` CLI package;
+//! - depends on `respire_app` (app-core), `respire_protocol` and
+//!   `respire_spawn`, never on the `respire` CLI package;
 //! - the CLI binary re-exports these modules so `crate::` paths keep working;
-//! - the runtime engine migrates here in a later split step.
+//! - the runtime server face (`rpc_serve`, `runtime_http`, `admission`,
+//!   `network`) is shared with the standalone `rsrs-runtime` binary;
+//! - host-only services reach the shared code through `host_hooks`.
 //!
 //! Modules land with the individual extraction commits of the runtime split.
 
 pub mod app_version;
 pub mod autostart;
+pub mod admission;
 pub mod bench;
 pub mod classify;
 pub mod cli_def;
@@ -28,10 +32,13 @@ pub mod metadata;
 pub mod model_install;
 pub mod model_progress;
 pub mod net_rpc;
+pub mod network;
 pub mod output;
 pub mod output_emit;
 pub mod output_state;
 pub mod progress;
+pub mod runtime_http;
+pub mod rpc_serve;
 pub mod sync_flow;
 pub mod review;
 pub mod recall_select;

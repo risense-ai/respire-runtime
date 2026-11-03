@@ -301,7 +301,8 @@ pub fn foreground_phase<T>(
 pub fn invalidate_sync_boundary(generation: usize) -> Result<()> {
     check_sync_context(generation)?;
     GENERATION.fetch_add(1, Ordering::AcqRel);
-    context_changed();
+    // The sync scheduler and resident catalog live beside the dispatch loop.
+    crate::rpc_serve::context_changed();
     Ok(())
 }
 

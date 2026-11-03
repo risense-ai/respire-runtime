@@ -3399,7 +3399,7 @@ pub fn background_sync_once() -> Result<bool> {
 /// Direct writes leave durable work for an explicit sync or runtime recovery.
 pub fn schedule_autosync(_session: &SessionKeys, _local: &LocalStore) {
     if rpc::worker_active() && respire_app::service::autosync_active() && remote_configured() {
-        rpc::kick_autosync();
+        crate::rpc_serve::kick_autosync();
     }
 }
 pub fn auto_sync(session: &SessionKeys, local: &LocalStore) {
@@ -3751,7 +3751,7 @@ pub fn run_metadata_status() -> Result<()> {
     emit_result(result)
 }
 
-pub fn change_metadata_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
+pub fn change_metadata_profile(change: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
     if DIRECT_MODE.load(Ordering::Relaxed) {
         let _takeover = runtime_policy::takeover_lock()?;
         anyhow::ensure!(!crate::host_hooks::runtime_is_up(), "stop the local runtime before direct metadata configuration");
@@ -6298,7 +6298,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 v["max_updated_at"] = serde_json::json!(app_status.max_updated_at);
                 v["workspace"] = serde_json::json!(respire_app::service::workspace_mode());
                 let live = sync_live();
-                v["sync_scheduler"] = rpc::sync_scheduler_status();
+                v["sync_scheduler"] = crate::rpc_serve::sync_scheduler_status();
                 v["recall_statistics"] = rpc::recall_stats_status();
                 v["retrieval_index"] = rpc::index_status();
                 v["model_operation"] = crate::model_progress::status()?;
