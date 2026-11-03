@@ -206,7 +206,10 @@ jobs:
         if: contains(matrix.target, '-musl')
         shell: bash
         run: bash scripts/build-linux-musl.sh '${{ matrix.target }}'
+      # The musl container already stages its payload as root; a second host
+      # staging pass cannot chmod those notices and changes nothing.
       - name: Stage the Core runtime payload next to the binary
+        if: ${{ !contains(matrix.target, '-musl') }}
         shell: bash
         env:
           RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.target }}
@@ -229,6 +232,7 @@ jobs:
           # the CLI downloader and client2 validate against.
           built="rsrs-runtime$suffix"
           binary="rsrs-runtime-$target$suffix"
+          export RUNTIME_BINARY_FILE="$binary"
           test -f "$BUILD_DIR/$built" || { echo "::error::Built binary missing at $BUILD_DIR/$built"; exit 1; }
           test -f "$BUILD_DIR/core-runtime.json" || { echo "::error::Staged core-runtime.json missing; the SDK staging step failed silently"; exit 1; }
           test -d "$BUILD_DIR/core-notices" || { echo "::error::Staged Core SDK notices missing"; exit 1; }
