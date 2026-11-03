@@ -3767,26 +3767,34 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
     respire_app::service::ensure_writable()?;
     anyhow::ensure!(!respire_app::service::off_mode(), "restore normal service before changing the metadata gate");
     let root = respire_app::service::data_dir();
-    let mut details = serde_json::Value::Null;
+    // The lifecycle hook requires a Send closure, so shared state crosses it
+    // by owned handles instead of borrows.
+    let details = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
     match command {
         metadata::Command::Enable { mode, deployment_review } => {
             let (deployment, review) = metadata::deployment(mode, deployment_review.as_deref())?;
             respire_app::metadata_gate::require_support()?;
             let keys = build_session()?;
             let account = respire_app::service::session_user_of_dir(&root);
-            change_metadata_profile(|| {
+            let root = root.clone();
+            let details = details.clone();
+            change_metadata_profile(move || {
                 let ownership = respire_app::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
                 let receipt = respire_app::metadata_gate::enable(&root, &ownership, &account, &keys, deployment)?;
-                details = serde_json::json!({"receipt":receipt,"deployment_review":review,
+                *details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? =
+                    serde_json::json!({"receipt":receipt,"deployment_review":review,
                     "deployment_assurance":"operator_attestation_only","old_client_access_enforced":false});
                 Ok(())
             })?;
         }
         metadata::Command::Disable => {
-            change_metadata_profile(|| {
+            let root = root.clone();
+            let details = details.clone();
+            change_metadata_profile(move || {
                 let _ownership = respire_app::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
                 let store = respire_app::transport::local::LocalStore::open_existing(&respire_app::service::database_path(&root)?)?;
-                details = store.write_transaction(|| {
+                *details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? =
+                    store.write_transaction(|| {
                     let mode = respire_app::metadata_gate::mode(&store)?;
                     let retained = store.has_memory_metadata()?;
                     store.meta_set("memory_metadata_v1_enabled", "0")?;
@@ -3801,7 +3809,7 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
     let mut result = ResultEnvelope::new("metadata", OutputStatus::Ok,
         serde_json::json!({"action":if matches!(command,metadata::Command::Enable{..}){"enabled"}else{"disabled"},
             "enabled":matches!(command,metadata::Command::Enable{..})}), Vec::new());
-    result.details = details;
+    result.details = details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))?.clone();
     emit_result(result)
 }
 
@@ -6729,6 +6737,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Classify { .. }
         | Command::Web { .. }
         | Command::Restart { .. }
+        | Command::Runtime { .. }
         | Command::ClassifyConfig { .. } => unreachable!(
             "commands that do not need the embedder already returned at the top of main"
         ),
