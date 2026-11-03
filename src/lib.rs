@@ -25,6 +25,7 @@ pub mod output;
 pub mod output_state;
 pub mod review;
 pub mod rpc_worker;
+pub mod runtime_policy;
 pub mod util;
 
 #[cfg(test)]
