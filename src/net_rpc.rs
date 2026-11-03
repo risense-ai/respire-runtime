@@ -333,7 +333,7 @@ pub fn request_stop() -> Result<()> {
     request_stop_with_timeout(HTTP_TIMEOUT)
 }
 
-pub(crate) fn request_stop_with_timeout(timeout: Duration) -> Result<()> {
+pub fn request_stop_with_timeout(timeout: Duration) -> Result<()> {
     crate::runtime_policy::require_host("runtime shutdown")?;
     let url = format!("{}/api/runtime/stop", rpc_base_url());
     send_loopback(agent().post(&url).timeout(timeout).set("X-Respire-Lifecycle", "coordinator-v1"), |request| request.send_string("{}"))?;
@@ -413,7 +413,7 @@ pub fn wait_until_down() -> Result<()> {
 }
 
 /// A closed listener does not prove that the library holder has exited.
-pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
+pub fn wait_until_exited(pid: u32) -> Result<()> {
     for _ in 0..STOP_POLLS {
         if !process_is_running(pid)? { return Ok(()); }
         std::thread::sleep(STOP_WAIT);
@@ -485,7 +485,7 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
     command == Some("runtime") && args.next() == Some("run")
 }
 
-pub(crate) fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
+pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid), "cannot verify runtime process {pid}");
     #[cfg(windows)]
     {
