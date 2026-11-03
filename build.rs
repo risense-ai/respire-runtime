@@ -25,6 +25,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("Test-only SDK requires the non-default native-fault-tests feature".into());
     }
+    if manifest["recall_fusion_contract"].as_u64() != Some(1) {
+        return Err("Core SDK lacks recall fusion contract 1; install the paired SDK".into());
+    }
     if manifest["recall_calibration_contract"].as_u64() != Some(1) {
         return Err("Core SDK lacks recall calibration contract 1; install the paired SDK".into());
     }
