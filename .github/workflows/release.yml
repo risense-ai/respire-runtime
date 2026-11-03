@@ -457,9 +457,9 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 1000));
             }
             if (!health) await fail(`Health endpoint on port ${port} never became ready`);
-            if (health.ok !== true) await fail(`Health reported ok=${health.ok}`);
+            if (health.store_ready !== true) await fail(`Health reported store_ready=${health.store_ready}`);
             if (health.runtime_version !== version) await fail(`Health runtime_version ${health.runtime_version} != ${version}`);
-            const compat = health.runtime_compat || {};
+            const compat = health.runtime?.runtime_compat || {};
             if (compat.min_cli !== process.env.EXPECTED_MIN_CLI || compat.max_cli !== process.env.EXPECTED_MAX_CLI) {
               await fail(`Health runtime_compat ${JSON.stringify(compat)} differs from the workflow contract`);
             }
