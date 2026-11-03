@@ -1,0 +1,74 @@
+Respire Core Binary SDK Noncommercial License 1.0
+
+Copyright (c) 2026 Respire contributors.
+
+1. Scope and acceptance
+
+These terms apply only to the first-party compiled Respire Core SDK files in a
+new SDK release expressly distributed with these terms. Subject to rights that
+applicable law does not allow the parties to exclude, exercising the permissions
+below constitutes acceptance. These terms do not apply retroactively to an older
+release distributed under different terms.
+
+2. Noncommercial permission
+
+The copyright holders grant a worldwide, non-exclusive, royalty-free permission
+to obtain, install, use, copy, and link the unmodified SDK binary and its required
+runtime files into applications solely for Noncommercial Purposes. You may
+redistribute those unmodified files with an application or build dependency
+solely for Noncommercial Purposes if you retain this complete license and all
+required third-party notices. The licensee obtains only the permissions in
+these terms. Do not represent that your application grants broader SDK rights.
+
+3. Commercial authorization
+
+"Noncommercial Purposes" means purposes that do not involve, support, or
+anticipate a Commercial Purpose. "Commercial Purpose" includes revenue,
+compensation, profit, business advantage, commercial research or development,
+commercial integration, resale, paid or business-operated hosted services, and
+the operations of a commercial business. Internal deployment for a business's
+operations is commercial even when no software fee is charged and there are no
+external users. Use on behalf of a business is not personal noncommercial use.
+
+All Commercial Purposes require a separate, prior written license from the
+copyright holders. Downloading, linking, repository access, or receipt of a
+public binding does not provide that commercial authorization. Contact Asura
+at luodaoyi@gmail.com.
+
+4. Proprietary implementation and reverse engineering
+
+No implementation source rights are granted. You may not publish or distribute
+proprietary implementation source. Except to the extent applicable law expressly
+permits the activity despite this restriction, you may not reverse engineer,
+decompile, disassemble, translate, or otherwise attempt to reconstruct the
+first-party implementation source, internal algorithms, or proprietary internal
+structures from the SDK binary. You may not modify or create derivative works
+of the first-party SDK binary, except as expressly authorized in writing.
+Ordinary linking through its documented public ABI is permitted under section 2.
+
+5. Third-party and independent material
+
+Restrictions in these terms apply only to the first-party proprietary SDK
+material. Separately licensed libraries, models, public protocol definitions,
+and thin bindings retain their own licenses. These terms do not restrict rights
+granted by their respective licensors or give you rights to otherwise restricted
+models. Preserve all bundled copyright, attribution, and license notices.
+No trademark rights or endorsement are granted.
+
+6. Existing grants and mandatory rights
+
+These terms do not revoke a previous license grant. They do not restrict fair
+use, interoperability, security research, observation, testing, or other rights
+to the extent applicable law makes those rights non-excludable. A separate
+written agreement controls only the permissions it expressly grants. If a
+restriction is unenforceable, the other terms remain effective to the extent
+allowed by applicable law.
+
+7. Warranty and liability
+
+THE SDK IS PROVIDED WITHOUT WARRANTY OF ANY KIND, TO THE MAXIMUM EXTENT PERMITTED
+BY LAW, INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE
+COPYRIGHT HOLDERS AND CONTRIBUTORS ARE NOT LIABLE FOR CLAIMS OR DAMAGES ARISING
+FROM THE SDK, ITS USE, ITS DISTRIBUTION, OR THESE TERMS, WHETHER ARISING IN CONTRACT,
+TORT, OR OTHERWISE.

@@ -1,0 +1,130 @@
+name: Runtime CI
+
+# Source-test CI for the runtime workspace. Before the P2 subtree migration
+# lands there is no workspace to test; the detect job reports that clearly and
+# the cargo test jobs skip. After P2, `workflow_dispatch` with
+# source_checks_only runs the full source test matrix in CI (never locally).
+on:
+  workflow_dispatch:
+    inputs:
+      source_checks_only:
+        description: Run all source tests and contracts without native compile or release validation
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: runtime-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      workspace_present: ${{ steps.detect.outputs.workspace_present }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: detect
+        run: |
+          if [ -f runtime/Cargo.toml ]; then
+            echo "workspace_present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "workspace_present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::The runtime workspace has not been migrated yet (phase P2); source tests are skipped."
+          fi
+
+  workspace-tests:
+    # cargo test source matrix (Linux GNU host target). Extends after P2 with
+    # the migrated coverage groups (runtime smoke, autostart supervision).
+    if: needs.detect.outputs.workspace_present == 'true' && inputs.source_checks_only
+    needs: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RSRS_ENGINE: cpu
+      # Several existing tests change process-global data-dir/language variables
+      # and create their own concurrent client threads.
+      RSRS_CORE_TEST_MODE: '1'
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+      # Keep backtrace file:line, assertions and overflow checks; omit full
+      # type/variable DWARF only. These source tests remain unoptimized.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '0'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-restore
+        if: steps.sdk-cache.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache.outputs.target }}
+          key: ${{ steps.sdk-cache.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Prepare pinned binary Core SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - name: Run the workspace source tests
+        run: cargo test --workspace --locked
+
+  ci-complete:
+    if: always()
+    needs: [detect, workspace-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require source tests when requested and available
+        env:
+          WORKSPACE_PRESENT: ${{ needs.detect.outputs.workspace_present }}
+          TESTS_RESULT: ${{ needs.workspace-tests.result }}
+          SOURCE_CHECKS_ONLY: ${{ inputs.source_checks_only }}
+        run: |
+          if [ "$SOURCE_CHECKS_ONLY" != 'true' ]; then
+            echo "source_checks_only is false; this workflow only performs source checks. Nothing to do."
+            exit 0
+          fi
+          if [ "$WORKSPACE_PRESENT" = 'true' ]; then
+            test "$TESTS_RESULT" = success || { echo "::error::Source tests did not pass"; exit 1; }
+            echo "Source tests passed"
+          else
+            test "$TESTS_RESULT" = skipped || { echo "::error::Tests ran without a workspace; investigate"; exit 1; }
+            echo "Skeleton state: no workspace yet; CI is green with tests skipped until P2"
+          fi

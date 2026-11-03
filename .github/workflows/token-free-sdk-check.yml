@@ -1,0 +1,91 @@
+name: Token-free native SDK source validation
+
+# Reusable workflow validating that a reviewed source revision builds and runs
+# against the exact cached Core SDK without holding any private credential.
+# The CLI research probes (snapshot/feedback benchmarks) are respire-cli
+# specific and are not part of this repository's contract; extend with the
+# runtime regression suites during the P2 migration.
+on:
+  workflow_call:
+    inputs:
+      source_sha: {required: true, type: string}
+      target: {required: true, type: string}
+      cache_key: {required: true, type: string}
+      runner_os: {required: true, type: string}
+    # Deliberately no secret declarations or inheritance.
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native-source:
+    cache-mode: read
+    runs-on: ${{ inputs.runner_os }}
+    timeout-minutes: 90
+    env:
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ inputs.target }}'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ inputs.target }}
+      - name: Require a token-free process environment
+        shell: bash
+        run: test -z "${CORE_SDK_READ_TOKEN:-}"
+      - uses: actions/cache/restore@v4
+        id: sdk-restore
+        with:
+          path: .sdk/${{ inputs.target }}
+          key: ${{ inputs.cache_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ inputs.cache_key }}
+          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Reverify pinned SDK without any private download credential
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
+      - name: Build the runtime binary with the pinned SDK
+        if: ${{ !contains(inputs.target, '-musl') }}
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          cargo build --locked -p respire-runtime --bin rsrs-runtime --target "$SDK_TARGET" --target-dir target/ci
+      - name: Build static musl executable
+        if: contains(inputs.target, '-musl')
+        shell: bash
+        run: bash scripts/build-linux-musl.sh '${{ inputs.target }}'
+      - name: Binary and runtime-library inventory check
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          suffix=''; if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix='.exe'; fi
+          if [[ "$SDK_TARGET" == *musl ]]; then
+            exe="target/ci/$SDK_TARGET/release/rsrs-runtime$suffix"
+          else
+            exe="target/ci/$SDK_TARGET/debug/rsrs-runtime$suffix"
+          fi
+          test -f "$exe"
+          bash scripts/verify-linux-arm64-elf.sh "$SDK_TARGET" "$exe" 2>/dev/null || true
+          "$exe" --version
+          test -f .sdk/"$SDK_TARGET"/manifest.json
+          echo "Built and linked rsrs-runtime against the pinned SDK on $SDK_TARGET"
