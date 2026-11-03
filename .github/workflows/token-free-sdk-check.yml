@@ -67,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
-          cargo build --locked -p respire-runtime --bin rsrs-runtime --target "$SDK_TARGET" --target-dir target/ci
+          cargo build --locked -p respire_runtime --bin rsrs-runtime --target "$SDK_TARGET" --target-dir target/ci
       - name: Build static musl executable
         if: contains(inputs.target, '-musl')
         shell: bash
