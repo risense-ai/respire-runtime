@@ -1,0 +1,78 @@
+name: Windows host sign-in startup validation
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-startup-validation.yml'
+      - 'scripts/test-windows-host-startup.ps1'
+      - 'cli/tests/runtime_help.rs'
+      - 'cli/src/main.rs'
+      - 'cli/src/rpc.rs'
+      - 'cli/src/runtime_policy.rs'
+      - 'crates/commands/src/runtime_policy.rs'
+      - 'spawn/**'
+      - 'docs/runtime.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  startup:
+    cache-mode: read
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      RSRS_ENGINE: cpu
+      RUST_MIN_STACK: '16777216'
+      RUST_TEST_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Require token-free validation
+        shell: pwsh
+        run: |
+          if ($env:CORE_SDK_READ_TOKEN) { throw 'No private download credential is allowed' }
+      - id: sdk
+        name: Resolve the pinned SDK cache key
+        shell: pwsh
+        run: |
+          $key = node scripts/sdk-ci-cache.mjs key x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0 -or -not $key) { throw 'SDK cache identity unavailable' }
+          "key=$key" >> $env:GITHUB_OUTPUT
+      - uses: actions/cache/restore@v4
+        id: sdk-restore
+        with:
+          path: .sdk/x86_64-pc-windows-msvc
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact audited SDK cache
+        shell: pwsh
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
+        run: |
+          if (-not $env:EXPECTED_KEY -or $env:EXPECTED_KEY -ne $env:MATCHED_KEY) { throw 'SDK cache key mismatch' }
+          node scripts/fetch-core-sdk.mjs x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'SDK audit failed' }
+      - name: Build and test the exact native source
+        shell: pwsh
+        env:
+          RUSTFLAGS: '-C target-feature=-crt-static'
+        run: |
+          cargo test --locked -p respire --test runtime_help --target x86_64-pc-windows-msvc --target-dir target/startup-validation
+          if ($LASTEXITCODE -ne 0) { throw 'Native runtime help tests failed' }
+      - name: Exercise a limited current-user sign-in task in an isolated profile
+        shell: pwsh
+        env:
+          STARTUP_TEST_HOSTED: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' }}
+        run: |
+          $nativeExecutable = (Resolve-Path 'target/startup-validation/x86_64-pc-windows-msvc/debug/rsrs.exe').Path
+          ./scripts/test-windows-host-startup.ps1 -Executable $nativeExecutable
