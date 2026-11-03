@@ -1,0 +1,14 @@
+{
+  "preAuth": "cli",
+  "mcpServers": {
+    "respire": {
+      "type": "stdio",
+      "command": "rsrs",
+      "args": ["mcp"],
+      "runtime": {
+        "type": "node",
+        "version": "20"
+      }
+    }
+  }
+}

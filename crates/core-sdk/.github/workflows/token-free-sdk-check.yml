@@ -1,0 +1,188 @@
+name: Token-free native SDK source validation
+on:
+  workflow_call:
+    inputs:
+      source_sha: {required: true, type: string}
+      target: {required: true, type: string}
+      cache_key: {required: true, type: string}
+      runner_os: {required: true, type: string}
+      feedback_probe: {required: false, type: boolean, default: false}
+    # Deliberately no secret declarations or inheritance.
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native-source:
+    cache-mode: read
+    runs-on: ${{ inputs.runner_os }}
+    timeout-minutes: 90
+    env:
+      RSRS_ENGINE: cpu
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ inputs.target }}'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ inputs.target }}
+      - name: Require a token-free process environment
+        shell: bash
+        run: test -z "${CORE_SDK_READ_TOKEN:-}"
+      - uses: actions/cache/restore@v4
+        id: sdk-restore
+        with:
+          path: .sdk/${{ inputs.target }}
+          key: ${{ inputs.cache_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ inputs.cache_key }}
+          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Reverify pinned SDK without any private download credential
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
+      - name: Build native executable with the pinned SDK
+        if: ${{ !contains(inputs.target, '-musl') }}
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          cargo build --workspace --locked --target "$SDK_TARGET" --target-dir target/ci
+      - name: Build static musl executable
+        if: contains(inputs.target, '-musl')
+        shell: bash
+        run: bash scripts/build-linux-musl.sh ${{ inputs.target }}
+      - name: Actual CPU model installation and native inference
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/private-sdk-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/private-sdk-probe/model
+        run: |
+          set -euo pipefail
+          profile=debug
+          suffix=''
+          if [[ "$SDK_TARGET" == *musl ]]; then profile=release; fi
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
+          exe="target/ci/$SDK_TARGET/$profile/rsrs$suffix"
+          "$exe" --version
+          bash scripts/verify-linux-arm64-elf.sh "$SDK_TARGET" "$exe"
+          "$exe" --direct model install-m3 --json
+          "$exe" --direct model probe --json
+          bash scripts/probe-native-arm64-alpine.sh "$SDK_TARGET" "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
+
+      - name: Native snapshot lifecycle and feedback probe build
+        if: ${{ inputs.feedback_probe && !contains(inputs.target, '-musl') }}
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire_app snapshot::tests --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
+          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire_storage transport::local::sync::diary_tests --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
+          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire --test snapshot_lifecycle --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
+          cargo build --locked -p respire --example feedback_contract_probe --example ablation_bench --target "$SDK_TARGET" --target-dir target/ci
+          node scripts/stage-core-runtime.mjs "target/ci/$SDK_TARGET/debug/examples"
+      - name: Static musl snapshot lifecycle and feedback probe build
+        if: ${{ inputs.feedback_probe && contains(inputs.target, '-musl') }}
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/workspace" -w /workspace -e TARGET="$SDK_TARGET" rust:1.95.0-alpine3.23 sh -ec '
+            . scripts/build-linux-musl-container.sh
+            echo "Checking minimal-musl ps syntax (diagnostic only):"
+            if ps -p $$ -o pid= -o stat=; then echo "ps syntax available"; else echo "ps syntax unavailable; Linux lifecycle requires verified procfs"; fi
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire_app snapshot::tests --target "$TARGET" --target-dir target/ci -- --test-threads=1
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire_storage transport::local::sync::diary_tests --target "$TARGET" --target-dir target/ci -- --test-threads=1
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire --test snapshot_lifecycle --target "$TARGET" --target-dir target/ci -- --test-threads=1
+            cargo build --locked --release -p respire --example feedback_contract_probe --example ablation_bench --target "$TARGET" --target-dir target/ci
+            node scripts/stage-core-runtime.mjs "target/ci/$TARGET/release/examples"
+          '
+      - name: Actual model feedback across Core service runtime and both benchmarks
+        if: inputs.feedback_probe
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+          RSRS_M3_DIR: ${{ runner.temp }}/private-sdk-probe/model
+          RSRS_DATA_DIR: ${{ runner.temp }}/private-sdk-probe
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}"; test -z "${RSRS_CORE_TEST_MODE:-}"
+          profile=debug; suffix=''
+          if [[ "$SDK_TARGET" == *musl ]]; then profile=release; fi
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
+          "target/ci/$SDK_TARGET/$profile/examples/feedback_contract_probe$suffix"
+
+  source-coverage:
+    if: inputs.target == 'x86_64-unknown-linux-gnu'
+    cache-mode: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RSRS_ENGINE: cpu
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ inputs.target }}
+          components: llvm-tools-preview
+      - name: Require a token-free coverage environment
+        shell: bash
+        run: test -z "${CORE_SDK_READ_TOKEN:-}"
+      - uses: actions/cache/restore@v4
+        id: sdk-restore
+        with:
+          path: .sdk/${{ inputs.target }}
+          key: ${{ inputs.cache_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ inputs.cache_key }}
+          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Reverify pinned SDK without any private download credential
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Complete GNU source tests and existing coverage gate
+        env:
+          RSRS_CORE_TEST_MODE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --exclude respire --locked
+          cargo llvm-cov --locked -p respire --fail-under-lines 90 \
+            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'
