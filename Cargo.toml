@@ -1,0 +1,26 @@
+[package]
+name = "respire_commands"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "shared rsrs command surface: clap definitions, gates and output contract"
+license-file = "../../LICENSE"
+repository = "https://github.com/risense-ai/respire-cli"
+publish = false
+
+[features]
+# Mirrors the CLI's native-fault-tests marker so version strings keep their
+# non-releasable suffix when the fixture feature is enabled upstream.
+native-fault-tests = []
+
+[dependencies]
+respire_app = { package = "respire_app", path = "../app", default-features = false }
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+unicode-width = "=0.2.0"
+
+[lints.rust]
+unsafe_code = "forbid"
