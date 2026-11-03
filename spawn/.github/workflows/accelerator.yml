@@ -1,0 +1,106 @@
+name: Accelerator validation
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Self-hosted hardware label (e.g. intel-npu, amd-npu, qualcomm-npu, apple-silicon)'
+        required: true
+        type: string
+      engine:
+        description: 'Strict engine selection; missing hardware is a failure'
+        type: choice
+        options: [npu, gpu, cpu]
+        default: npu
+      install_providers:
+        description: 'Authorize Windows ML provider installation on this runner'
+        type: boolean
+        default: false
+      model:
+        description: 'Embedding model to validate on the requested hardware'
+        type: choice
+        options: [m3]
+        default: m3
+cache-mode: read
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: [self-hosted, '${{ inputs.runner }}']
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-1-restore
+        if: steps.sdk-cache-1.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
+          key: ${{ steps.sdk-cache-1.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-1.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Prepare pinned binary Core SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - run: cargo build --release --locked -p respire --bin rsrs --target-dir target/hardware
+      - name: Install model and validate actual inference
+        shell: pwsh
+        env:
+          RSRS_ENGINE: ${{ inputs.engine }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}
+          RSRS_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/m3
+          PROBE_MODEL: ${{ inputs.model }}
+          RSRS_ORT_PROFILE: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}
+          RSRS_ORT_DEBUG: '1'
+          INSTALL_PROVIDERS: ${{ inputs.install_providers }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
+          $exe = Join-Path 'target/hardware/release' $name
+          $install = if ($env:PROBE_MODEL -eq 'm3') { 'install-m3' } else { 'install-m3' }
+          & $exe --direct model $install --json
+          if ($LASTEXITCODE -ne 0) { throw 'Model installation failed' }
+          if ($IsWindows -and $env:INSTALL_PROVIDERS -eq 'true') {
+            & $exe --direct model install-engines --json
+            if ($LASTEXITCODE -ne 0) { throw 'Provider installation failed' }
+          }
+          $raw = & $exe --direct model probe --model $env:PROBE_MODEL --json
+          if ($LASTEXITCODE -ne 0) { throw 'Hardware inference or CPU comparison failed' }
+          $raw
+          $probe = ($raw | ConvertFrom-Json).summary
+          $pattern = switch ($env:RSRS_ENGINE) {
+            'npu' { '^(Npu:|CoreML CPUAndNeuralEngine)' }
+            'gpu' { '^(Gpu:|CoreML CPUAndGPU)' }
+            'cpu' { '^CPU$' }
+          }
+          if ($probe.selected -notmatch $pattern -or $probe.fallbacks.Count -ne 0) {
+            throw "Requested accelerator was not used: $($probe.selected)"
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: accelerator-${{ inputs.runner }}-${{ inputs.engine }}
+          path: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}*.json
