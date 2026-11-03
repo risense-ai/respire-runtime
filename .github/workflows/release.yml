@@ -208,6 +208,8 @@ jobs:
         run: bash scripts/build-linux-musl.sh '${{ matrix.target }}'
       - name: Stage the Core runtime payload next to the binary
         shell: bash
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.target }}
         run: node scripts/stage-core-runtime.mjs '${{ steps.builddir.outputs.dir }}'
       - name: Assemble the release archive and metadata
         id: assemble
