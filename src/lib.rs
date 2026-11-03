@@ -16,6 +16,7 @@
 
 pub mod app_version;
 pub mod autostart;
+pub mod bench;
 pub mod classify;
 pub mod cli_def;
 pub mod engine;
@@ -33,7 +34,9 @@ pub mod output_state;
 pub mod progress;
 pub mod sync_flow;
 pub mod review;
+pub mod recall_select;
 pub mod rpc_worker;
+pub mod skill;
 pub mod runtime_error;
 pub mod runtime_policy;
 pub mod util;
