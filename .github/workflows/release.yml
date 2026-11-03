@@ -246,7 +246,8 @@ jobs:
           tar -czf "rsrs-runtime-$target.tar.gz" -C payload .
           node - <<'NODE'
           const cp = require('child_process');
-          const binary = process.env.RUNTIME_BINARY_FILE;
+          const target = process.env.RUNTIME_TARGET;
+          const binary = `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`;
           const archive = `rsrs-runtime-${process.env.RUNTIME_TARGET}.tar.gz`;
           const entries = cp.execFileSync('tar', ['-tzf', archive], {encoding: 'utf8'})
             .split(/\r?\n/).filter(Boolean);
