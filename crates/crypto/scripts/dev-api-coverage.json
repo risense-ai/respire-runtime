@@ -1,0 +1,393 @@
+{
+  "schema": 1,
+  "authority": "CLI baseline route inventory reviewed against server fb370b2 on 2026-10-31; this is not complete browser/Passkey API coverage.",
+  "expected_route_count": 66,
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/oauth/device/code",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/oauth/token",
+      "group": "auth"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/cli-authorization/{code}",
+      "group": "user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/cli-authorization/{code}",
+      "group": "user"
+    },
+    {
+      "method": "GET",
+      "path": "/health",
+      "group": "public"
+    },
+    {
+      "method": "GET",
+      "path": "/ready",
+      "group": "public"
+    },
+    {
+      "method": "POST",
+      "path": "/register",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/login",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/login/totp",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/forgot",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/reset",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/login",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/login/totp",
+      "group": "auth"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/sessions",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/sessions/{id}/revoke",
+      "group": "self"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/rotate",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/sessions",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/password",
+      "group": "self"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/vault",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/vault",
+      "group": "self"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/keys",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/email",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/email/confirm",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/totp/begin",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/totp/confirm",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/totp/disable",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/purge",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/push",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/push/batch",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/sync/capabilities",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/push/batch",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/conflicts/resolve",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/pull",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/snapshot",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/conflicts/resolutions",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/pull",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/max",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/forget",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/count",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/me",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/password",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/users",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/audit",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/stats",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/outbox",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/admins",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/admins",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/totp/begin",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/totp/confirm",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/totp/disable",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/admins/{user}/update",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/admins/{user}/revoke",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/users/{user}/sessions",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/sessions",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/sessions/{id}/revoke",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/update",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/disable",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/enable",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/kick",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/delete",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/restore",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/rotate",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/revoke",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/purge",
+      "group": "admin"
+    }
+  ],
+  "server_source_sha": "fb370b2a49193db64d2530c9af9a2a3895fd231c",
+  "review": {
+    "previous_server_source_sha": "22096e8e237a5b49588678577cbd96af066eabe3",
+    "compare_url": "https://github.com/risense-ai/respire-server/compare/22096e8e237a5b49588678577cbd96af066eabe3...fb370b2a49193db64d2530c9af9a2a3895fd231c",
+    "baseline_routes_preserved": 66,
+    "canonical_server_operations": 85,
+    "changed_baseline_routes": [
+      "Sync deletion erases retained payloads and bounds history; reviewed router and HTTP handler inventories are unchanged"
+    ],
+    "retained_vault_assertions": [
+      "stable account_id",
+      "initial key_generation",
+      "idempotent legacy write",
+      "generation advance on changed legacy write",
+      "same-URK rewrap generation guard",
+      "rejected operations preserve vault bytes"
+    ],
+    "changed_baseline_assertions": [],
+    "scope_note": "Reviewed all four intervening commits and the complete product-source file inventory. Router and HTTP handlers are unchanged; store changes erase deleted ciphertext, bound retained history and preserve payload-free resolution receipts. The 66 baseline routes and 85 canonical operations remain unchanged. Existing vault assertions and all API checks remain required; this inventory review does not claim live acceptance."
+  },
+  "separate_coverage": {
+    "github_transport": {
+      "suite": "dev-github-api-smoke.py",
+      "routes": [
+        "POST /oauth/github/start",
+        "POST /oauth/github/exchange",
+        "GET /api/self/github",
+        "POST /api/self/github/start",
+        "POST /api/self/github/exchange",
+        "POST /api/self/github/unbind",
+        "POST /api/self/github/vault"
+      ]
+    },
+    "existing_browser_only": {
+      "status": "not covered by this CLI baseline",
+      "routes": [
+        "GET /auth/salt",
+        "GET /api/self/memories"
+      ]
+    },
+    "passkey_and_vault_reset": {
+      "status": "not covered by this CLI baseline; separate Passkey acceptance is required",
+      "routes": [
+        "GET /api/self/passkeys",
+        "POST /api/self/passkeys/register/start",
+        "POST /api/self/passkeys/register/finish",
+        "POST /api/self/passkeys/register/test",
+        "POST /api/self/passkeys/register/commit",
+        "POST /api/self/passkeys/unlock/start",
+        "POST /api/self/passkeys/unlock/finish",
+        "POST /api/self/passkeys/remove",
+        "POST /api/self/vault/reset",
+        "POST /api/self/passkeys/cancel"
+      ]
+    }
+  }
+}

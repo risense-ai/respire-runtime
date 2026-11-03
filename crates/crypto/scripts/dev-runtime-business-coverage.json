@@ -1,0 +1,632 @@
+{
+  "schema": 1,
+  "scope": "Observed CLI and authenticated runtime equivalents for the former 72 dashboard actions.",
+  "retained": 64,
+  "removed_by_requirement": 8,
+  "actions": [
+    {
+      "action": "status",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "status-json"
+        }
+      ]
+    },
+    {
+      "action": "update_check",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "update-check"
+        }
+      ]
+    },
+    {
+      "action": "db_stamp",
+      "removed_by_requirement": true,
+      "reason": "Embedded dashboard UI was removed; this UI-only operation is no longer provided by the CLI runtime."
+    },
+    {
+      "action": "list",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "list"
+        }
+      ]
+    },
+    {
+      "action": "search",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "recall"
+        }
+      ]
+    },
+    {
+      "action": "show",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "show"
+        }
+      ]
+    },
+    {
+      "action": "tree",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "tree"
+        }
+      ]
+    },
+    {
+      "action": "candidates",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "candidates"
+        }
+      ]
+    },
+    {
+      "action": "create",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "remember-force"
+        }
+      ]
+    },
+    {
+      "action": "update",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "update-title-content-persisted"
+        }
+      ]
+    },
+    {
+      "action": "delete",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "forget-hides-entry"
+        }
+      ]
+    },
+    {
+      "action": "purge",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "purge-removes-current-entry"
+        }
+      ]
+    },
+    {
+      "action": "attach",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "runtime-cli-parent-persisted"
+        }
+      ]
+    },
+    {
+      "action": "restore",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "restore-preserves-content"
+        }
+      ]
+    },
+    {
+      "action": "promote",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "promote"
+        }
+      ]
+    },
+    {
+      "action": "demote",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "demote"
+        }
+      ]
+    },
+    {
+      "action": "sync",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "sync-b"
+        }
+      ]
+    },
+    {
+      "action": "register",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "register"
+        }
+      ]
+    },
+    {
+      "action": "login",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "login-b"
+        }
+      ]
+    },
+    {
+      "action": "logout",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "full-logout-session-file-removed"
+        }
+      ]
+    },
+    {
+      "action": "keygen",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "keygen-local-memory-readable"
+        }
+      ]
+    },
+    {
+      "action": "super_reset",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "super-reset-preserves-memory"
+        }
+      ]
+    },
+    {
+      "action": "keys_export",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "keys-export"
+        }
+      ]
+    },
+    {
+      "action": "config_get",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "config-read"
+        }
+      ]
+    },
+    {
+      "action": "server_addr_get",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "config-read"
+        }
+      ]
+    },
+    {
+      "action": "resume_session",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "resume_session_real"
+        }
+      ]
+    },
+    {
+      "action": "server_addr_set",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "config-addr"
+        }
+      ]
+    },
+    {
+      "action": "sync_config_set",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "config-settings-persisted"
+        }
+      ]
+    },
+    {
+      "action": "cure_config_set",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "config-settings-persisted"
+        }
+      ]
+    },
+    {
+      "action": "diary_mode_get",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "agent-config"
+        }
+      ]
+    },
+    {
+      "action": "diary_mode_set",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "diary_mode_persisted"
+        }
+      ]
+    },
+    {
+      "action": "workspace_mode_get",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "workspace_three_states_persisted"
+        }
+      ]
+    },
+    {
+      "action": "workspace_mode_set",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "workspace_three_states_persisted"
+        }
+      ]
+    },
+    {
+      "action": "data_dir_set",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "data_dir_persisted"
+        }
+      ]
+    },
+    {
+      "action": "list_system_fonts",
+      "removed_by_requirement": true,
+      "reason": "Embedded dashboard UI was removed; this UI-only operation is no longer provided by the CLI runtime."
+    },
+    {
+      "action": "scope_material",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "tree-material"
+        }
+      ]
+    },
+    {
+      "action": "space_list",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-list"
+        }
+      ]
+    },
+    {
+      "action": "space_create",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-create"
+        }
+      ]
+    },
+    {
+      "action": "space_use",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-use-c"
+        }
+      ]
+    },
+    {
+      "action": "space_invite",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-invite"
+        }
+      ]
+    },
+    {
+      "action": "space_join",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-join"
+        }
+      ]
+    },
+    {
+      "action": "space_members",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-members"
+        }
+      ]
+    },
+    {
+      "action": "space_kick",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-kick-real-member"
+        }
+      ]
+    },
+    {
+      "action": "space_remove",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "space-remove"
+        }
+      ]
+    },
+    {
+      "action": "doctor",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "doctor-mcp-bin-item"
+        },
+        {
+          "suite": "cli",
+          "case": "doctor-mcp-http-item"
+        },
+        {
+          "suite": "runtime",
+          "case": "m3_status_real"
+        }
+      ]
+    },
+    {
+      "action": "rerank_model_status",
+      "removed_by_requirement": true,
+      "reason": "The local cross-encoder model was explicitly removed; only BGE-M3 embeddings remain."
+    },
+    {
+      "action": "rerank_model_install",
+      "removed_by_requirement": true,
+      "reason": "The local cross-encoder model was explicitly removed; only BGE-M3 embeddings remain."
+    },
+    {
+      "action": "inject_targets",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "inject-targets"
+        }
+      ]
+    },
+    {
+      "action": "inject",
+      "evidence": [
+        {
+          "suite": "ai_inject",
+          "case": "inject_preview_install_remove"
+        }
+      ]
+    },
+    {
+      "action": "inject_remove",
+      "evidence": [
+        {
+          "suite": "ai_inject",
+          "case": "inject_preview_install_remove"
+        }
+      ]
+    },
+    {
+      "action": "inject_preview",
+      "evidence": [
+        {
+          "suite": "ai_inject",
+          "case": "inject_preview_install_remove"
+        }
+      ]
+    },
+    {
+      "action": "inject_apply",
+      "evidence": [
+        {
+          "suite": "ai_inject",
+          "case": "inject_preview_install_remove"
+        }
+      ]
+    },
+    {
+      "action": "pick_save_file",
+      "removed_by_requirement": true,
+      "reason": "Embedded dashboard UI was removed; this UI-only operation is no longer provided by the CLI runtime."
+    },
+    {
+      "action": "pick_open_file",
+      "removed_by_requirement": true,
+      "reason": "Embedded dashboard UI was removed; this UI-only operation is no longer provided by the CLI runtime."
+    },
+    {
+      "action": "pick_directory",
+      "removed_by_requirement": true,
+      "reason": "Embedded dashboard UI was removed; this UI-only operation is no longer provided by the CLI runtime."
+    },
+    {
+      "action": "export_memories",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "export"
+        }
+      ]
+    },
+    {
+      "action": "import_memories",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "import"
+        }
+      ]
+    },
+    {
+      "action": "backup_db",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "backup-file-sqlite-header"
+        }
+      ]
+    },
+    {
+      "action": "book_material",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "book-material"
+        }
+      ]
+    },
+    {
+      "action": "share_subtree",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "share"
+        }
+      ]
+    },
+    {
+      "action": "share_import",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "share-import-go"
+        }
+      ]
+    },
+    {
+      "action": "portrait_material",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "portrait-material"
+        }
+      ]
+    },
+    {
+      "action": "tree_cure",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "tree-cure-parent-persisted"
+        }
+      ]
+    },
+    {
+      "action": "causal_reorder",
+      "evidence": [
+        {
+          "suite": "ai_inject",
+          "case": "classify_auto_applied"
+        }
+      ]
+    },
+    {
+      "action": "causal_plan",
+      "evidence": [
+        {
+          "suite": "ai_inject",
+          "case": "classify_causal_plan"
+        }
+      ]
+    },
+    {
+      "action": "ds_key_status",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "ds_key_saved_without_network"
+        }
+      ]
+    },
+    {
+      "action": "ds_key_save",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "ds_key_saved_without_network"
+        }
+      ]
+    },
+    {
+      "action": "classify_backend_get",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "classify_config_persisted"
+        }
+      ]
+    },
+    {
+      "action": "classify_backend_set",
+      "evidence": [
+        {
+          "suite": "runtime",
+          "case": "classify_config_persisted"
+        }
+      ]
+    },
+    {
+      "action": "task_status",
+      "removed_by_requirement": true,
+      "reason": "Embedded dashboard UI was removed; this UI-only operation is no longer provided by the CLI runtime."
+    },
+    {
+      "action": "defrag",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "defrag"
+        }
+      ]
+    },
+    {
+      "action": "reembed",
+      "evidence": [
+        {
+          "suite": "cli",
+          "case": "reembed"
+        }
+      ]
+    }
+  ]
+}

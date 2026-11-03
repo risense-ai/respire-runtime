@@ -1,0 +1,192 @@
+name: Native migration credential fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Optional validated Release run for targeted native migration; blank runs credential fixtures only
+        required: false
+        default: ''
+        type: string
+      platform:
+        description: Native migration diagnostic platform when release_run_id is set
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - linux-secret-service
+          - macos
+          - windows
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native-fixture:
+    name: Native credentials (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact disposable native credentials
+        shell: bash
+        run: python scripts/dev-migration-keyring-selftest.py --root "$RUNNER_TEMP/native-migration-keyring"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: native-migration-keyring-${{ runner.os }}
+          path: ${{ runner.temp }}/native-migration-keyring/keyring-selftest.json
+          if-no-files-found: error
+
+  secret-service-fixture:
+    name: Isolated Secret Service credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated credential fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+      - name: Verify private Secret Service credential roundtrips
+        run: dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/secret-service-keyring"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: isolated-secret-service-keyring-Linux
+          path: ${{ runner.temp }}/secret-service-keyring/keyring-selftest.json
+          if-no-files-found: error
+
+  targeted-native-migration:
+    if: inputs.release_run_id != ''
+    name: Targeted migration (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'linux-secret-service' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'macos' && '[{"os":"macos-latest","target":"aarch64-apple-darwin"}]' || inputs.platform == 'windows' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the original seven-platform release build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process'),fs=require('fs'),m=require('./npm/artifact-manifest.json');
+          const id=process.env.CLI_RUN_ID,repo=process.env.GITHUB_REPOSITORY;
+          if(repo!=='risense-ai/respire-cli'||!/^\d+$/.test(id)) throw new Error('Pass an exact Release run ID from risense-ai/respire-cli');
+          const api=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
+          const run=api(`actions/runs/${id}`),sha=run.head_sha;
+          if(!/^[a-f0-9]{40}$/.test(sha)||!['.github/workflows/release.yml','.github/workflows/release-validation.yml'].includes(run.path)) throw new Error('Unexpected release source or workflow');
+          const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${id}/jobs?per_page=10`],{encoding:'utf8'})).flatMap(page=>page.jobs);
+          for(const name of [...m.targets.map(t=>`Release (${t.triple})`),'npm-dry-run']) {
+            if(!jobs.some(j=>(j.name===name||j.name.endsWith(` / ${name}`))&&j.conclusion==='success')) throw new Error(`Original validation failed: ${name}`);
+          }
+          fs.appendFileSync(process.env.GITHUB_ENV,`CLI_SHA=${sha}\n`);
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: original-artifact
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify and extract the exact original artifact
+        id: verified_artifact
+        shell: bash
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const metadata=JSON.parse(fs.readFileSync(`original-artifact/cli-build-${process.env.CLI_TARGET}.json`,'utf8'));
+          cp.execFileSync(process.execPath,['npm/scripts/set-build-version.mjs',metadata.version],{stdio:'inherit'});
+          cp.execFileSync(process.execPath,['npm/scripts/extract-artifact.mjs','original-artifact','validated-cli'],{env:{...process.env,CLI_VERSION:metadata.version},stdio:'inherit'});
+          fs.appendFileSync(process.env.GITHUB_ENV,`CLI_VERSION=${metadata.version}\nCLI_BINARY_SHA256=${metadata.binary_sha256}\n`);
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/targeted-migration-identity.json`,JSON.stringify({fixture_source_sha:process.env.GITHUB_SHA,binary_source_sha:process.env.CLI_SHA,binary_sha256:metadata.binary_sha256,version:metadata.version,target:process.env.CLI_TARGET,release_run_id:process.env.CLI_RUN_ID,repository:'risense-ai/respire-cli'},null,2)+'\n');
+          NODE
+      - name: Verify isolated Secret Service migration
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          binary="$(realpath validated-cli/rsrs)"
+          root="$RUNNER_TEMP/targeted-native-migration"
+          fixture_status=0
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
+          python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
+          test "$fixture_status" -eq 0
+      - name: Verify native encrypted profile migration
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          python -m pip install --only-binary=:all: cryptography==46.0.3
+          binary="$(python -c 'from pathlib import Path; import sys; print(Path("validated-cli/rsrs.exe" if sys.platform == "win32" else "validated-cli/rsrs").resolve())')"
+          root="$RUNNER_TEMP/targeted-native-migration"
+          fixture_status=0
+          python scripts/dev-profile-migration-smoke.py --binary "$binary" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
+          python - <<'PY'
+          import importlib.util,json,os
+          from pathlib import Path
+          spec=importlib.util.spec_from_file_location('native_contract','scripts/dev-secret-service-migration-gate.py')
+          module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+          report=json.loads((Path(os.environ['RUNNER_TEMP'])/'targeted-native-migration/migration-coverage.json').read_text())
+          required=module.REQUIRED-{'secret_service_legacy_fields_and_aliases'}
+          module.require(all(report.get(k)==os.environ[v] for k,v in [('source_sha','CLI_SHA'),('version','CLI_VERSION'),('binary_sha256','CLI_BINARY_SHA256')]),'migration_artifact_identity_mismatch')
+          platform, backend = ('win32','windows-credential-manager') if os.environ['RUNNER_OS']=='Windows' else ('darwin','macos-keychain-synthetic-acl')
+          module.require(report.get('platform')==platform and report.get('keyring_backend')==backend,'migration_native_backend_mismatch')
+          module.require(set(report.get('required_cases',[]))==required and report.get('passed') is True and not report.get('missing_cases') and all(report.get('cases',{}).get(case,{}).get('passed') is True for case in required),'migration_incomplete')
+          for key,remaining in [('cloud_cleanup','remaining_users'),('keyring_cleanup','remaining_entries')]:
+              module.require(report.get(key,{}).get('passed') is True and not report.get(key,{}).get(remaining),'migration_cleanup_incomplete')
+          PY
+          test "$fixture_status" -eq 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: targeted-native-migration-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/targeted-migration-identity.json
+            ${{ runner.temp }}/targeted-native-migration/migration-coverage.json
+            ${{ runner.temp }}/targeted-native-migration/migration-platform-gate.json
+          if-no-files-found: error
