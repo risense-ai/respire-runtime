@@ -229,12 +229,13 @@ jobs:
           binary="rsrs-runtime-$target$suffix"
           test -f "$BUILD_DIR/$built" || { echo "::error::Built binary missing at $BUILD_DIR/$built"; exit 1; }
           test -f "$BUILD_DIR/core-runtime.json" || { echo "::error::Staged core-runtime.json missing; the SDK staging step failed silently"; exit 1; }
-          test -d "$BUILD_DIR/runtime" || { echo "::error::Staged native runtime libraries missing"; exit 1; }
           test -d "$BUILD_DIR/core-notices" || { echo "::error::Staged Core SDK notices missing"; exit 1; }
           rm -rf payload; mkdir payload
           cp "$BUILD_DIR/$built" "payload/$binary"
           cp "$BUILD_DIR/core-runtime.json" payload/core-runtime.json
-          cp -R "$BUILD_DIR/runtime" payload/runtime
+          # The dev.21 Core SDK statically links Core FFI into the runtime
+          # binary; a separate runtime/ payload exists only for dynamic SDKs.
+          if [ -d "$BUILD_DIR/runtime" ]; then cp -R "$BUILD_DIR/runtime" payload/runtime; fi
           cp -R "$BUILD_DIR/core-notices" payload/core-notices
           if [ -n "$(find payload -type l -print -quit)" ]; then
             echo "::error::Symlinked release payloads are forbidden"
@@ -263,8 +264,8 @@ jobs:
           for (const name of [binary, 'core-runtime.json']) {
             if (!entries.some(entry => entry.replace(/^\.\//, '') === name)) throw new Error(`Archive is missing ${name}`);
           }
-          if (!runtimeFiles || !noticeFiles) throw new Error('Archive is missing native libraries or notices');
-          console.log(`Verified archive whitelist: ${entries.length} entries`);
+          if (!noticeFiles) throw new Error('Archive is missing redistribution notices');
+          console.log(`Verified archive whitelist: ${entries.length} entries; runtime files: ${runtimeFiles}`);
           NODE
           tar_sha256="$(sha256sum "rsrs-runtime-$target.tar.gz" | cut -d ' ' -f 1)"
           binary_sha256="$(sha256sum "payload/$binary" | cut -d ' ' -f 1)"
