@@ -222,11 +222,15 @@ jobs:
           set -euo pipefail
           target="$RUNTIME_TARGET"
           suffix=''; if [[ "$target" == *windows* ]]; then suffix='.exe'; fi
-          binary="rsrs-runtime$suffix"
-          test -f "$BUILD_DIR/$binary" || { echo "::error::Built binary missing at $BUILD_DIR/$binary"; exit 1; }
+          # Cargo emits the bare binary name; every published artifact and the
+          # runtime-build metadata use the triple-qualified release name that
+          # the CLI downloader and client2 validate against.
+          built="rsrs-runtime$suffix"
+          binary="rsrs-runtime-$target$suffix"
+          test -f "$BUILD_DIR/$built" || { echo "::error::Built binary missing at $BUILD_DIR/$built"; exit 1; }
           test -f "$BUILD_DIR/core-runtime.json" || { echo "::error::Staged core-runtime.json missing; the SDK staging step failed silently"; exit 1; }
           rm -rf payload; mkdir payload
-          cp "$BUILD_DIR/$binary" "payload/$binary"
+          cp "$BUILD_DIR/$built" "payload/$binary"
           cp "$BUILD_DIR/core-runtime.json" payload/core-runtime.json
           cp -R "$BUILD_DIR/runtime" payload/runtime
           cp -R "$BUILD_DIR/core-notices" payload/core-notices
@@ -364,7 +368,7 @@ jobs:
           const target = process.env.RUNTIME_TARGET, version = process.env.RUNTIME_VERSION;
           const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
           const required = {runtime_version: version, tag: process.env.RUNTIME_TAG, triple: target,
-            binary_file: target.includes('windows') ? 'rsrs-runtime.exe' : 'rsrs-runtime'};
+            binary_file: `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`};
           for (const [key, value] of Object.entries(required)) {
             if (report[key] !== value) throw new Error(`runtime-build ${key} differs: ${report[key]} != ${value}`);
           }
