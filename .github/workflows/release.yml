@@ -83,7 +83,7 @@ jobs:
             if (!/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(ref)) throw new Error('Release tags must use vX.Y.Z or vX.Y.Z-dev.N');
             version = ref.slice(1);
             channel = version.includes('-dev.') ? 'dev' : 'latest';
-            if (channel === 'latest' && cargo !== version) throw new Error('Stable release tag must exactly match the runtime source version');
+            if (cargo !== version) throw new Error('Release tag must exactly match the runtime source version');
             cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
           } else {
             if (!/^\d+\.\d+\.\d+-dev\.\d+$/.test(process.env.RELEASE_DEV_VERSION || '')) throw new Error('Manual non-tag builds require the dev_version input (X.Y.Z-dev.N)');
