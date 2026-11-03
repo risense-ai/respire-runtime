@@ -124,7 +124,8 @@ use respire_app::sync::remote_configured;
 use crate::bench;
 use crate::classify;
 use crate::cli_def::{
-    BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd, SessionCommand, SnapshotCmd,
+    BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd,
+    SessionCommand, SnapshotCmd,
 };
 use crate::gates::{is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine};
 use crate::metadata;

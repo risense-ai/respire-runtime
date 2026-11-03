@@ -19,6 +19,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use clap::Parser;
 use serde_json::{json, Value};
 
 use crate::app_version;
@@ -352,7 +353,7 @@ pub fn index_yield_to_foreground(generation: usize) -> Result<()> {
     // A separate background Session no longer waits for foreground inference.
     // Context and cancellation checks still occur between every committed source.
     check_sync_context(generation)?;
-    respire_app::model_progress::check()
+    crate::model_progress::check()
 }
 
 pub fn diary_commit(generation: usize, action: &mut dyn FnMut() -> Result<()>) -> Result<()> {
@@ -361,7 +362,7 @@ pub fn diary_commit(generation: usize, action: &mut dyn FnMut() -> Result<()>) -
     // Account/mode transitions use the write gate; lifecycle transitions use
     // takeover. Never block on takeover while its owner waits for INDEX_RUNNING.
     let _lifecycle = crate::runtime_policy::try_takeover_lock()?;
-    respire_app::model_progress::commit(|| {
+    crate::model_progress::commit(|| {
         check_sync_context(generation)?;
         anyhow::ensure!(!respire_app::service::service_paused(), "background index paused by service mode");
         action()
@@ -425,11 +426,11 @@ pub fn index_loop_inner() -> Result<()> {
             // starting an unsolicited model download during status/restart.
             let active_profile = store.active_selection()?;
             let cpu_upgrade = active_profile.is_none() && model == "m3" && respire_app::MemoryTransport::count(&store)? > 0
-                && respire_app::model_install::cpu_model_preparation_needed()?;
+                && crate::model_install::cpu_model_preparation_needed()?;
             if !pending && !diary_pending && !prepare_requested && !cpu_upgrade {
                 return Ok(true);
             }
-            let Some(_operation) = respire_app::model_progress::Operation::try_begin_background_index()? else {
+            let Some(_operation) = crate::model_progress::Operation::try_begin_background_index()? else {
                 return Ok(false);
             };
             index_yield_to_foreground(generation)?;
@@ -439,15 +440,15 @@ pub fn index_loop_inner() -> Result<()> {
             }
             let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
             if let Some(mirror) = mirror {
-                respire_app::model_install::prepare_m3_from_mirror(&mirror)?;
+                crate::model_install::prepare_m3_from_mirror(&mirror)?;
             } else if let Some(selection) = active_profile.as_ref() {
                 respire_app::embedding::prepare(selection, |item,done,total| {
                     check_sync_context(generation)?;
-                    respire_app::model_progress::update("prepare",item,done,total)
+                    crate::model_progress::update("prepare",item,done,total)
                 })?;
             } else if model == "m3" {
-                respire_app::model_progress::update("prepare", "BGE-M3", 0, None)?;
-                respire_app::model_install::prepare_m3_for_index()?;
+                crate::model_progress::update("prepare", "BGE-M3", 0, None)?;
+                crate::model_install::prepare_m3_for_index()?;
                 check_sync_context(generation)?;
             }
             if !pending && !diary_pending { return Ok(true); }
@@ -456,20 +457,20 @@ pub fn index_loop_inner() -> Result<()> {
             while pending {
                 let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
                     index_yield_to_foreground(generation)?;
-                    respire_app::model_progress::update("index", &model, done as u64, Some(total as u64))
+                    crate::model_progress::update("index", &model, done as u64, Some(total as u64))
                 });
                 match rebuilt {
                     Ok(_) => break,
                     Err(error) if error.downcast_ref::<respire_app::transport::local::IndexSourceChanged>().is_some() => {
                         // Keep this Operation across source changes: cancellation and
                         // the 30-minute idle budget apply to the whole resumed task.
-                        respire_app::model_progress::check()?;
+                        crate::model_progress::check()?;
                         let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                         work.error = Some(format!("{error:#}"));
                         drop(work);
                         for _ in 0..5 {
                             check_sync_context(generation)?;
-                            respire_app::model_progress::check()?;
+                            crate::model_progress::check()?;
                             std::thread::sleep(Duration::from_millis(100));
                         }
                     }
@@ -478,9 +479,9 @@ pub fn index_loop_inner() -> Result<()> {
             }
             respire_app::diary::rebuild_with_progress(&store, &keys, &embedder, || {
                 index_yield_to_foreground(generation)?;
-                respire_app::model_progress::check()
+                crate::model_progress::check()
             }, |action| diary_commit(generation, action), |done| {
-                respire_app::model_progress::update("index", "diary-fragments", done as u64, None)
+                crate::model_progress::update("index", "diary-fragments", done as u64, None)
             })?;
             check_sync_context(generation)?;
             Ok(true)
@@ -507,7 +508,7 @@ pub fn index_loop_inner() -> Result<()> {
                 work = INDEX_CV.wait_timeout(work, Duration::from_secs(1))
                     .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
             }
-            Err(error) if error.downcast_ref::<respire_app::model_progress::OperationStopped>().is_some() => {
+            Err(error) if error.downcast_ref::<crate::model_progress::OperationStopped>().is_some() => {
                 model_wait_started = None;
                 if work.prepare_mirror.is_some() {
                     work.state = "scheduled";

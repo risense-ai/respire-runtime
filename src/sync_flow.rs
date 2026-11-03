@@ -19,13 +19,13 @@ use crate::progress;
 use crate::rpc_worker as rpc;
 
 pub struct SyncLive {
-    phase: String,
-    pulled: u64,
-    pushed: u64,
-    remote_alive: u64,
-    pending: i64,
-    conflicts: i64,
-    error: String,
+    pub phase: String,
+    pub pulled: u64,
+    pub pushed: u64,
+    pub remote_alive: u64,
+    pub pending: i64,
+    pub conflicts: i64,
+    pub error: String,
 }
 
 static SYNC_LIVE: Mutex<SyncLive> = Mutex::new(SyncLive {

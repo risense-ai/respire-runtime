@@ -112,7 +112,7 @@ impl ReviewArgs {
 }
 // CLI review shell (migrated): dispatch and emission for the shared inputs.
 
-use anyhow::{Context, Result};
+
 use respire_app::review::{ReviewInput, ReviewService};
 use serde_json::{json, Value};
 

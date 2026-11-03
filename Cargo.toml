@@ -17,6 +17,7 @@ native-fault-tests = []
 respire_app = { package = "respire_app", path = "../app", default-features = false }
 respire_spawn = { path = "../../spawn" }
 anyhow = "1.0"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
