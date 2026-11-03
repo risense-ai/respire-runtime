@@ -38,6 +38,7 @@ pub type UpdateHint = fn(bool) -> Option<String>;
 pub type UpdateEnabled = fn() -> bool;
 pub type UpdateCheckRun = fn(bool) -> Option<UpdateStatus>;
 pub type MaterializeBin = fn() -> std::result::Result<PathBuf, String>;
+pub type ForegroundProgress = fn(&str) -> anyhow::Result<serde_json::Value>;
 
 #[derive(Default)]
 pub struct HostHooks {
@@ -50,6 +51,7 @@ pub struct HostHooks {
     pub update_enabled: Option<UpdateEnabled>,
     pub update_check_run: Option<UpdateCheckRun>,
     pub materialize_bin: Option<MaterializeBin>,
+    pub foreground_progress: Option<ForegroundProgress>,
 }
 
 static BACKGROUND_PAUSED: OnceLock<BackgroundPaused> = OnceLock::new();
@@ -61,6 +63,7 @@ static UPDATE_HINT: OnceLock<UpdateHint> = OnceLock::new();
 static UPDATE_ENABLED: OnceLock<UpdateEnabled> = OnceLock::new();
 static UPDATE_CHECK_RUN: OnceLock<UpdateCheckRun> = OnceLock::new();
 static MATERIALIZE_BIN: OnceLock<MaterializeBin> = OnceLock::new();
+static FOREGROUND_PROGRESS: OnceLock<ForegroundProgress> = OnceLock::new();
 
 /// Install the host implementations. Returns `false` when a previous installer
 /// already ran; the first installation wins.
@@ -75,6 +78,7 @@ pub fn install(hooks: HostHooks) -> bool {
         update_enabled,
         update_check_run,
         materialize_bin,
+        foreground_progress,
     } = hooks;
     let installed = [
         background_paused.map(|hook| BACKGROUND_PAUSED.set(hook).is_ok()),
@@ -86,6 +90,7 @@ pub fn install(hooks: HostHooks) -> bool {
         update_enabled.map(|hook| UPDATE_ENABLED.set(hook).is_ok()),
         update_check_run.map(|hook| UPDATE_CHECK_RUN.set(hook).is_ok()),
         materialize_bin.map(|hook| MATERIALIZE_BIN.set(hook).is_ok()),
+        foreground_progress.map(|hook| FOREGROUND_PROGRESS.set(hook).is_ok()),
     ];
     installed.iter().all(|slot| slot.as_ref().is_none_or(|ok| *ok))
 }
@@ -146,5 +151,13 @@ pub fn materialize_bin() -> std::result::Result<PathBuf, String> {
     match MATERIALIZE_BIN.get() {
         Some(hook) => hook(),
         None => Err("the MCP binary installer is host-managed".to_owned()),
+    }
+}
+
+/// Poll a remote foreground command's progress through the host RPC client.
+pub fn foreground_progress(id: &str) -> anyhow::Result<serde_json::Value> {
+    match FOREGROUND_PROGRESS.get() {
+        Some(hook) => hook(id),
+        None => Err(anyhow::anyhow!("runtime progress is unavailable in this process")),
     }
 }

@@ -29,6 +29,7 @@ pub mod model_progress;
 pub mod net_rpc;
 pub mod output;
 pub mod output_state;
+pub mod progress;
 pub mod review;
 pub mod rpc_worker;
 pub mod runtime_error;
