@@ -2,7 +2,7 @@
 //! Dispatch, service calls and result emission stay in the CLI's review
 //! shell, which re-imports these types.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use clap::{ArgGroup, Args};
 
 #[derive(Args)]

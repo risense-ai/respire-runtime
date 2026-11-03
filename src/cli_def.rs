@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::{autostart, classify, metadata, review};
+
 #[derive(Parser)]
 #[command(
     name = "rsrs",
