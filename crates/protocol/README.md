@@ -1,15 +1,16 @@
-# crates/protocol
+# Respire protocol
 
-Placeholder for the `respire-protocol` crate, migrated from
-`respire-cli/crates/protocol` with history in phase P2.
+Serde-only request, response and domain types shared by Respire clients.
+This crate does not include the retrieval engine or native SDK implementation.
 
-This crate is the single RPC contract shared by `respire-runtime` (server) and
-`respire-cli` (client), published to crates.io as `respire-protocol`. Its crate
-version moves in lockstep with `PROTOCOL_V`, which remains a hard gate on both
-sides (`protocol_version_mismatch` on any mismatch).
+```toml
+[dependencies]
+respire_protocol = "=2.0.0-dev.1"
+```
 
-Rules:
+Wire field compatibility is maintained independently of client display names.
 
-- Contract changes land here first, are published to crates.io, and only then
-  do consumer PRs merge (see docs/version-contract.md).
-- Keep the crate pure: types and wire contracts, no I/O, no server behavior.
+The development 2.0 Rust API adds relationship fields to public entry/payload
+structs. Struct-literal callers must supply them; legacy encrypted and JSON
+records remain readable with default-empty values. C ABI and wire envelope
+versions are unchanged.

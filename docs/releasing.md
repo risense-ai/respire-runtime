@@ -25,11 +25,11 @@ Per platform triple (seven targets: `x86_64`/`aarch64` Linux glibc and musl,
 | Asset | Content |
 | --- | --- |
 | `rsrs-runtime-<triple>` / `.exe` | raw binary |
-| `rsrs-runtime-<triple>.tar.gz` | binary + `core-runtime.json` manifest + native Core runtime libraries (onnxruntime / DirectML / metallib, staged from the Core SDK by the `crates/core-sdk` tooling) + notices |
-| `runtime-build-<triple>.json` | `runtime_version`, `tag`, `triple`, archive `sha256`, `binary_file`, `binary_sha256`, `compat.min_cli/max_cli` |
+| `rsrs-runtime-<triple>.tar.gz` | triple-qualified binary + `core-runtime.json` manifest + native Core runtime libraries (onnxruntime / DirectML / metallib, staged from the Core SDK by the `crates/core-sdk` tooling) + notices |
+| `runtime-build-<triple>.json` | `runtime_version`, `tag`, `triple`, archive `sha256`, triple-qualified `binary_file`, `binary_sha256`, `compat.min_cli/max_cli` |
 
 Exactly 21 assets per release (three per platform). The tarball extracts to a
-flat layout: the binary sits at the archive root next to `core-runtime.json`
+ flat layout: the triple-qualified binary sits at the archive root next to `core-runtime.json`
 and the `runtime/` libraries, matching the managed directory layout that
 `respire-cli` and `respire-client2` both use (`<installation_root>/runtime/<ver>/`).
 

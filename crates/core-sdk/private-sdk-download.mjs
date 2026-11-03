@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 const REPOSITORY = 'risense-ai/respire-core';
-const TARGETS = new Set(['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch64-apple-darwin','x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-musl']);
+const TARGETS = new Set(['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch64-apple-darwin','x86_64-apple-darwin','x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-musl']);
 const CDN_HOSTS = new Set(['release-assets.githubusercontent.com', 'objects.githubusercontent.com']);
 const requireValue = (ok, message) => { if (!ok) throw new Error(message); };
 
