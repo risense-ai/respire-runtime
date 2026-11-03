@@ -34,7 +34,8 @@ const manifest = JSON.parse(readFileSync(join(sdk,'manifest.json'),'utf8'));
 if (manifest.test_only) throw new Error('Test-only Core SDK cannot be staged for a runtime release');
 function stage(path, bytes, mode) {
   const digest = value => createHash('sha256').update(value).digest('hex');
-  if (existsSync(path) && digest(readFileSync(path)) === digest(bytes)) return;
+  if (existsSync(path) && digest(readFileSync(path)) === digest(bytes) &&
+      (mode === undefined || (statSync(path).mode & 0o777) === mode)) return;
   mkdirSync(dirname(path), {recursive:true});
   // Preserve mappings held by concurrent native processes; never truncate them.
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}`);
@@ -61,7 +62,8 @@ for (const file of manifest.files) {
   // mlx.metallib is a data resource, not a Mach-O/PE/ELF image.
   if (file.path.startsWith('runtime/') && !file.path.endsWith('.metallib')) verifyBinary(join(sdk,file.path), manifest.target);
   mkdirSync(dirname(join(output,path)),{recursive:true});
-  stage(join(output,path),bytes,statSync(source).mode & 0o777);
+  stage(join(output,path),bytes,
+    path.startsWith('core-notices/') ? 0o644 : statSync(source).mode & 0o777);
   files.push({path,sha256:file.sha256});
 }
 if (manifest.redistribution === 'permitted-under-included-license' && !files.some(file => file.path === 'core-notices/CORE-SDK-LICENSE.txt')) {
@@ -73,7 +75,7 @@ for (const entry of readdirSync(modelNotices, {withFileTypes:true})) {
   const bytes = readFileSync(join(modelNotices, entry.name));
   const path = `core-notices/models/${entry.name}`;
   mkdirSync(dirname(join(output,path)), {recursive:true});
-  stage(join(output,path), bytes);
+  stage(join(output,path), bytes, 0o644);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 const dependencyNotices = join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'dependency-notices');
@@ -82,7 +84,7 @@ for (const entry of readdirSync(dependencyNotices, {withFileTypes:true})) {
   const bytes = readFileSync(join(dependencyNotices, entry.name));
   const path = `core-notices/consumer/${entry.name}`;
   mkdirSync(dirname(join(output,path)), {recursive:true});
-  stage(join(output,path), bytes);
+  stage(join(output,path), bytes, 0o644);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 if (manifest.target.includes('windows')) {
@@ -91,7 +93,7 @@ if (manifest.target.includes('windows')) {
   const bytes = readFileSync(source);
   const path = 'core-notices/consumer/WinML-2.4.89-license.txt';
   mkdirSync(dirname(join(output,path)), {recursive:true});
-  stage(join(output,path), bytes);
+  stage(join(output,path), bytes, 0o644);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 stage(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
