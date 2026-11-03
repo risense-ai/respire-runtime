@@ -1075,6 +1075,7 @@ pub enum PluginCommand {
         #[arg(long, default_value = "{}")]
         payload: String,
     },
+}
 
 pub fn changes_profile(command: Option<&Command>) -> bool {
     match command {
@@ -1083,3 +1084,4 @@ pub fn changes_profile(command: Option<&Command>) -> bool {
         Some(Command::Config { data_dir, .. }) => data_dir.is_some(),
         _ => false,
     }
+}

@@ -25,6 +25,7 @@ pub fn status_exit_code(status: OutputStatus) -> i32 {
         OutputStatus::Fail => 1,
     }
 }
+
 pub fn json_mode() -> bool {
     JSON_MODE.with(|flag| flag.get())
 }
@@ -40,6 +41,7 @@ pub fn progress_enabled() -> bool {
         return true;
     }
     !json_mode() && std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
 
 thread_local! {
     pub static CAPTURED: std::cell::RefCell<Option<ResultEnvelope>> = const { std::cell::RefCell::new(None) };
@@ -49,6 +51,7 @@ pub struct Captured {
     pub exit: i32,
     pub envelope: ResultEnvelope,
 }
+
 pub fn set_json_mode(on: bool) {
     JSON_MODE.with(|flag| flag.set(on));
 }
@@ -78,3 +81,4 @@ pub fn parse_failure(error: &clap::Error) -> ResultEnvelope {
         .unwrap_or("invalid command input").to_owned());
     envelope.details = serde_json::json!({"error_type":"user", "usage":usage});
     envelope
+}
