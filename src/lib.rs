@@ -31,6 +31,7 @@ pub mod output;
 pub mod output_emit;
 pub mod output_state;
 pub mod progress;
+pub mod sync_flow;
 pub mod review;
 pub mod rpc_worker;
 pub mod runtime_error;
