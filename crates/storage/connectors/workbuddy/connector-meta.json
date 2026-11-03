@@ -1,0 +1,13 @@
+{
+  "name": "respire",
+  "description": "Local-first encrypted AI memory. Recall and remember through MCP. Do not run the rsrs CLI inside the WorkBuddy sandbox.",
+  "source": "respire",
+  "type": "mcp",
+  "version": "1.0.6",
+  "minWorkbuddyVersion": "5.0.0",
+  "examples": [
+    "Remember today's conclusion",
+    "Recall how this problem was fixed last time",
+    "Store this decision in memory"
+  ]
+}

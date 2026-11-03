@@ -1,0 +1,1319 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: CLI branch, commit, vX.Y.Z or vX.Y.Z-dev.N tag
+        default: main
+        required: true
+        type: string
+      publish:
+        description: Publish only after every synchronous gate in the selected validation profile
+        default: false
+        type: boolean
+      full_regression_before_publish:
+        description: Require the full profile including all historical, stress, system and migration regressions
+        default: false
+        type: boolean
+      validation_profile:
+        description: Mandatory synchronous validation profile; the legacy full flag forces full
+        default: critical
+        type: choice
+        options: [critical, full]
+      dev_version:
+        description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
+        default: ''
+        type: string
+      prepared_run:
+        description: Completed exact-source main preparation with the same selected validation profile
+        default: ''
+        type: string
+
+      reuse_dev12_validation:
+        description: DEV13 only; rebuild versioned artifacts and reuse successful DEV12 regressions
+        default: false
+        type: boolean
+      repair_dev12:
+        description: Repair only missing linux-arm64-gnu DEV12 using the already validated public release
+        default: false
+        type: boolean
+      repair_dev14:
+        description: Repair only missing linux-arm64-gnu DEV14 using the already validated public release
+        default: false
+        type: boolean
+      resume_dev6_publication:
+        description: Strict publication-only recovery of validated run 38251121403 and immutable dev.6 bytes
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  reject-prepared-recovery:
+    if: ${{ inputs.prepared_run != '' && (inputs.reuse_dev12_validation || inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: |
+          echo 'Prepared publication cannot be combined with historical recovery or repair modes.'
+          exit 1
+
+  plan:
+    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: cli-release-publication
+      queue: max
+      cancel-in-progress: false
+    outputs:
+      validation_profile: ${{ steps.validation.outputs.profile }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      channel: ${{ steps.plan.outputs.channel }}
+      publish: ${{ steps.plan.outputs.publish }}
+      reuse_validation: ${{ steps.plan.outputs.reuse_validation }}
+      prepared_run: ${{ steps.prepared.outputs.prepared_run }}
+      prepared_attempt: ${{ steps.prepared.outputs.prepared_attempt }}
+      prepared_artifact_id: ${{ steps.prepared.outputs.prepared_artifact_id }}
+      prepared_artifact_digest: ${{ steps.prepared.outputs.prepared_artifact_digest }}
+      prepared_receipt_sha256: ${{ steps.prepared.outputs.prepared_receipt_sha256 }}
+      prepared_binary_artifact_ids: ${{ steps.prepared.outputs.prepared_binary_artifact_ids }}
+    steps:
+      - name: Verify the explicitly approved DEV12 regression reuse
+        id: prior
+        if: inputs.reuse_dev12_validation
+        env:
+          REUSE_REF: ${{ inputs.ref }}
+          REUSE_PUBLISH: ${{ inputs.publish }}
+          REUSE_REPAIR: ${{ inputs.repair_dev12 || inputs.repair_dev14 }}
+          REUSE_FULL: ${{ inputs.full_regression_before_publish }}
+        run: |
+          node - <<'NODE'
+          const fs=require('fs');
+          async function verifyPrior(){
+            if(process.env.REUSE_FULL==='true') throw new Error('Fresh full regression cannot be combined with old regression reuse');
+            const repo=process.env.GITHUB_REPOSITORY,sha='d8314480e10a27767544f781083e35c8e85657f0';
+            if(process.env.GITHUB_EVENT_NAME!=='workflow_dispatch'||process.env.REUSE_PUBLISH!=='true'||
+               process.env.REUSE_REPAIR==='true'||process.env.REUSE_REF!==sha||repo!=='risense-ai/respire-cli') throw new Error('Regression reuse is approved only for the fixed DEV13 source');
+            const read=async path=>{
+              const response=await fetch(`https://api.github.com/repos/${repo}/${path}`,{
+                headers:{Accept:'application/vnd.github+json','User-Agent':'rsrs-release-validation'},signal:AbortSignal.timeout(30000)});
+              if(response.status!==200) throw new Error(`Public DEV12 evidence HTTP ${response.status}`);
+              return response.json();
+            };
+            const run=await read('actions/runs/37716872717');
+            if(run.status!=='completed'||run.conclusion!=='success'||run.head_sha!==sha||
+               run.path!=='.github/workflows/release.yml'||!Number.isInteger(run.run_attempt)) throw new Error('DEV12 source run is not a successful matching release');
+            const page=await read(`actions/runs/37716872717/attempts/${run.run_attempt}/jobs?per_page=100`);
+            if(!Array.isArray(page.jobs)||page.total_count!==page.jobs.length) throw new Error('Incomplete DEV12 latest-attempt jobs');
+            const targets=['x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl',
+              'aarch64-unknown-linux-musl','aarch64-apple-darwin','x86_64-pc-windows-msvc','aarch64-pc-windows-msvc'];
+            const native=targets.map(target=>`validate / native-regression / Native (${target})`);
+            const cloud=['cloud-sweep (ubuntu-latest, x86_64-unknown-linux-musl)',
+              'cloud-sweep (macos-latest, aarch64-apple-darwin)','cloud-sweep (windows-latest, x86_64-pc-windows-msvc)'];
+            for(const name of [...native,...cloud,'api-smoke']){
+              const matching=page.jobs.filter(job=>job.name===name);
+              if(matching.length!==1||matching[0].status!=='completed'||matching[0].conclusion!=='success') throw new Error(`DEV12 regression not successful: ${name}`);
+            }
+            const release=await read('releases/tags/v1.0.11-dev.12');
+            let tag=(await read('git/ref/tags/v1.0.11-dev.12')).object;
+            if(tag.type==='tag') tag=(await read(`git/tags/${tag.sha}`)).object;
+            const expected=targets.flatMap(target=>[`cli-build-${target}.json`,`rsrs-${target}${target.includes('windows')?'.exe':''}`,`rsrs-${target}-runtime.tar.gz`]).sort();
+            if(release.draft||!release.prerelease||release.tag_name!=='v1.0.11-dev.12'||
+               JSON.stringify(release.assets.map(asset=>asset.name).sort())!==JSON.stringify(expected)||
+               tag.type!=='commit'||tag.sha!==sha) throw new Error('Public DEV12 release/source mismatch');
+            const response=await fetch('https://api.dev.rsrs.rs/health',{signal:AbortSignal.timeout(30000)});
+            if(response.status!==200) throw new Error(`DEV server health HTTP ${response.status}`);
+            const health=await response.json();
+            if(health.ok!==true||health.service!=='respire'||health.source_revision!=='63c3da9e64a4ce182bfd802518030b102dd362a3') throw new Error('DEV server changed since the approved regressions');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,'prior_verified=true\n');
+            console.log('Reusing DEV12 regressions from the same product/SDK source and DEV server; DEV13 artifacts will be rebuilt and checked');
+          }
+          verifyPrior().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select the mandatory synchronous validation profile
+        id: validation
+        env:
+          REQUESTED_PROFILE: ${{ inputs.validation_profile || 'critical' }}
+          REQUIRE_FULL: ${{ inputs.full_regression_before_publish || inputs.reuse_dev12_validation }}
+        run: |
+          node - <<'NODE'
+          const fs=require('fs');
+          const requested=process.env.REQUESTED_PROFILE;
+          if(!['critical','full'].includes(requested))throw Error('Unknown release validation profile');
+          const profile=process.env.REQUIRE_FULL==='true'?'full':requested;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'profile='+profile+'\n');
+          console.log('Synchronous validation profile: '+profile);
+          NODE
+      - name: Select an exact completed preparation before any draft/version mutation
+        id: prepared
+        if: inputs.prepared_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN: ${{ inputs.prepared_run }}
+          CLI_VERSION: ${{ inputs.dev_version }}
+          PREPARED_REQUEST_PUBLISH: ${{ inputs.publish }}
+          VALIDATION_PROFILE: ${{ steps.validation.outputs.profile }}
+        run: |
+          set -euo pipefail
+          test "$PREPARED_REQUEST_PUBLISH" = true
+          CLI_SHA="$(git rev-parse HEAD)" node npm/scripts/release-preparation.mjs inspect
+      - uses: actions/upload-artifact@v4
+        if: inputs.prepared_run != ''
+        with:
+          retention-days: 1
+          name: prepared-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: prepared-consumer.json
+          if-no-files-found: error
+      - id: plan
+        env:
+          RELEASE_REF: ${{ inputs.ref || github.ref }}
+          RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+          REUSE_VALIDATION: ${{ inputs.reuse_dev12_validation }}
+          PRIOR_VERIFIED: ${{ steps.prior.outputs.prior_verified }}
+          RELEASE_DEV_VERSION: ${{ inputs.dev_version || steps.prepared.outputs.prepared_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const cargo=fs.readFileSync('cli/Cargo.toml','utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          const manifest=require('./npm/artifact-manifest.json');
+          if(!cargo||manifest.cliVersion!==cargo) throw new Error('CLI Cargo/npm versions differ');
+          const ref=process.env.RELEASE_REF.replace(/^refs\/tags\//,'');
+          const tagEvent=process.env.RELEASE_REF.startsWith('refs/tags/')||/^v\d+\./.test(ref);
+          let channel,version;
+          if(tagEvent){
+            if(process.env.RELEASE_DEV_VERSION) throw new Error('A release tag cannot be combined with an exact DEV override');
+            if(!/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(ref)) throw new Error('Release tags must use vX.Y.Z or vX.Y.Z-dev.N');
+            version=ref.slice(1);channel=version.includes('-dev.')?'dev':'latest';
+            if(channel==='latest'&&cargo!==version) throw new Error('Stable release tag must exactly match CLI source version');
+            cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
+          }else{
+            if(process.env.RELEASE_PUBLISH==='true') cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
+            channel='dev';
+            version=cp.execFileSync('node',['npm/scripts/next-dev-version.mjs'],{encoding:'utf8'}).trim();
+          }
+          const sha=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+          if(process.env.REUSE_VALIDATION==='true'&&(process.env.PRIOR_VERIFIED!=='true'||
+             version!=='1.0.11-dev.13'||channel!=='dev'||sha!=='d8314480e10a27767544f781083e35c8e85657f0')) throw new Error('Approved regression reuse applies only to DEV13');
+          // Drafts reserve DEV numbers; only planning/publication hold this lock.
+          if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true'){
+            const reservedJson=cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100`,'--paginate','--jq',`.[] | select(.tag_name=="v${version}") | {draft,prerelease,asset_count:(.assets|length),body}`],{encoding:'utf8'}).trim();
+            const reserved=reservedJson?JSON.parse(reservedJson):null;
+            const notes=`Build and regression results pending.\nRelease workflow run: ${process.env.GITHUB_RUN_ID}`;
+            if(reserved){
+              cp.execFileSync('node',['npm/scripts/release-publication.mjs','guard-reservation-accepted'],{stdio:'inherit',env:{...process.env,CLI_VERSION:version,CLI_SHA:sha}});
+              if((!process.env.RELEASE_DEV_VERSION&&!tagEvent)||!reserved.draft||!reserved.prerelease||reserved.asset_count!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
+              const owner=reserved.body?.match(/Release workflow run: (\d+)/)?.[1];
+              if(owner){
+                const prior=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${owner}`],{encoding:'utf8'}));
+                if(prior.status!=='completed') throw new Error('The prior release run is still active; draft resumption refused');
+              }else{
+                // Legacy drafts have no owner marker; do not infer their run from a source ref.
+                const activeRuns=cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=100`,'--paginate','--jq',`.workflow_runs[] | select(.id!=${process.env.GITHUB_RUN_ID} and .status!="completed") | .id`],{encoding:'utf8'}).trim();
+                if(activeRuns) throw new Error('A legacy draft cannot resume while another Release run is active');
+              }
+              cp.execFileSync('gh',['release','edit',`v${version}`,'--target',sha,
+                '--title',`v${version}`,'--notes',notes],{stdio:'inherit'});
+            }else{
+              cp.execFileSync('gh',['release','create',`v${version}`,'--draft','--prerelease',
+                '--target',sha,'--title',`v${version}`,'--notes',notes],{stdio:'inherit'});
+            }
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\nreuse_validation=${process.env.REUSE_VALIDATION==='true'&&process.env.PRIOR_VERIFIED==='true'}\n`);
+          NODE
+
+  validate:
+    if: ${{ inputs.prepared_run == '' }}
+    needs: plan
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      full_validation: false
+
+  native-regression:
+    cache-mode: read
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
+    needs: [plan, validate]
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      validation_profile: full
+
+  native-regression-critical:
+    name: native-regression
+    cache-mode: write
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'critical' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    needs: plan
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      validation_profile: critical
+      producer_prefix: 'validate / '
+
+  native-regression-critical-readonly:
+    name: native-regression
+    cache-mode: read
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'critical' && !(github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
+    needs: plan
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      validation_profile: critical
+      producer_prefix: 'validate / '
+
+  cloud-sweep:
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
+    needs: plan
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require the approved development server
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+        run: |
+          node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api-dev.rsrs.rs")'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+      - name: Wait for this platform's build artifact
+        timeout-minutes: 46
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          const repo=process.env.GITHUB_REPOSITORY,run=process.env.GITHUB_RUN_ID,target=process.env.CLI_TARGET;
+          const name=`cli-release-${target}`,deadline=Date.now()+45*60*1000;
+          const read=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${run}/${path}`],{encoding:'utf8',timeout:30000}));
+          async function wait(){
+            let statusFailures=0;
+            while(Date.now()<deadline){
+              if(read('artifacts?per_page=100').artifacts.some(a=>a.name===name&&!a.expired)){
+                console.log(`Build artifact ready: ${name}`);return;
+              }
+              let job;
+              try {
+                job=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${run}/jobs?per_page=10`],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs).find(j=>j.name.endsWith(`Release (${target})`));
+                statusFailures=0;
+              } catch(error) {
+                if(!/HTTP 50[0-9]/.test(String(error.stderr))||++statusFailures>=2) throw error;
+                console.warn('GitHub job status temporarily unavailable; retrying this read once');
+                await new Promise(resolve=>setTimeout(resolve,30000));continue;
+              }
+              if(job?.status==='completed'&&job.conclusion!=='success') throw new Error(`Build ${job.name} concluded ${job.conclusion}`);
+              console.log(`Waiting for ${name}; other platform tests run independently`);
+              await new Promise(resolve=>setTimeout(resolve,30000));
+            }
+            throw new Error(`Build artifact ${name} unavailable within 45 minutes`);
+          }
+          wait().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: validated-cli
+      - name: Verify and extract this platform's artifacts
+        id: verified_artifact
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/extract-artifact.mjs validated-cli cli
+      - name: Install PowerShell
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null 2>&1; then exit 0; fi
+          if [ "$RUNNER_OS" = macOS ]; then brew install powershell; else
+            . /etc/os-release
+            curl -fsSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update
+            sudo apt-get install -y powershell
+          fi
+      - name: Sweep the approved development server
+        shell: pwsh
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          RSRS_ENGINE: cpu
+          RSRS_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep') -DeferSupplemental
+      - name: Upload base smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: base-release-sweep-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/release-sweep/report.md
+            ${{ runner.temp }}/release-sweep/coverage.json
+          if-no-files-found: warn
+      - uses: actions/setup-python@v5
+        id: supplement_python
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}
+        with:
+          python-version: '3.12'
+      - name: Verify all supplementary CLI contracts
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-supplements" --cli-report "$RUNNER_TEMP/release-sweep/coverage.json"
+      - name: Verify legacy Secret Service account migration
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+          python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          binary="$(realpath cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/release-supplements/outbox/models"
+          root="$RUNNER_TEMP/secret-service-profile-migration"
+          suite_exit=0
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || suite_exit=$?
+          gate_exit=0
+          python3 scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --source-sha "$CLI_SHA" --version "$CLI_VERSION" --binary-sha256 "$checksum" || gate_exit=$?
+          test "$suite_exit" -eq 0 && test "$gate_exit" -eq 0
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && runner.os == 'Linux' }}
+        with:
+          retention-days: 1
+          name: secret-service-profile-migration-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
+            ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json
+            ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: release-sweep-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/release-sweep/report.md
+            ${{ runner.temp }}/release-sweep/coverage.json
+            ${{ runner.temp }}/release-supplements/suite-results.json
+            ${{ runner.temp }}/release-supplements/combined-coverage.json
+            ${{ runner.temp }}/release-supplements/outbox/outbox-coverage.json
+            ${{ runner.temp }}/release-supplements/ai-inject/ai-inject-coverage.json
+            ${{ runner.temp }}/release-supplements/runtime-coverage.json
+            ${{ runner.temp }}/release-supplements/legacy-vault/legacy-vault-coverage.json
+            ${{ runner.temp }}/release-supplements/profile-migration/migration-coverage.json
+            ${{ runner.temp }}/release-supplements/login-interruption/interruption-coverage.json
+          if-no-files-found: error
+
+  native-migration:
+    name: Native migration (${{ matrix.target }})
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
+    needs: plan
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require the approved development server
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+        run: |
+          node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api-dev.rsrs.rs")'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+      - name: Wait for this platform's build artifact
+        timeout-minutes: 46
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          const repo=process.env.GITHUB_REPOSITORY,run=process.env.GITHUB_RUN_ID,target=process.env.CLI_TARGET;
+          const name=`cli-release-${target}`,deadline=Date.now()+45*60*1000;
+          const read=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${run}/${path}`],{encoding:'utf8',timeout:30000}));
+          async function wait(){
+            let statusFailures=0;
+            while(Date.now()<deadline){
+              if(read('artifacts?per_page=100').artifacts.some(a=>a.name===name&&!a.expired)){
+                console.log(`Build artifact ready: ${name}`);return;
+              }
+              let job;
+              try {
+                job=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${run}/jobs?per_page=10`],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs).find(j=>j.name.endsWith(`Release (${target})`));
+                statusFailures=0;
+              } catch(error) {
+                if(!/HTTP 50[0-9]/.test(String(error.stderr))||++statusFailures>=2) throw error;
+                console.warn('GitHub job status temporarily unavailable; retrying this read once');
+                await new Promise(resolve=>setTimeout(resolve,30000));continue;
+              }
+              if(job?.status==='completed'&&job.conclusion!=='success') throw new Error(`Build ${job.name} concluded ${job.conclusion}`);
+              console.log(`Waiting for ${name}; other platform tests run independently`);
+              await new Promise(resolve=>setTimeout(resolve,30000));
+            }
+            throw new Error(`Build artifact ${name} unavailable within 45 minutes`);
+          }
+          wait().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: validated-cli
+      - name: Verify and extract this platform's artifacts
+        id: verified_artifact
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/extract-artifact.mjs validated-cli cli
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native account migration with isolated profiles and owned random keyring entries
+        shell: pwsh
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --only-binary=:all: cryptography==46.0.3
+          if ($LASTEXITCODE -ne 0) { throw 'Native migration fixture dependencies failed' }
+          $binary = (Resolve-Path (Join-Path cli $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }))).Path
+          $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          python scripts/dev-profile-migration-smoke.py --binary $binary --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA --root (Join-Path $env:RUNNER_TEMP 'native-profile-migration')
+          if ($LASTEXITCODE -ne 0) { throw 'Native credential migration failed' }
+          Copy-Item -LiteralPath 'validated-cli/cli-build-${{ matrix.target }}.json' -Destination (Join-Path $env:RUNNER_TEMP 'native-profile-migration/verified-build.json')
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: native-profile-migration-fixture-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-profile-migration/*.json
+          if-no-files-found: error
+
+  migration-gate:
+    name: Migration gate (${{ matrix.target }})
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
+    needs: [plan, cloud-sweep, native-migration]
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: base-release-sweep-${{ matrix.target }}
+          path: base-sweep
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-profile-migration-fixture-${{ matrix.target }}
+          path: native-profile-migration
+      - name: Require both actual base sweep and migration reports for this platform and binary
+        shell: pwsh
+        env:
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Get-Content -Raw native-profile-migration/verified-build.json | ConvertFrom-Json
+          if ($build.schema_version -ne 1 -or $build.git_sha -ne $env:CLI_SHA -or $build.version -ne $env:CLI_VERSION -or $build.target -ne $env:CLI_TARGET -or $build.binary_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Verified migration artifact identity differs' }
+          python scripts/dev-smoke-gate.py --migration-only --cli-report base-sweep/coverage.json --profile-migration native-profile-migration/migration-coverage.json --report native-profile-migration/migration-platform-gate.json --source-sha $env:CLI_SHA --version $env:CLI_VERSION --binary-sha256 $build.binary_sha256
+          if ($LASTEXITCODE -ne 0) { throw 'Native migration/base-sweep join gate failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: native-profile-migration-${{ matrix.target }}
+          path: native-profile-migration/*.json
+          if-no-files-found: error
+
+  api-smoke:
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: respire-dev-mailbox-fixture
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check all baseline CLI API contracts and GitHub transport
+        env:
+          RSRS_DEV_MAIL_ADDRESS: ${{ vars.RESPIRE_DEV_MAIL_ADDRESS }}
+          RSRS_DEV_IMAP_HOST: ${{ vars.RESPIRE_DEV_IMAP_HOST }}
+          RSRS_DEV_IMAP_USERNAME: ${{ secrets.RESPIRE_DEV_IMAP_USERNAME }}
+          RSRS_DEV_IMAP_PASSWORD: ${{ secrets.RESPIRE_DEV_IMAP_PASSWORD }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
+          RSRS_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          sleep 61
+          python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
+          python3 scripts/dev-github-api-smoke.py --report "$RUNNER_TEMP/dev-github-api-coverage.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: dev-api-coverage
+          path: |
+            ${{ runner.temp }}/dev-api-coverage.json
+            ${{ runner.temp }}/dev-github-api-coverage.json
+          if-no-files-found: error
+
+  preparation-receipt:
+    # This read-only proof is deliberately not a publication fast path. A later
+    # consumer must independently validate its source/attempt, jobs and bytes.
+    if: >-
+      ${{ always() && !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+          needs.plan.result == 'success' && needs.validate.result == 'success' &&
+          ((needs.plan.outputs.validation_profile == 'full' && needs.native-regression.result == 'success') ||
+           (needs.plan.outputs.validation_profile == 'critical' && needs.native-regression-critical.result == 'success' && needs.native-regression-critical-readonly.result == 'skipped')) &&
+          needs.plan.outputs.sha == github.sha && needs.plan.outputs.publish == 'false' &&
+          !inputs.reuse_dev12_validation &&
+          !inputs.resume_dev6_publication && !inputs.repair_dev12 && !inputs.repair_dev14 }}
+    needs: [plan, validate, native-regression, native-regression-critical, native-regression-critical-readonly, cloud-sweep, native-migration, migration-gate, api-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: prepared-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-release-packages
+          path: prepared-packs
+      - name: Bind every successful gate and exact prepared asset/package digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
+        run: node npm/scripts/release-preparation.mjs attest prepared-assets prepared-packs release-prepared.json
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: release-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-prepared.json
+          if-no-files-found: error
+
+  prepared-import:
+    if: ${{ inputs.prepared_run != '' && needs.plan.outputs.prepared_run == inputs.prepared_run }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CLI_SHA: ${{ needs.plan.outputs.sha }}
+      CLI_VERSION: ${{ needs.plan.outputs.version }}
+      VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
+      PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
+      PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
+      PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
+      PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
+      PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Pin the same pack tool used during complete preparation
+        run: npm install --global npm@11.5.1
+      - run: node npm/scripts/set-build-version.mjs '${{ needs.plan.outputs.version }}'
+      - name: Select copies from the exact prepared source platform inventory
+        id: platforms
+        run: |
+          node --input-type=module - <<'NODE'
+          import {readFileSync,appendFileSync} from 'node:fs';
+          const m=JSON.parse(readFileSync('npm/artifact-manifest.json'));
+          const targets=m.targets.map(t=>t.triple);
+          const gnu=targets.includes('aarch64-unknown-linux-gnu'),musl=targets.includes('aarch64-unknown-linux-musl');
+          if(gnu!==musl)throw Error('Prepared Linux ARM64 inventory must include both libc routes');
+          appendFileSync(process.env.GITHUB_OUTPUT,`arm64=${gnu}\nwindows_arm64=${targets.includes('aarch64-pc-windows-msvc')}\n`);
+          NODE
+      - name: Require registration before reading cross-run binary artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/prepared-import.mjs consumer
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.plan.outputs.prepared_binary_artifact_ids }}
+          run-id: ${{ needs.plan.outputs.prepared_run }}
+          github-token: ${{ github.token }}
+          path: imported-assets
+          merge-multiple: true
+      - name: Verify original bytes and independently preflight every local npm tarball
+        run: |
+          set -euo pipefail
+          node npm/scripts/verify-packages.mjs imported-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs imported-assets target/ci
+          node npm/scripts/pack.mjs --root target/ci
+          node npm/scripts/verify-packages.mjs imported-assets --pack imported-packs
+      - name: Record the verified current-run import and original selected-profile validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/prepared-import.mjs record imported-assets imported-packs prepared-import.json
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-unknown-linux-gnu
+          path: |
+            imported-assets/rsrs-x86_64-unknown-linux-gnu
+            imported-assets/rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz
+            imported-assets/cli-build-x86_64-unknown-linux-gnu.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-unknown-linux-musl
+          path: |
+            imported-assets/rsrs-x86_64-unknown-linux-musl
+            imported-assets/rsrs-x86_64-unknown-linux-musl-runtime.tar.gz
+            imported-assets/cli-build-x86_64-unknown-linux-musl.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-apple-darwin
+          path: |
+            imported-assets/rsrs-x86_64-apple-darwin
+            imported-assets/rsrs-x86_64-apple-darwin-runtime.tar.gz
+            imported-assets/cli-build-x86_64-apple-darwin.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-apple-darwin
+          path: |
+            imported-assets/rsrs-aarch64-apple-darwin
+            imported-assets/rsrs-aarch64-apple-darwin-runtime.tar.gz
+            imported-assets/cli-build-aarch64-apple-darwin.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-pc-windows-msvc
+          path: |
+            imported-assets/rsrs-x86_64-pc-windows-msvc.exe
+            imported-assets/rsrs-x86_64-pc-windows-msvc-runtime.tar.gz
+            imported-assets/cli-build-x86_64-pc-windows-msvc.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: steps.platforms.outputs.windows_arm64 == 'true'
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-pc-windows-msvc
+          path: |
+            imported-assets/rsrs-aarch64-pc-windows-msvc.exe
+            imported-assets/rsrs-aarch64-pc-windows-msvc-runtime.tar.gz
+            imported-assets/cli-build-aarch64-pc-windows-msvc.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: steps.platforms.outputs.arm64 == 'true'
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-unknown-linux-gnu
+          path: |
+            imported-assets/rsrs-aarch64-unknown-linux-gnu
+            imported-assets/rsrs-aarch64-unknown-linux-gnu-runtime.tar.gz
+            imported-assets/cli-build-aarch64-unknown-linux-gnu.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: steps.platforms.outputs.arm64 == 'true'
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-unknown-linux-musl
+          path: |
+            imported-assets/rsrs-aarch64-unknown-linux-musl
+            imported-assets/rsrs-aarch64-unknown-linux-musl-runtime.tar.gz
+            imported-assets/cli-build-aarch64-unknown-linux-musl.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: npm-release-packages
+          path: imported-packs/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: prepared-import-${{ github.run_id }}-${{ github.run_attempt }}
+          path: prepared-import.json
+          if-no-files-found: error
+
+  publication-ready:
+    # Long read-only gates never hold the publication transaction lock.
+    if: >-
+      ${{ !cancelled() && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) &&
+          needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' &&
+          ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') ||
+           (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success')) }}
+    needs: [plan, validate, prepared-import]
+    runs-on: ubuntu-latest
+    timeout-minutes: 145
+    env:
+      VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      imported_artifact_id: ${{ steps.imported.outputs.imported_artifact_id }}
+      imported_artifact_digest: ${{ steps.imported.outputs.imported_artifact_digest }}
+      imported_receipt_sha256: ${{ steps.imported.outputs.imported_receipt_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Require successful CLI CI for this exact source
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 21
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          async function requireCi(){
+            const sha=process.env.CLI_SHA,repo=process.env.GITHUB_REPOSITORY;
+            if(!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid release source SHA');
+            const deadline=Date.now()+20*60*1000;
+            while(Date.now()<deadline){
+              const result=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`],{encoding:'utf8'}));
+              // Focused artifact runs can exercise an older binary and skip source checks.
+              const run=result.workflow_runs.filter(run=>run.head_sha===sha&&run.event==='push').sort((a,b)=>b.id-a.id)[0];
+              if(run?.status==='completed'){
+                if(run.conclusion!=='success') throw new Error(`Latest CLI CI ${run.id} for ${sha} concluded ${run.conclusion}; publication refused`);
+                console.log(`Verified successful CLI CI ${run.id} for exact source ${sha}`);
+                return;
+              }
+              console.log(`Waiting for latest CLI CI for ${sha}: ${run?`${run.id} ${run.status}`:'not yet available'}`);
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
+            throw new Error(`No successful latest CLI CI for ${sha} within 20 minutes; publication refused`);
+          }
+          requireCi().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - name: Require every regression in the selected profile before publication
+        if: ${{ inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 121
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          async function requireRegression(){
+            const deadline=Date.now()+120*60*1000;
+            while(Date.now()<deadline){
+              const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',
+                `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=10`
+              ],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs);
+              const {regressionContract,regressionStatus}=await import('./npm/scripts/release-regression-contract.mjs');
+              const contract=regressionContract(require('./npm/artifact-manifest.json'),process.env.VALIDATION_PROFILE);
+              if(regressionStatus(jobs,contract)==='success'){
+                console.log('All required '+process.env.VALIDATION_PROFILE+' regressions passed');return;
+              }
+              console.log('Waiting for every required '+process.env.VALIDATION_PROFILE+' regression');
+              await new Promise(resolve=>setTimeout(resolve,30000));
+            }
+            throw new Error('Required regression did not complete within 120 minutes');
+          }
+          requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - name: Require the completed trusted import and original selected-profile validation
+        id: imported
+        if: inputs.prepared_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
+          PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
+          PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
+          PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
+          PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
+          PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
+        run: node npm/scripts/prepared-import.mjs readiness
+
+  publish:
+    name: ${{ inputs.resume_dev6_publication && 'unused-standard-publish' || 'publish' }}
+    # Every stable/DEV publication waits for the selected profile readiness.
+    needs: [plan, validate, prepared-import, publication-ready]
+    if: >-
+      ${{ always() && !cancelled() && !inputs.resume_dev6_publication &&
+          ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.prepared_run == '' && inputs.publish) ||
+           (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' &&
+            ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') ||
+             (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success' && needs.plan.outputs.prepared_run == inputs.prepared_run)) &&
+            needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' &&
+            (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true'))) }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cli-release-publication
+      queue: max
+      cancel-in-progress: false
+    env:
+      VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
+      PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
+      PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
+      PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
+      PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
+      PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
+      IMPORTED_ARTIFACT_ID: ${{ needs.publication-ready.outputs.imported_artifact_id }}
+      IMPORTED_ARTIFACT_DIGEST: ${{ needs.publication-ready.outputs.imported_artifact_digest }}
+      IMPORTED_RECEIPT_SHA256: ${{ needs.publication-ready.outputs.imported_receipt_sha256 }}
+      REPAIR_VERSION: ${{ inputs.repair_dev14 && '1.0.11-dev.14' || '1.0.11-dev.12' }}
+      REPAIR_SHA: ${{ inputs.repair_dev14 && 'fd0e5463f8c59f304ff17d622efb1f6221f9b04c' || 'd8314480e10a27767544f781083e35c8e85657f0' }}
+      REPAIR_RUN: ${{ inputs.repair_dev14 && '37728949557' || '37716872717' }}
+      REUSE_VALIDATED_PACKS: ${{ github.repository == 'risense-ai/respire-cli' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.reuse_dev12_validation) }}
+    permissions:
+      contents: write
+      actions: write
+      id-token: write
+    steps:
+      - name: Require the exact successful release before single-package repair
+        if: inputs.repair_dev12 || inputs.repair_dev14
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          const repo=process.env.GITHUB_REPOSITORY;
+          if(repo!=='risense-ai/respire-cli') throw new Error('Repair repository mismatch');
+          const run=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${process.env.REPAIR_RUN}`],{encoding:'utf8'}));
+          if(run.status!=='completed'||run.conclusion!=='success'||run.path!=='.github/workflows/release.yml'||
+             run.head_sha!==process.env.REPAIR_SHA) throw new Error('Original release was not verified');
+          const release=JSON.parse(cp.execFileSync('gh',['release','view',`v${process.env.REPAIR_VERSION}`,'--repo',repo,
+            '--json','isDraft,isPrerelease,assets'],{encoding:'utf8'}));
+          if(release.isDraft||!release.isPrerelease||release.assets.length!==21) throw new Error('Repair requires a complete public prerelease');
+          console.log('Verified successful source run and public release; repair is limited to one package');
+          NODE
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ (inputs.repair_dev12 || inputs.repair_dev14) && env.REPAIR_SHA || needs.plan.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - name: Require publication barrier support before any npm write
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        run: |
+          # Old refs lacking the protocol must fail before scoped publication.
+          test "$(node npm/scripts/release-publication.mjs protocol)" = 2
+          node --input-type=module -e "import fs from 'node:fs'; if (JSON.parse(fs.readFileSync('npm/artifact-manifest.json')).npmScope !== 'rsrs-cli') throw Error('New publication requires the direct rsrs-cli launcher')"
+      - name: Reject previously fenced version owners before npm or asset mutation
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/release-publication.mjs check-fence-accepted
+      - run: npm install --global npm@11.5.1
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ (inputs.repair_dev12 || inputs.repair_dev14) && env.REPAIR_VERSION || needs.plan.outputs.version }}
+      - name: Download the immutable validated public repair assets
+        if: inputs.repair_dev12 || inputs.repair_dev14
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "v${REPAIR_VERSION}^{commit}")" = "$REPAIR_SHA"
+          test "$(git rev-parse HEAD)" = "$REPAIR_SHA"
+          gh release download "v${REPAIR_VERSION}" --repo risense-ai/respire-cli --dir release-assets
+      - uses: actions/download-artifact@v4
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          pattern: cli-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release artifacts and prepare every scoped npm package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          node npm/scripts/verify-packages.mjs release-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs release-assets target/ci
+          node npm/scripts/pack.mjs --root target/ci
+          if [ "$REUSE_VALIDATED_PACKS" = true ]; then
+            node npm/scripts/verify-packages.mjs release-assets --reuse-packs "$RUNNER_TEMP/validated-npm" --download --export-packs npm/publication-packages
+          else
+            node npm/scripts/verify-packages.mjs release-assets --pack npm/publication-packages
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          retention-days: 1
+          name: npm-publication-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: npm/publication-packages/*
+          if-no-files-found: error
+      - name: Materialize the actual local tarballs for prepared-byte equality checks
+        if: inputs.prepared_run != ''
+        run: node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
+      - name: Generate release descriptions and the complete commit list
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node npm/scripts/release-notes.mjs "$RUNNER_TEMP/release-notes.md"
+      - name: Disclose the approved DEV12 regression reuse in DEV13 release notes
+        if: inputs.reuse_dev12_validation
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),path=require('path');
+          fs.appendFileSync(path.join(process.env.RUNNER_TEMP,'release-notes.md'),[
+            '', '## DEV13 validation scope', '',
+            'DEV13 is a version-only republication. Product source `d8314480e10a27767544f781083e35c8e85657f0` and Core SDK `1.0.2-dev.4` are unchanged.',
+            'Business regressions reuse the successful [DEV12 release run 37716872717](https://github.com/risense-ai/respire-cli/actions/runs/37716872717) for the same source, SDK and DEV server `63c3da9e64a4ce182bfd802518030b102dd362a3`.',
+            'The 35 historical upgrades, cloud regressions and API regressions were not rerun for DEV13.',
+            'All seven platform binaries are newly built and checked for DEV13. The macOS CPU inference probe and npm package checks are executed separately for these new artifacts.', ''
+          ].join('\n'));
+          NODE
+      - name: Preserve durable version ownership in the generated Release notes
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: node npm/scripts/release-publication.mjs bind-fence-notes-accepted
+      - name: Create a draft and upload every verified artifact
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if gh release view "$CLI_TAG" --json isDraft >/dev/null 2>&1; then
+            test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = true || { echo 'Release is already public; use a new version'; exit 1; }
+            CLI_SHA="${{ needs.plan.outputs.sha }}" CLI_VERSION="${{ needs.plan.outputs.version }}" node npm/scripts/release-publication.mjs check-fence-accepted
+            gh release edit "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          elif [ "$CLI_CHANNEL" = dev ]; then
+            gh release create "$CLI_TAG" --draft --prerelease --target "$CLI_SHA" --title "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$CLI_TAG" --draft --target "$CLI_SHA" --title "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          gh release upload "$CLI_TAG" release-assets/* --clobber
+          gh release view "$CLI_TAG" --json assets > "$RUNNER_TEMP/release-assets.json"
+          node - <<'NODE'
+          const fs=require('fs'),path=require('path');
+          const expected=fs.readdirSync('release-assets').sort();
+          const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
+          const m=JSON.parse(fs.readFileSync('npm/artifact-manifest.json','utf8'));
+          if(expected.length!==m.targets.length*3||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain every exact-source binary/runtime/metadata asset (three per platform)');
+          NODE
+      - name: Reconcile any interrupted previous-attempt npm submission
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node npm/scripts/release-publication.mjs guard-accepted
+      - name: Publish npm using Trusted Publishing
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: |
+          node npm/scripts/pack.mjs --root target/ci --publish --accepted-only --verified-packs npm/publication-packages --tag "$CLI_CHANNEL"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          retention-days: 1
+          name: npm-submissions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-submissions.json
+          if-no-files-found: ignore
+      - name: Bind successful scoped npm submissions to the draft
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node npm/scripts/release-publication.mjs scoped-accepted
+      - uses: actions/upload-artifact@v4
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          retention-days: 1
+          name: scoped-accepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-accepted.json
+          if-no-files-found: error
+      - name: Start the matching short-package publisher after scoped acceptance
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run npm-alias.yml --ref '${{ github.ref_name }}' -f release_run='${{ github.run_id }}' -f release_attempt='${{ github.run_attempt }}'
+      - name: Require every matching npm submission acceptance
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 21
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-publication.mjs await-alias-accepted
+      - name: Repair only the missing Linux ARM64 GNU package
+        if: inputs.repair_dev12 || inputs.repair_dev14
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const name='@rsrsai/linux-arm64-gnu',version=process.env.REPAIR_VERSION;
+          const dir='npm/dist/@rsrsai/linux-arm64-gnu';
+          const pkg=JSON.parse(fs.readFileSync(`${dir}/package.json`,'utf8'));
+          if(pkg.name!==name||pkg.version!==version||JSON.stringify(pkg.os)!=='["linux"]'||
+             JSON.stringify(pkg.cpu)!=='["arm64"]'||JSON.stringify(pkg.libc)!=='["glibc"]') throw new Error('Repair package identity mismatch');
+          async function repair(){
+            const url=`https://registry.npmjs.org/${encodeURIComponent(name)}/${version}?repair=${Date.now()}`;
+            const result=await fetch(url,{headers:{'Cache-Control':'no-cache'},signal:AbortSignal.timeout(30000)});
+            if(result.status===200){
+              const existing=await result.json();
+              if(existing.name!==name||existing.version!==version||!existing.dist?.integrity||!existing.dist?.tarball||
+                 existing.repository?.url!==pkg.repository.url||JSON.stringify(existing.os)!==JSON.stringify(pkg.os)||
+                 JSON.stringify(existing.cpu)!==JSON.stringify(pkg.cpu)||JSON.stringify(existing.libc)!==JSON.stringify(pkg.libc)) throw new Error('Existing repair package metadata mismatch');
+              const packed=cp.spawnSync('npm',['pack',dir,'--json','--pack-destination',process.env.RUNNER_TEMP],{encoding:'utf8'});
+              if(packed.status!==0) throw new Error('Repair package integrity packing failed');
+              const report=JSON.parse(packed.stdout);
+              if(report.length!==1||report[0].name!==name||report[0].version!==version||!report[0].integrity||
+                 report[0].integrity!==existing.dist.integrity) throw new Error('Existing repair package content integrity mismatch');
+              console.log(`${name}@${version} already exists with verified content; no publication or tag changes`);return;
+            }
+            if(result.status!==404) throw new Error(`Registry returned HTTP ${result.status}; publication refused`);
+            const publish=cp.spawnSync('npm',['publish',dir,'--access','public','--tag','dev'],{stdio:'inherit'});
+            if(publish.status!==0) throw new Error('Single-package publication failed; do not overwrite or retry other packages');
+            console.log('Single-package publication accepted; verify registry version, dev tag and tarball visibility separately');
+          }
+          repair().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - name: Make the complete release public
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+          FULL_REGRESSION_REQUIRED: ${{ needs.plan.outputs.validation_profile == 'full' }}
+        run: node npm/scripts/release-publication.mjs finalize-accepted
+      - uses: actions/upload-artifact@v4
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          retention-days: 1
+          name: publication-accepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: publication-accepted.json
+          if-no-files-found: error
+
+  dev6-publication-resume:
+    name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication && inputs.prepared_run == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: cli-release-publication
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Tooling is real current workflow code; product remains pinned f0002c4.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Revalidate original DEV6 gates, assets and existing npm bytes without publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_REF: ${{ inputs.ref }}
+          RECOVERY_VERSION: ${{ inputs.dev_version }}
+          RECOVERY_PUBLISH: ${{ inputs.publish }}
+          RECOVERY_FULL: ${{ inputs.full_regression_before_publish }}
+          RECOVERY_REUSE: ${{ inputs.reuse_dev12_validation }}
+          RECOVERY_REPAIR12: ${{ inputs.repair_dev12 }}
+          RECOVERY_REPAIR14: ${{ inputs.repair_dev14 }}
+        run: node npm/scripts/release-publication.mjs recovery-ready
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: dev6-recovery-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: recovery-validation.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: scoped-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-ready.json
+          if-no-files-found: error
+      - name: Start the matching historical short-package publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run npm-alias.yml --ref '${{ github.ref_name }}' -f release_run='${{ github.run_id }}' -f release_attempt='${{ github.run_attempt }}'
+      - name: Require the matching short-package publisher and public install
+        timeout-minutes: 81
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-publication.mjs await-alias
+      - name: Make the complete original DEV6 release public
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-publication.mjs finalize

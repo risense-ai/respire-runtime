@@ -1,0 +1,370 @@
+{
+  "schema": 1,
+  "source": "cli/src/web.rs dispatch",
+  "method": "POST",
+  "path": "/api/invoke",
+  "auth": "owned runtime Bearer token",
+  "expected_actions": 72,
+  "actions": [
+    {
+      "action": "status",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "update_check",
+      "success_contract": "conditional-registry-version",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "db_stamp",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "list",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "search",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "show",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "tree",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "candidates",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "create",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "update",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "delete",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "purge",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "attach",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "restore",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "promote",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "demote",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "sync",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "register",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "login",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "logout",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "keygen",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "super_reset",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "keys_export",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "config_get",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "server_addr_get",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "resume_session",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "server_addr_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "sync_config_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "cure_config_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "diary_mode_get",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "diary_mode_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "workspace_mode_get",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "workspace_mode_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "data_dir_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "list_system_fonts",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "scope_material",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_list",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_create",
+      "success_contract": "guarded-host-transition",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_use",
+      "success_contract": "guarded-host-transition",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_invite",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_join",
+      "success_contract": "guarded-host-transition",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_members",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_kick",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "space_remove",
+      "success_contract": "guarded-host-transition",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "doctor",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "rerank_model_status",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "rerank_model_install",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "inject_targets",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "inject",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "inject_remove",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "inject_preview",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "inject_apply",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "pick_save_file",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "pick_open_file",
+      "success_contract": "designed-browser-picker-unsupported",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "pick_directory",
+      "success_contract": "designed-browser-picker-unsupported",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "export_memories",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "import_memories",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "backup_db",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "book_material",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "share_subtree",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "share_import",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "portrait_material",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "tree_cure",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "causal_reorder",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "causal_plan",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "ds_key_status",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "ds_key_save",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "classify_backend_get",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "classify_backend_set",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "task_status",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "defrag",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    },
+    {
+      "action": "reembed",
+      "success_contract": "HTTP semantic response",
+      "negative_contract": "missing Bearer returns 401"
+    }
+  ]
+}
