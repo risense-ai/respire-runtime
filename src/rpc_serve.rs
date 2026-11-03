@@ -53,6 +53,8 @@ fn bin_version() -> &'static str {
 
 // Worker-face state (worker flag, sync context, generation, index work,
 // write gate, recall statistics) lives in the shared rpc_worker module.
+use crate::i18n;
+use crate::output::{Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 use crate::rpc_worker::{
     check_sync_context, command_name, current_url, index_has_work, index_loop, index_status,
     is_context_query, is_status, kick_index, mark_worker, needs_inference, recall_stats_status,

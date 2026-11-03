@@ -159,10 +159,10 @@ pub static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
 });
 
 pub struct IndexWork {
-    requested: bool,
-    state: &'static str,
-    error: Option<String>,
-    prepare_mirror: Option<String>,
+    pub(crate) requested: bool,
+    pub(crate) state: &'static str,
+    pub(crate) error: Option<String>,
+    pub(crate) prepare_mirror: Option<String>,
 }
 #[derive(Default)]
 pub struct GateState {
@@ -176,18 +176,18 @@ pub struct WriteGate {
 }
 pub struct WriteGuard<'a>(&'a WriteGate);
 impl WriteGate {
-    fn reserve(&self) {
+    pub(crate) fn reserve(&self) {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .foreground += 1;
     }
-    fn cancel_reservation(&self) {
+    pub(crate) fn cancel_reservation(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.foreground -= 1;
         self.changed.notify_all();
     }
-    fn acquire_reserved(&self) -> WriteGuard<'_> {
+    pub(crate) fn acquire_reserved(&self) -> WriteGuard<'_> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         while state.held {
             state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -196,7 +196,7 @@ impl WriteGate {
         state.held = true;
         WriteGuard(self)
     }
-    fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
+    pub(crate) fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if foreground {
             state.foreground += 1;
