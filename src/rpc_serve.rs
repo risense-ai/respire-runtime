@@ -1158,6 +1158,14 @@ pub fn worker_limit() -> usize {
     cpu_count()
 }
 
+/// OS-reported parallelism for this process; the floor keeps a single-CPU
+/// host usable when the metric is unavailable.
+pub fn cpu_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+}
+
 fn queue_wait() -> Duration {
     Duration::from_secs(respire_app::env::var("RSRS_RPC_QUEUE_WAIT_SECS").ok()
         .and_then(|value| value.parse::<u64>().ok()).unwrap_or(120).clamp(1, 3600))
