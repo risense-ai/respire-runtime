@@ -51,6 +51,20 @@ fn bin_version() -> &'static str {
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+/// Publish the identity of a host binary that serves in-process as the
+/// split-transition shim (the CLI exe behind `--runtime-internal`): it reports
+/// its own train so client version gates keep matching, with an unbounded
+/// compatibility window. First publication still wins.
+pub fn publish_shim_identity(version: &'static str) -> bool {
+    set_runtime_identity(RuntimeIdentity {
+        runtime_version: version.to_owned(),
+        runtime_compat: RuntimeCompat {
+            min_cli: version.to_owned(),
+            max_cli: "*".to_owned(),
+        },
+    })
+}
+
 // Worker-face state (worker flag, sync context, generation, index work,
 // write gate, recall statistics) lives in the shared rpc_worker module.
 use crate::i18n;
