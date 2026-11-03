@@ -266,7 +266,6 @@ jobs:
           }
           if (!noticeFiles) throw new Error('Archive is missing redistribution notices');
           console.log(`Verified archive whitelist: ${entries.length} entries; runtime files: ${runtimeFiles}`);
-          console.log(`Verified archive whitelist: ${entries.length} entries`);
           NODE
           tar_sha256="$(sha256sum "rsrs-runtime-$target.tar.gz" | cut -d ' ' -f 1)"
           binary_sha256="$(sha256sum "payload/$binary" | cut -d ' ' -f 1)"
