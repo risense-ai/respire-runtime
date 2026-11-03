@@ -15,6 +15,7 @@ native-fault-tests = []
 
 [dependencies]
 respire_app = { package = "respire_app", path = "../app", default-features = false }
+respire_protocol = { path = "../protocol" }
 respire_spawn = { path = "../../spawn" }
 anyhow = "1.0"
 base64 = "0.22"
@@ -28,6 +29,14 @@ unicode-width = "=0.2.0"
 ureq = { version = "2.12", features = ["json", "socks-proxy"] }
 url = "2.5"
 uuid = { version = "1.0", features = ["v4", "v5"] }
+# Runtime server transport: authenticated loopback HTTP RPC/MCP
+tiny_http = "0.12"
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
+
+[target.'cfg(unix)'.dependencies]
+# serve() installs a no-op SIGHUP handler off the listener thread.
+signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3.15"

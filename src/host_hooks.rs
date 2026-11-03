@@ -21,6 +21,18 @@ pub struct MethodOutcome {
     pub envelope: Option<ResultEnvelope>,
 }
 
+/// Normalised MCP HTTP bridge request (mirror of the host `mcp::HttpIn`).
+pub struct McpHttpIn {
+    pub method: String,
+    pub path: String,
+    pub origin: String,
+    pub accept: String,
+    pub body: String,
+}
+
+/// Loopback HTTP handler result shared by the runtime transport.
+pub type HttpReply = (u16, &'static str, Vec<u8>);
+
 /// Normalised CLI update status (mirror of the host `update_check` report).
 pub struct UpdateStatus {
     pub current: String,
@@ -43,7 +55,13 @@ pub type RuntimeBrief = fn() -> Option<(u32, String, String)>;
 pub type HostCommand = fn(&crate::cli_def::Cli) -> Option<anyhow::Result<()>>;
 pub type ExtractTuiRun = fn() -> anyhow::Result<()>;
 pub type RuntimeIsUp = fn() -> bool;
-pub type ChangeProfile = fn(Box<dyn FnOnce() -> anyhow::Result<()>>) -> anyhow::Result<()>;
+pub type ChangeProfile = fn(Box<dyn FnOnce() -> anyhow::Result<()> + Send>) -> anyhow::Result<()>;
+pub type ManagedId = fn() -> Option<&'static str>;
+pub type VerifyManagedBoot = fn() -> Result<()>;
+pub type RecordExit = fn(bool);
+pub type CredentialState = fn() -> &'static str;
+pub type CaptureRun = fn(Vec<String>) -> crate::output_state::Captured;
+pub type McpHttpResponse = fn(McpHttpIn) -> HttpReply;
 
 #[derive(Default)]
 pub struct HostHooks {
@@ -62,6 +80,12 @@ pub struct HostHooks {
     pub extract_tui_run: Option<ExtractTuiRun>,
     pub runtime_is_up: Option<RuntimeIsUp>,
     pub change_profile: Option<ChangeProfile>,
+    pub managed_id: Option<ManagedId>,
+    pub verify_managed_boot: Option<VerifyManagedBoot>,
+    pub record_exit: Option<RecordExit>,
+    pub credential_state: Option<CredentialState>,
+    pub capture_run: Option<CaptureRun>,
+    pub mcp_http_response: Option<McpHttpResponse>,
 }
 
 static BACKGROUND_PAUSED: OnceLock<BackgroundPaused> = OnceLock::new();
@@ -79,6 +103,12 @@ static HOST_COMMAND: OnceLock<HostCommand> = OnceLock::new();
 static EXTRACT_TUI_RUN: OnceLock<ExtractTuiRun> = OnceLock::new();
 static RUNTIME_IS_UP: OnceLock<RuntimeIsUp> = OnceLock::new();
 static CHANGE_PROFILE: OnceLock<ChangeProfile> = OnceLock::new();
+static MANAGED_ID: OnceLock<ManagedId> = OnceLock::new();
+static VERIFY_MANAGED_BOOT: OnceLock<VerifyManagedBoot> = OnceLock::new();
+static RECORD_EXIT: OnceLock<RecordExit> = OnceLock::new();
+static CREDENTIAL_STATE: OnceLock<CredentialState> = OnceLock::new();
+static CAPTURE_RUN: OnceLock<CaptureRun> = OnceLock::new();
+static MCP_HTTP_RESPONSE: OnceLock<McpHttpResponse> = OnceLock::new();
 
 /// Install the host implementations. Returns `false` when a previous installer
 /// already ran; the first installation wins.
@@ -99,6 +129,12 @@ pub fn install(hooks: HostHooks) -> bool {
         extract_tui_run,
         runtime_is_up,
         change_profile,
+        managed_id,
+        verify_managed_boot,
+        record_exit,
+        credential_state,
+        capture_run,
+        mcp_http_response,
     } = hooks;
     let installed = [
         background_paused.map(|hook| BACKGROUND_PAUSED.set(hook).is_ok()),
@@ -116,6 +152,12 @@ pub fn install(hooks: HostHooks) -> bool {
         extract_tui_run.map(|hook| EXTRACT_TUI_RUN.set(hook).is_ok()),
         runtime_is_up.map(|hook| RUNTIME_IS_UP.set(hook).is_ok()),
         change_profile.map(|hook| CHANGE_PROFILE.set(hook).is_ok()),
+        managed_id.map(|hook| MANAGED_ID.set(hook).is_ok()),
+        verify_managed_boot.map(|hook| VERIFY_MANAGED_BOOT.set(hook).is_ok()),
+        record_exit.map(|hook| RECORD_EXIT.set(hook).is_ok()),
+        credential_state.map(|hook| CREDENTIAL_STATE.set(hook).is_ok()),
+        capture_run.map(|hook| CAPTURE_RUN.set(hook).is_ok()),
+        mcp_http_response.map(|hook| MCP_HTTP_RESPONSE.set(hook).is_ok()),
     ];
     installed.iter().all(|slot| slot.as_ref().is_none_or(|ok| *ok))
 }
@@ -215,9 +257,65 @@ pub fn runtime_is_up() -> bool {
 }
 
 /// Run a profile change under the host lifecycle coordinator.
-pub fn change_profile(change: Box<dyn FnOnce() -> anyhow::Result<()>>) -> anyhow::Result<()> {
+pub fn change_profile(change: Box<dyn FnOnce() -> anyhow::Result<()> + Send>) -> anyhow::Result<()> {
     match CHANGE_PROFILE.get() {
         Some(hook) => hook(change),
         None => Err(anyhow::anyhow!("profile changes are host-managed")),
+    }
+}
+
+/// Registration id of the host-managed runtime owner, if any.
+pub fn managed_id() -> Option<&'static str> {
+    MANAGED_ID.get().and_then(|hook| hook())
+}
+
+/// Prove this startup is authorized by the host's managed coordinator.
+pub fn verify_managed_boot() -> Result<()> {
+    match VERIFY_MANAGED_BOOT.get() {
+        Some(hook) => hook(),
+        None => Ok(()),
+    }
+}
+
+/// Record the process exit outcome with the host lifecycle bookkeeping.
+pub fn record_exit(success: bool) {
+    if let Some(hook) = RECORD_EXIT.get() {
+        hook(success);
+    }
+}
+
+/// Host credential bookkeeping state reported through /api/health.
+pub fn credential_state() -> &'static str {
+    CREDENTIAL_STATE.get().map(|hook| hook()).unwrap_or("unknown")
+}
+
+/// Execute one argv vector through the host command engine and capture its envelope.
+pub fn capture_run(args: Vec<String>) -> crate::output_state::Captured {
+    match CAPTURE_RUN.get() {
+        Some(hook) => hook(args),
+        None => {
+            eprintln!("argv execution is host-managed; refusing {args:?}");
+            crate::output_state::Captured {
+                exit: 1,
+                envelope: crate::output::ResultEnvelope::new(
+                    "cli",
+                    crate::output::Status::Fail,
+                    serde_json::json!({"reason": "host-managed engine"}),
+                    Vec::new(),
+                ),
+            }
+        }
+    }
+}
+
+/// Forward one MCP-over-HTTP request to the host MCP bridge.
+pub fn mcp_http_response(request: McpHttpIn) -> HttpReply {
+    match MCP_HTTP_RESPONSE.get() {
+        Some(hook) => hook(request),
+        None => (
+            503,
+            "application/json; charset=utf-8",
+            serde_json::json!({"error":"the MCP bridge is host-managed"}).to_string().into_bytes(),
+        ),
     }
 }
