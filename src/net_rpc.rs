@@ -421,7 +421,7 @@ pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
     bail!("runtime listener closed but process {pid} has not exited")
 }
 
-pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
+pub fn process_is_running(pid: u32) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
         anyhow::ensure!(pid != 0, "invalid runtime process identity");
