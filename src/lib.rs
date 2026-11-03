@@ -15,9 +15,13 @@
 //! Modules land with the individual extraction commits of the runtime split.
 
 pub mod app_version;
+pub mod autostart;
+pub mod classify;
+pub mod cli_def;
 pub mod i18n;
 pub mod metadata;
 pub mod output;
+pub mod review;
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
