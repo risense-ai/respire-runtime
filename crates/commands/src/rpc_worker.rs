@@ -18,11 +18,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use clap::Parser;
 use serde_json::{json, Value};
 
-use crate::app_version;
 use crate::cli_def::{Cli, Command, SessionCommand};
 
 pub const PROTOCOL_V: u32 = 1;
@@ -136,17 +137,69 @@ pub fn endpoint_path() -> PathBuf {
     runtime_dir().join("endpoint.json")
 }
 
+// Both publication and receipt lookup reject linked or unbounded local records.
+fn endpoint_record_bytes(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                anyhow::ensure!(!metadata.file_type().is_symlink(), "endpoint path contains a symlink");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    anyhow::ensure!(metadata.file_attributes() & 0x400 == 0, "endpoint path contains a reparse point");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file() && metadata.len() <= 65536, "invalid endpoint/receipt file");
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= 65536, "endpoint/receipt file is too large");
+    Ok(Some(bytes))
+}
+
 pub fn write_endpoint(url: &str) -> Result<()> {
     let dir = runtime_dir();
+    let mut body = crate::rpc_serve::endpoint_identity(url)?;
+    let instance = body["instance_id"].as_str().context("endpoint instance missing")?;
+    let nonce = uuid::Uuid::parse_str(instance)?;
+    anyhow::ensure!(nonce.get_version_num() == 4 && nonce.to_string() == instance, "invalid endpoint instance");
+    let receipt = dir.join("autostart/launch").join(format!("launch-{instance}.claimed"));
+    if let Some(bytes) = endpoint_record_bytes(&receipt)? {
+        body["launch_receipt_sha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+    }
+    let target = endpoint_path();
+    let previous = endpoint_record_bytes(&target)?;
     std::fs::create_dir_all(&dir)?;
-    let body = json!({
-        "v": PROTOCOL_V,
-        "pid": std::process::id(),
-        "bin": app_version::embedded(),
-        "url": url,
-    });
-    std::fs::write(endpoint_path(), serde_json::to_vec_pretty(&body)?)?;
-    Ok(())
+    let temporary = dir.join(format!(".endpoint-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(&body)?)?;
+        file.sync_all()?;
+        drop(file);
+        anyhow::ensure!(endpoint_record_bytes(&target)? == previous, "endpoint changed before publication");
+        respire_spawn::durable::replace_file(&temporary, &target)?;
+        Ok(())
+    })();
+    if result.is_err() && temporary.try_exists()? {
+        std::fs::remove_file(&temporary)?;
+    }
+    result
 }
 
 pub fn endpoint_pid() -> Option<u32> {

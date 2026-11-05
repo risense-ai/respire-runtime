@@ -391,6 +391,15 @@ fn claim(directory: &Path, nonce: &str, grant: &[u8]) -> Result<()> {
     let path = directory.join(format!("launch-{nonce}.claimed"));
     let birth = process_birth(std::process::id())?
         .context("runtime claimant process identity is unavailable")?;
+    let verified: LaunchGrant = serde_json::from_slice(grant)?;
+    let registration = read_private_file(
+        &directory.parent().context("launch directory has no parent")?.join("registration.json"),
+    )?;
+    anyhow::ensure!(
+        verified.registration_sha256 == registration.as_deref().map(hash),
+        "registration changed before the launch claim was persisted"
+    );
+    let registration_json = registration.map(String::from_utf8).transpose()?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -403,7 +412,13 @@ fn claim(directory: &Path, nonce: &str, grant: &[u8]) -> Result<()> {
         .context("runtime launch grant was already claimed")?;
     // Retain the claim on any later failure; a failed startup never revives a token.
     file.write_all(&serde_json::to_vec(&json!({
-        "grant_sha256": hash(grant), "pid": std::process::id(), "process_start_id": birth,
+        "schema_version": 2,
+        "protocol_version": respire_commands::rpc_worker::PROTOCOL_V,
+        "state": "consumed",
+        "grant_sha256": hash(grant),
+        "grant_json": std::str::from_utf8(grant)?,
+        "registration_json": registration_json,
+        "pid": std::process::id(), "process_start_id": birth,
     }))?)?;
     file.sync_all()?;
     sync_directory(directory)
@@ -686,16 +701,30 @@ mod tests {
 
     #[test]
     fn launch_claim_cannot_be_replayed() -> Result<()> {
-        let directory =
+        let root =
             std::env::temp_dir().join(format!("respire-launch-fixture-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
+        let directory = root.join("launch");
+        fs::create_dir_all(&directory)?;
         let result = (|| -> Result<()> {
             let nonce = "12345678-1234-4234-8234-123456789abc";
-            claim(&directory, nonce, b"isolated-fixture")?;
-            assert!(claim(&directory, nonce, b"isolated-fixture").is_err());
+            let (_, grant) = fixture();
+            let bytes = serde_json::to_vec(&grant)?;
+            claim(&directory, nonce, &bytes)?;
+            let receipt_path = directory.join(format!("launch-{nonce}.claimed"));
+            let receipt_bytes = fs::read(&receipt_path)?;
+            let receipt: Value = serde_json::from_slice(&receipt_bytes)?;
+            assert_eq!(receipt["schema_version"], 2);
+            assert_eq!(receipt["state"], "consumed");
+            assert_eq!(receipt["grant_sha256"], hash(&bytes));
+            assert_eq!(receipt["grant_json"], std::str::from_utf8(&bytes)?);
+            assert!(receipt["registration_json"].is_null());
+            assert_eq!(receipt["pid"], std::process::id());
+            assert_eq!(receipt["process_start_id"], process_birth(std::process::id())?.context("test process exited")?);
+            assert!(claim(&directory, nonce, &bytes).is_err());
+            assert_eq!(fs::read(&receipt_path)?, receipt_bytes);
             Ok(())
         })();
-        fs::remove_dir_all(&directory)?;
+        fs::remove_dir_all(&root)?;
         result
     }
 }

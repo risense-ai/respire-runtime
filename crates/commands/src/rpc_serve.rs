@@ -2010,6 +2010,10 @@ pub(crate) fn advance_generation(generation: usize) -> Result<()> {
             Ordering::Acquire,
         )
         .map_err(|_| anyhow::anyhow!("sync context changed; pending work kept locally"))?;
+    // Keep the durable scope at the actual wire generation, under the same fence.
+    if JOB_TX.get().is_some() {
+        write_endpoint(&current_url())?;
+    }
     Ok(())
 }
 
@@ -2088,6 +2092,26 @@ fn inference_health_status() -> Value {
         Ok(status) => status,
         Err(error) => json!({"state":"error","error":format!("{error:#}")}),
     }
+}
+
+/// The durable endpoint uses the same process/account identity as live health.
+pub(crate) fn endpoint_identity(url: &str) -> Result<Value> {
+    validate_process_identity()?;
+    let process = process_identity();
+    let roots = respire_app::service::resolved_roots()?;
+    Ok(json!({
+        "schema_version": 2, "server": "respire", "v": PROTOCOL_V,
+        "pid": std::process::id(), "bin": bin_version(), "url": url,
+        "runtime_version": runtime_identity().runtime_version,
+        "exe": process.image_path, "image_path": process.image_path,
+        "image_sha256": process.image_sha256,
+        "installation_root": roots.installation_root,
+        "data_dir": roots.account_data_root,
+        "installation_id": process.installation_id, "instance_id": process.instance_id,
+        "process_start_id": process.process_start_id,
+        "account_id": account_identity(), "generation": crate::rpc_worker::wire_generation(),
+        "managed_id": crate::host_hooks::managed_id(),
+    }))
 }
 
 pub fn health_body() -> Value {
