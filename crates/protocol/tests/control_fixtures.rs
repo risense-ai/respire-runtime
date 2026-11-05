@@ -3,6 +3,45 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
+#[test]
+fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
+    use respire_protocol::{HostControlOperation, HostControlParams, RpcRequest, HOST_CONTROL_SCHEMA_V};
+
+    let wire = json!({
+        "schema_version": HOST_CONTROL_SCHEMA_V,
+        "binding": {
+            "installation_root": "fixture-root",
+            "profile": "fixture-profile",
+            "launch_id": "12345678-1234-4234-8234-123456789abc",
+            "expected_account_id": null,
+        },
+    });
+    let params: HostControlParams = serde_json::from_value(wire.clone())?;
+    assert_eq!(serde_json::to_value(&params)?, wire);
+    assert!(params.binding.expected_account_id.is_none());
+    let operation = HostControlOperation::MemoryRevision;
+    assert_eq!(serde_json::to_value(operation)?, json!("memory_revision"));
+    assert_eq!(serde_json::from_value::<HostControlOperation>(json!("memory_revision"))?, operation);
+    assert!(serde_json::from_value::<HostControlOperation>(json!("exec")).is_err());
+    let request: RpcRequest = serde_json::from_value(json!({
+        "v": 1,
+        "id": "12345678-1234-4234-8234-123456789abc",
+        "method": operation.method(),
+        "args": [serde_json::to_string(&params)?],
+    }))?;
+    let roundtrip: RpcRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
+    assert!(roundtrip.scope.is_none());
+    assert_eq!(roundtrip.method, "control.memory_revision");
+    assert_eq!(roundtrip.args, request.args);
+    let mut unknown = wire.clone();
+    unknown["argv"] = json!(["--direct"]);
+    assert!(serde_json::from_value::<HostControlParams>(unknown).is_err());
+    let mut unknown = wire;
+    unknown["binding"]["generation"] = json!(0);
+    assert!(serde_json::from_value::<HostControlParams>(unknown).is_err());
+    Ok(())
+}
+
 fn contract_root() -> Result<PathBuf> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR is set")?;
     Ok(Path::new(&manifest_dir)

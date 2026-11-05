@@ -27,7 +27,7 @@ repository = "https://github.com/risense-ai/respire-runtime"
 # Internal crates — path-based for the P2 transition. The version field on
 # respire_protocol keeps the registry pin so switching to registry-only
 # consumption later is a one-line change per entry.
-respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.4" }
+respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.5" }
 respire_core_sdk = { path = "crates/core-sdk" }
 respire_app_domain = { path = "crates/app-domain" }
 respire_app = { path = "crates/app" }
