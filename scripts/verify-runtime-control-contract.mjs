@@ -805,7 +805,7 @@ function offlineReadFailure(payload) {
   const {request, result, offline_context: c} = payload;
   if (Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
   if (["history", "original_operation_id", "original_fingerprint", "config_context", "write_context", "key_context",
-      "migration_context", "profile_context", "recovery_context", "progress", "ledger"].some(k => Object.hasOwn(payload, k)) ||
+      "migration_context", "profile_context", "recovery_context", "metadata_context", "progress", "ledger"].some(k => Object.hasOwn(payload, k)) ||
       request.operation_id != null || request.idempotency_key != null) return "host_request_invalid";
   let params;
   try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
@@ -829,8 +829,69 @@ function offlineReadFailure(payload) {
   }
   const r = payload.private_rpc_response;
   if (!r || r.id !== request.id || r.operation_id != null || r.idempotency_key != null ||
-      !same(r.envelope, result) || r.ok !== true || r.exit !== 0 || r.code !== null) return "host_result_invalid";
+      !same(r.envelope, result) || r.ok !== true || r.exit !== 0 || r.code !== null || r.data_dir !== null) return "host_result_invalid";
   return null;
+}
+
+function settingsWriteResponseFailure(payload, envelopeKind, code, profile) {
+  const {request, result, private_response: e, private_rpc_response: r} = payload, unknown = result.outcome === "unknown";
+  if (!e || !hostSchemaValid(e, hostSchema.$defs[envelopeKind]) || !same(e.summary, result) ||
+      e.status !== (unknown ? "fail" : "ok")) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const items = e.items.filter(i => i.name === name);
+    if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "host_result_invalid";
+  }
+  if (!r || !hostSchemaValid(r, hostSchema.$defs.settingsResponse) || r.id !== request.id ||
+      r.operation_id !== request.operation_id || r.idempotency_key !== request.idempotency_key ||
+      !same(r.envelope, e) || r.ok !== !unknown || r.exit !== (unknown ? 2 : 0) ||
+      r.code !== (unknown ? code : null) || r.data_dir !== profile) return "host_result_invalid";
+  if (payload.finish_maintenance && unknown) return "maintenance_not_terminal";
+  return null;
+}
+
+function metadataFailure(payload) {
+  const {request, result, metadata_context: c} = payload;
+  if (Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
+  if (["history", "original_operation_id", "original_fingerprint", "config_context", "write_context", "key_context",
+      "migration_context", "profile_context", "recovery_context", "offline_context", "progress", "ledger"].some(k => Object.hasOwn(payload, k))) return "host_request_invalid";
+  if (!request.operation_id || !request.idempotency_key) return "host_operation_required";
+  let params;
+  try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
+  if (!hostSchemaValid(params, hostSchema.$defs.metadataParams)) return "host_params_invalid";
+  const o = params.original, i = o.intent, query = request.method === "control.metadata.result";
+  if (!query && request.method !== "control.metadata." + i.kind ||
+      i.kind === "enable" && !(i.mode === "isolated" && i.deployment_review === null ||
+        i.mode === "controlled_writers" && i.deployment_review && Object.values(i.deployment_review).every(v => v.trim()))) return "host_params_invalid";
+  if (o.operation_id !== request.operation_id || o.key !== o.operation_id || o.key !== request.idempotency_key) return "host_operation_mismatch";
+  if (o.installation_root !== params.binding.installation_root || o.profile !== params.binding.profile ||
+      !same(o.identity, params.identity)) return "settings_binding_mismatch";
+  if (!c || !hostSchemaValid(c, hostSchema.$defs.metadataContext)) return "settings_context_mismatch";
+  const authority = settingsAuthorityFailure(payload, params.binding, c, params.identity, false);
+  if (authority) return authority;
+  const review = i.deployment_review;
+  const intent = i.kind === "disable" ? {kind: "disable"} : {kind: "enable", mode: i.mode, deployment_review: review === null ? null :
+    {operator: review.operator, upgraded_writers: review.upgraded_writers, disconnected_old_clients: review.disconnected_old_clients, reconciled_offline_writes: review.reconciled_offline_writes}};
+  const preimage = JSON.stringify([1, "control.metadata", o.installation_root, o.profile,
+    {account_id: o.identity.account_id, session_sha256: o.identity.session_sha256}, intent]);
+  if (c.fingerprint_preimage !== preimage || o.fingerprint !== c.fingerprint ||
+      o.fingerprint !== createHash("sha256").update(preimage).digest("hex")) return "host_fingerprint_mismatch";
+  if (c.auth_recovery_pending || !c.snapshot_clear || !c.writable || c.memory_off || !c.locks_owned) return "metadata_admission_blocked";
+  if (!result || !hostSchemaValid(result, hostSchema.$defs.metadataResult) || !same(result.original, o)) return "host_result_invalid";
+  const before = c.receipt_before, after = c.receipt_after;
+  if (before !== null) {
+    if (!same(before.original, o) || before.outcome !== "committed" || !same(after, before)) return "metadata_history_conflict";
+    if (c.effect_attempted) return "metadata_replay_forbidden";
+    if (!same(result, before)) return "metadata_receipt_mismatch";
+  } else if (query) {
+    if (c.effect_attempted || after !== null) return "metadata_replay_forbidden";
+    if (result.outcome !== "unknown" || result.details !== null) return "metadata_receipt_mismatch";
+  } else if (!c.effect_attempted || after === null || after.outcome !== "committed" || !same(after, result)) return "metadata_receipt_mismatch";
+  if (result.outcome === "committed" && (i.kind === "disable"
+      ? result.details?.enabled !== false || result.details?.sync_isolation_retained !== true
+      : result.details?.deployment_assurance !== "operator_attestation_only" || result.details?.old_client_access_enforced !== false ||
+        !same(result.details?.deployment_review, i.deployment_review) || result.details?.receipt?.enabled !== true ||
+        result.details?.receipt?.deployment?.mode !== i.mode)) return "metadata_receipt_mismatch";
+  return settingsWriteResponseFailure(payload, "metadataEnvelope", "metadata_outcome_unknown", null);
 }
 
 function privateHostFailure(payload) {
@@ -838,7 +899,8 @@ function privateHostFailure(payload) {
   if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
   const request = payload.request, method = hostSchema["x-methods"][request.method];
   if (method.params === "offlineReadParams") return offlineReadFailure(payload);
-  if (Object.hasOwn(payload, "offline_context")) return "host_request_invalid";
+  if (method.params === "metadataParams") return metadataFailure(payload);
+  if (["offline_context", "metadata_context"].some(k => Object.hasOwn(payload, k))) return "host_request_invalid";
   if (!["profileResult", "recoveryResult"].includes(method.result) &&
       ["profile_context", "recovery_context", "private_rpc_response"].some(key => Object.hasOwn(payload, key))) return "host_request_invalid";
   if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult", "migrationResult", "profileResult", "recoveryResult"].includes(method.result) &&
@@ -982,6 +1044,24 @@ for (const [group, count] of [["positive", 7], ["negative", 26]]) {
   }
 }
 
+const metadataExtension = manifest.extensions.metadata;
+if (metadataExtension.schema !== "schema/private-host-control.schema.json" ||
+    metadataExtension.consumer !== "consumers/private_host_control.rs") fail("metadata must reuse the shared schema and consumer");
+for (const [group, count] of [["positive", 7], ["negative", 18]]) {
+  const paths = metadataExtension.fixtures[group];
+  if (paths.length !== count || new Set(paths).size !== count) fail("metadata fixture count drift");
+  for (const name of paths) {
+    if (!boundPaths.has(name) || [...positive, ...negative, ...profileRecoveryExtension.fixtures.positive,
+        ...profileRecoveryExtension.fixtures.negative, ...settingsExtension.fixtures.positive,
+        ...settingsExtension.fixtures.negative].includes(name)) fail("unbound or duplicate metadata fixture");
+    const f = readJSON(fixturePath(name));
+    if (f.fixture_type !== "private_host_control" || f.expected !== (group === "positive" ? "accept" : "reject")) fail("metadata fixture kind");
+    if (group === "positive" && !hostSchemaValid(f, hostSchema)) fail("invalid metadata fixture container");
+    const actual = privateHostFailure(f.payload), expected = group === "positive" ? null : f.error_code;
+    if (actual !== expected) fail(`${name}: metadata rejection ${actual}, expected ${expected}`);
+  }
+}
+
 const spaceExtension = manifest.extensions.space;
 const spaceSchema = readJSON(fixturePath(spaceExtension.schema));
 const spaceValid = (value, name) => hostSchemaValid(value, spaceSchema.$defs[name], spaceSchema.$defs);
@@ -1076,4 +1156,4 @@ for (const [group, count] of [["positive", 7], ["negative", 24]]) {
     if (actual !== expected) fail(`${name}: space rejection ${actual}, expected ${expected}`);
   }
 }
-console.log(`runtime control contract verified: ${boundPaths.size} bound files (413 prior bindings retained with schema/consumer digest updates; 21 positive / 132 negative profile/recovery cases; 7 positive / 24 negative space cases)`);
+console.log(`runtime control contract verified: ${boundPaths.size} bound files (599 prior bindings retained with schema/consumer digest updates; 7 positive / 18 negative metadata cases; prior profile/recovery, settings and space cases retained)`);
