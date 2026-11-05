@@ -3480,6 +3480,39 @@ pub fn auto_sync(session: &SessionKeys, local: &LocalStore) {
 
 
 pub fn run_passport() -> Result<()> {
+    if rpc::worker_active() {
+        let store = respire_app::service::open_store()?;
+        let si = respire_app::service::session_info();
+        let user = match si.user.trim() {
+            "" => "local".to_owned(),
+            user => user.to_owned(),
+        };
+        let alive = store.all(false)?.len();
+        let devices = store.devices_count()?;
+        let items = vec![
+            OutputItem::new("user", OutputStatus::Ok, user.clone()),
+            OutputItem::new("memories", OutputStatus::Ok, alive.to_string()),
+            OutputItem::new("agents", OutputStatus::Skip, "host_owned"),
+            OutputItem::new("devices", OutputStatus::Ok, devices.to_string()),
+        ];
+        let mut result = ResultEnvelope::new(
+            "passport",
+            OutputStatus::Ok,
+            serde_json::json!({
+                "user": user,
+                "memories": alive,
+                "agents": null,
+                "devices": devices,
+            }),
+            items,
+        );
+        result.details = serde_json::json!({
+            "local_first": true,
+            "encrypted_sync": true,
+            "user_owned": true,
+        });
+        return emit_result(result);
+    }
     let si = respire_app::service::session_info();
     let st = respire_app::service::status_light().ok();
     let alive = st.as_ref().map(|s| s.local_alive).unwrap_or(0);

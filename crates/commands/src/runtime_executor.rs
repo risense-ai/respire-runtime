@@ -1,15 +1,15 @@
 //! In-process business executor for the standalone Runtime.
 //!
 //! It admits only the non-host command surface that supports memory reads,
-//! writes and MCP. Identity, lifecycle, update and installation commands remain
-//! host-owned and fail closed.
+//! writes, explicit local file operations and MCP. Identity, lifecycle, update
+//! and installation commands remain host-owned and fail closed.
 
 use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use clap::Parser;
 
-use crate::cli_def::{Cli, Command, ModelAction};
+use crate::cli_def::{Cli, Command, ModelAction, SnapshotCmd};
 use crate::engine::{run_local, DIRECT_MODE};
 use crate::output::{ResultEnvelope, Status as OutputStatus};
 use crate::output_state::{
@@ -17,6 +17,9 @@ use crate::output_state::{
     OUTPUT_EMITTED, OUTPUT_EXIT_CODE,
 };
 
+// Admission, operation identity, draining and progress still wrap every accepted
+// cli.exec. File arguments retain their existing local validation; admission does
+// not authorize host identity, installation or profile lifecycle changes.
 fn is_allowed(command: Option<&Command>) -> bool {
     matches!(
         command,
@@ -30,6 +33,7 @@ fn is_allowed(command: Option<&Command>) -> bool {
                 | Command::SyncResolve { .. }
                 | Command::SyncHistory { .. }
                 | Command::SyncRestore { .. }
+                | Command::SyncReset
                 | Command::Classify { .. }
                 | Command::Reembed
                 | Command::Status
@@ -43,6 +47,17 @@ fn is_allowed(command: Option<&Command>) -> bool {
                 | Command::List { .. }
                 | Command::Recall { .. }
                 | Command::Remember { .. }
+                | Command::Review { .. }
+                | Command::Grant { .. }
+                | Command::Candidates { .. }
+                | Command::RunLog { .. }
+                | Command::Retitle { .. }
+                | Command::RetitleMany { .. }
+                | Command::Import { .. }
+                | Command::Export { .. }
+                | Command::Backup { .. }
+                | Command::Bench { .. }
+                | Command::ShareImport { .. }
                 | Command::Update { .. }
                 | Command::Forget { .. }
                 | Command::Purge { .. }
@@ -54,14 +69,34 @@ fn is_allowed(command: Option<&Command>) -> bool {
                 | Command::Chain { .. }
                 | Command::Attach { .. }
                 | Command::Tree { .. }
+                | Command::TreeDeepen { .. }
+                | Command::TreeCure { .. }
+                | Command::TreeFloat { .. }
+                | Command::Split { .. }
+                | Command::Defrag { .. }
+                | Command::Repack
+                | Command::Resort { .. }
+                | Command::Audit { .. }
+                | Command::Witness { .. }
+                | Command::RootCreate { .. }
+                | Command::BookMaterial { .. }
+                | Command::PortraitMaterial { .. }
+                | Command::Share { .. }
+                | Command::Snapshot {
+                    cmd: SnapshotCmd::Create { .. }
+                        | SnapshotCmd::List
+                        | SnapshotCmd::ResumeSync { .. },
+                }
+                | Command::Metadata {
+                    command: crate::metadata::Command::Status,
+                }
+                | Command::Prompt
+                | Command::Passport
                 | Command::History { .. }
                 | Command::Diary { .. }
                 | Command::DiarySearch { .. }
                 | Command::DiaryFragment { .. }
-                | Command::Taxonomy {
-                    list: true,
-                    ensure: None
-                }
+                | Command::Taxonomy { .. }
                 | Command::Extract { .. }
         )
     )
@@ -187,6 +222,100 @@ mod tests {
             Ok(Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))?.command)
         };
         for args in [
+            vec!["import", "input.json"],
+            vec!["retitle-many", "titles.json"],
+            vec!["bench", "run", "eval.jsonl"],
+            vec![
+                "bench",
+                "run",
+                "eval.jsonl",
+                "--save",
+                "report.json",
+                "--baseline",
+                "baseline.json",
+            ],
+            vec!["bench", "mine", "--out", "eval.jsonl"],
+            vec!["share-import", "share.txt"],
+            vec!["share", "--root", "root", "--out", "share.txt"],
+            vec!["export", "export.json"],
+            vec!["backup", "backup.db"],
+            vec!["resort", "--status"],
+            vec!["resort", "--reset"],
+            vec!["resort", "--threshold", "20"],
+            vec!["resort", "--spec", "{}", "--go"],
+            vec!["snapshot", "create"],
+            vec!["snapshot", "list"],
+            vec!["snapshot", "resume-sync", "--reviewed-revision", "revision"],
+            vec!["share-import", "share.txt", "--go", "--force"],
+            vec!["prompt"],
+            vec!["passport"],
+            vec!["review", "--due"],
+            vec!["review", "entry", "--history"],
+            vec!["review", "entry", "--draft"],
+            vec![
+                "review",
+                "entry",
+                "--confirm",
+                "--input",
+                "{}",
+                "--approval",
+                "event",
+            ],
+            vec![
+                "review",
+                "entry",
+                "--revoke",
+                "--reason",
+                "obsolete",
+                "--expected-memory-revision",
+                "revision",
+            ],
+            vec![
+                "review",
+                "entry",
+                "--review-at",
+                "2026-11-05T00:00:00.000Z",
+                "--expected-memory-revision",
+                "revision",
+            ],
+            vec![
+                "review",
+                "entry",
+                "--clear",
+                "review_at",
+                "--expected-memory-revision",
+                "revision",
+            ],
+            vec!["grant", "create", "--root", "root", "--label", "reader"],
+            vec!["grant", "list"],
+            vec!["grant", "revoke", "grant-id"],
+            vec!["candidates", "context"],
+            vec!["run-log", "entry", "--status", "ok"],
+            vec!["retitle", "entry", "--title", "new"],
+            vec!["sync-reset"],
+            vec!["tree-deepen"],
+            vec!["tree-deepen", "--auto"],
+            vec!["tree-deepen", "--root", "root", "--go", "--titles", "[]"],
+            vec!["tree-cure"],
+            vec!["tree-cure", "--auto"],
+            vec!["tree-cure", "--id", "entry", "--parent", "root"],
+            vec!["tree-float"],
+            vec!["tree-float", "--go"],
+            vec!["split", "entry"],
+            vec!["split", "entry", "--go", "--spec", "{}"],
+            vec!["defrag"],
+            vec!["repack"],
+            vec!["audit"],
+            vec!["witness", "--verify"],
+            vec!["root-create", "root"],
+            vec!["root-create", "root", "--yes"],
+            vec!["book-material", "root"],
+            vec!["portrait-material"],
+            vec!["share", "--root", "root"],
+            vec!["share", "--root", "root", "--raw"],
+            vec!["metadata", "status"],
+            vec!["taxonomy"],
+            vec!["taxonomy", "--ensure", "root"],
             vec!["status"],
             vec!["doctor"],
             vec!["doctor", "--remote"],
@@ -218,6 +347,20 @@ mod tests {
             vec!["query-log", "mark", "abcd1234", "--good"],
         ] {
             let parsed = command(&args)?;
+            if let Some(command) = parsed.as_ref() {
+                match command {
+                    Command::Grant { .. } => assert!(crate::gates::is_write_command(command)),
+                    Command::Review { args } => {
+                        assert_eq!(crate::gates::is_write_command_fine(command), args.writes())
+                    }
+                    Command::Backup { .. } | Command::Snapshot { .. } => {
+                        assert!(crate::rpc_serve::is_exclusive(
+                            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>()
+                        ))
+                    }
+                    _ => {}
+                }
+            }
             if !is_allowed(parsed.as_ref()) {
                 return Err(anyhow::anyhow!("executor rejected pure command {args:?}"));
             }
@@ -228,6 +371,21 @@ mod tests {
     #[test]
     fn installers_and_lifecycle_commands_are_not_business_execution() -> anyhow::Result<()> {
         for args in [
+            vec!["snapshot", "restore", "snapshot-id", "--confirm"],
+            vec!["snapshot", "recover", "--confirm"],
+            vec!["metadata", "enable"],
+            vec!["metadata", "disable"],
+            vec!["agent-config"],
+            vec!["agent-config", "--set", "readonly=false"],
+            vec!["config"],
+            vec!["session", "list"],
+            vec!["session", "revoke", "session-id"],
+            vec!["plugin", "list"],
+            vec!["plugin", "test", "post-sync"],
+            vec!["super-reset"],
+            vec!["model", "configure", "profile.json"],
+            vec!["model", "switch", "profile"],
+            vec!["model", "resume"],
             vec!["model", "install"],
             vec!["model", "install-engines"],
             vec!["model", "uninstall"],
@@ -235,6 +393,8 @@ mod tests {
             vec!["doctor", "--fix"],
             vec!["doctor", "--check-update"],
             vec!["runtime", "stop"],
+            vec!["runtime", "install"],
+            vec!["inject"],
             vec!["login"],
             vec!["logout"],
         ] {
