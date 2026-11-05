@@ -4,11 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 // Publishes crates/protocol (respire-protocol) of this repository to crates.io.
-// SDK binding publication remains owned by risense-ai/respire-core; the legacy
-// CLI publisher is retired.
+// Native SDK archives use private respire-core release assets, never crates.io.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const selection = process.argv[2];
-if (selection === 'sdk') throw new Error('SDK crate publication moved to risense-ai/respire-core; no registry request or publication was attempted.');
+if (selection === 'sdk') throw new Error('SDK registry publication is disabled; use private respire-core release assets. No registry request was attempted.');
 if (selection !== 'protocol') throw new Error('Select protocol');
 const path = join(root, 'crates', 'protocol', 'Cargo.toml');
 const manifest = readFileSync(path, 'utf8');

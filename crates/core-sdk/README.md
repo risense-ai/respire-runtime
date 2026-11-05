@@ -2,6 +2,11 @@
 
 Safe Rust caller for the Core static library. Consumers link a target-specific binary SDK through the C ABI.
 
+This binding is a workspace/path dependency, not a crates.io package. Native SDK
+archives are published only as private `risense-ai/respire-core` release assets.
+Build preparation downloads the exact locked release and verifies its manifest
+and payload hashes before linking; it does not require `CARGO_REGISTRY_TOKEN`.
+
 ```mermaid
 flowchart LR
   App[Application] --> Binding[Safe Rust binding]

@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const [selection, destination] = process.argv.slice(2);
+if (selection === 'sdk') throw new Error('SDK registry packaging is disabled; use pinned private respire-core release assets.');
 if (!['protocol', 'sdk'].includes(selection) || !destination) throw new Error('Usage: verify-interface-crate.mjs <protocol|sdk> <new-output>');
 const output = resolve(destination);
 if (existsSync(output)) throw new Error('Use a fresh crate verification directory');
