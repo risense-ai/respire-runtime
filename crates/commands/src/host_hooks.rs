@@ -164,7 +164,41 @@ pub fn install(hooks: HostHooks) -> bool {
 
 /// Whether runtime maintenance fences background mutations.
 pub fn background_paused() -> bool {
-    BACKGROUND_PAUSED.get().map(|hook| hook()).unwrap_or(false)
+    if BACKGROUND_PAUSED.get().is_some_and(|hook| hook()) {
+        return true;
+    }
+    let Ok(roots) = respire_app::service::resolved_roots() else {
+        return true;
+    };
+    persisted_maintenance(&roots.installation_root)
+}
+
+fn persisted_maintenance(root: &std::path::Path) -> bool {
+    // A malformed or unreadable marker still fences the standalone worker.
+    !matches!(
+        std::fs::symlink_metadata(root.join("runtime/autostart/maintenance.json")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    #[test]
+    fn persisted_marker_fences_without_a_host_hook() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        assert!(!super::persisted_maintenance(root.path()));
+        let marker = root.path().join("runtime/autostart/maintenance.json");
+        let parent = marker
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("marker parent missing"))?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(&marker, b"malformed")?;
+        assert!(super::persisted_maintenance(root.path()));
+        std::fs::remove_file(&marker)?;
+        std::fs::create_dir(&marker)?;
+        assert!(super::persisted_maintenance(root.path()));
+        Ok(())
+    }
 }
 
 /// Fail closed before touching the library while host maintenance is pending.
