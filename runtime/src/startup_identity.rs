@@ -1215,6 +1215,11 @@ mod tests {
 
     #[test]
     fn managed_and_maintenance_grants_bind_exact_control_files() -> Result<()> {
+        // Re-enter only this test: environment and consumed startup state stay process-local.
+        if let Ok(selection) = std::env::var("RSRS_TEST_OFFLINE_SELECTION") {
+            return offline_read_child(&selection)
+                .map_err(|_| anyhow::anyhow!("offline-read diagnostic stage failed"));
+        }
         let (context, mut grant) = fixture();
         let id = hash(
             format!(
@@ -1327,6 +1332,146 @@ mod tests {
         let changed = serde_json::to_vec(&marker)?;
         grant.maintenance.as_mut().context("maintenance binding is missing")?.marker_sha256 = hash(&changed);
         assert!(validate_control_for_mode(Some(&grant), &context, Some(&registration), Some(&bytes), Some(&marker), Some(&changed), true).is_err());
+        offline_read_registered_profiles()
+            .map_err(|_| anyhow::anyhow!("offline-read registered-profile diagnostic failed"))?;
+        Ok(())
+    }
+
+    fn offline_read_child(selection: &str) -> Result<()> {
+        use respire_protocol::metadata_control::HostOfflineRead;
+        let kind = HostOfflineRead::SnapshotPreflight;
+        eprintln!("offline-read stage=input");
+        let mut input = std::io::stdin().lock();
+        let mut size = [0; 4];
+        input.read_exact(&mut size)?;
+        let size = u32::from_be_bytes(size) as usize;
+        anyhow::ensure!(size > 0 && size <= 64 * 1024, "invalid diagnostic frame");
+        let mut bytes = vec![0; size];
+        input.read_exact(&mut bytes)?;
+        let grant: LaunchGrant = serde_json::from_slice(&bytes)?;
+        eprintln!("offline-read stage=config");
+        respire_app::service::validate_client_config()?;
+        eprintln!("offline-read stage=context");
+        let context = offline_read_context(grant.port, kind)?;
+        let root = PathBuf::from(std::env::var_os("RSRS_DATA_DIR").context("missing test root")?);
+        let expected = match selection {
+            "main" => root.clone(),
+            "secondary" => root.join("accounts/secondary profile"),
+            _ => anyhow::bail!("invalid diagnostic selection"),
+        };
+        let root_eq = context.root == root;
+        let profile_eq = context.profile == expected && grant.profile == expected;
+        let account_eq = context.account_id == hash(expected.display().to_string().as_bytes());
+        let generation_eq = context.sync_generation == 0;
+        eprintln!("offline-read root_eq={root_eq} profile_eq={profile_eq} account_eq={account_eq} generation_eq={generation_eq}");
+        anyhow::ensure!(root_eq && profile_eq && account_eq && generation_eq,
+            "diagnostic context comparison failed");
+        eprintln!("offline-read stage=grant");
+        validate_grant(&grant, &context, true, &grant.nonce, now_ms()?)?;
+        let mut changed = grant.clone();
+        changed.profile = if selection == "main" { root.join("accounts/secondary profile") } else { root };
+        anyhow::ensure!(validate_grant(&changed, &context, true, &grant.nonce, now_ms()?).is_err(),
+            "changed profile accepted");
+        eprintln!("offline-read stage=authority");
+        verify_offline_read_authority(&grant, &context, kind)?;
+        changed = grant.clone();
+        changed.registration_sha256 = Some("0".repeat(64));
+        anyhow::ensure!(verify_offline_read_authority(&changed, &context, kind).is_err(),
+            "changed registration accepted");
+        let binding = respire_protocol::ControlBinding {
+            installation_root: grant.installation_root.clone(), profile: grant.profile.clone(),
+            launch_id: grant.instance_id.clone(), expected_account_id: None,
+        };
+        eprintln!("offline-read stage=consume");
+        authorize_offline_read(grant, kind)?;
+        eprintln!("offline-read stage=binding");
+        verify_offline_read_binding(&binding, kind)?;
+        eprintln!("offline-read stage=complete");
+        writeln!(std::io::stdout().lock(), "\noffline-read complete")?;
+        Ok(())
+    }
+
+    fn offline_read_registered_profiles() -> Result<()> {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let suffix = if cfg!(unix) { "data spaces % $ \" \\" } else { "data spaces % and $" };
+        let root = std::env::temp_dir().join(format!("offline-read-{} {suffix}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("accounts/secondary profile"))?;
+        let root = root.canonicalize()?;
+        let result = (|| -> Result<()> {
+            let control = root.join("runtime/autostart");
+            fs::create_dir_all(&control)?;
+            let id = hash(format!("respire-runtime-v1\0{}\0offline-test-owner", root.display()).as_bytes());
+            let registration = serde_json::to_vec_pretty(&json!({
+                "schema": 1, "platform": std::env::consts::OS,
+                "installation": root, "owner": "offline-test-owner", "id": &id[..24],
+                "enabled": true, "manually_stopped": false, "maintenance": false,
+                "environment": {"RSRS_DATA_DIR": root, "RSRS_RPC_PORT": "19169"}
+            }))?;
+            fs::write(control.join("registration.json"), &registration)?;
+            let image = std::env::current_exe()?.canonicalize()?;
+            let image_sha256 = hash_file(&image)?;
+            for selection in ["main", "secondary"] {
+                let profile = if selection == "main" { root.clone() } else { root.join("accounts/secondary profile") };
+                // Main preflight runs before config writes the secondary selection.
+                let config = if selection == "main" { json!({}) } else { json!({"data_dir": profile}) };
+                fs::write(root.join("client.json"), serde_json::to_vec(&config)?)?;
+                let (_, mut grant) = fixture();
+                grant.installation_root = root.clone();
+                grant.installation_id = hash(root.display().to_string().as_bytes());
+                grant.account_id = hash(profile.display().to_string().as_bytes());
+                grant.profile = profile;
+                grant.image_path = image.clone();
+                grant.image_sha256 = image_sha256.clone();
+                grant.supervisor_pid = std::process::id();
+                grant.supervisor_birth = process_birth(grant.supervisor_pid)?.context("missing test parent")?;
+                grant.managed_id = Some(id[..24].to_owned());
+                grant.registration_sha256 = Some(hash(&registration));
+                grant.issued_at_ms = now_ms()?;
+                grant.expires_at_ms = grant.issued_at_ms + 60_000;
+                let bytes = serde_json::to_vec(&grant)?;
+                let mut child = Command::new(&image)
+                    .args(["--exact", "startup_identity::tests::managed_and_maintenance_grants_bind_exact_control_files", "--nocapture"])
+                    .env("RSRS_TEST_OFFLINE_SELECTION", selection)
+                    .env("RSRS_DATA_DIR", &root).env("HOME", &root).env("USERPROFILE", &root)
+                    .env_remove("RSRS_DEFAULT_DATA_DIR").env_remove("RSRS_M3_DIR")
+                    .env_remove("RSRS_CLIENT_ONLY").env_remove("RSRS_NO_AUTOSTART")
+                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                    .spawn()?;
+                let outcome = (|| -> Result<()> {
+                    let mut input = child.stdin.take().context("missing diagnostic pipe")?;
+                    input.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+                    input.write_all(&bytes)?;
+                    input.flush()?;
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    loop {
+                        if let Some(status) = child.try_wait()? {
+                            anyhow::ensure!(status.success(), "diagnostic child failed");
+                            break;
+                        }
+                        anyhow::ensure!(Instant::now() < deadline, "diagnostic child timed out");
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let mut output = String::new();
+                    child.stdout.take().context("missing diagnostic output")?
+                        .take(4097).read_to_string(&mut output)?;
+                    anyhow::ensure!(output.len() <= 4096 && output.contains("\noffline-read complete\n"),
+                        "diagnostic child did not execute the selected test");
+                    // Retain the private input owner until authorization and binding finish.
+                    drop(input);
+                    Ok(())
+                })();
+                if outcome.is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                outcome?;
+            }
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result?;
+        cleanup?;
         Ok(())
     }
 
