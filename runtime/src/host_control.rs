@@ -35,7 +35,8 @@ pub(crate) fn run() -> Result<i32> {
             response.code = Some("control_outcome_unknown".into());
             response.error = Some("control deadline or parent revocation; query the same operation ID before retrying".into());
             response.envelope = Some(ResultEnvelope::new(
-                if response.operation_id.is_some() { "keygen" } else { "memory-revision" },
+                response.envelope.as_ref().map(|envelope| envelope.command.as_str())
+                    .unwrap_or(if response.operation_id.is_some() { "keygen" } else { "memory-revision" }),
                 Status::Fail, serde_json::json!({"outcome":"unknown"}), vec![
                     Item::new("control_ready", Status::Skip, "unknown"),
                     Item::new("store_ready", Status::Skip, "false"),
@@ -68,7 +69,8 @@ fn execute(progress: &Mutex<RpcResponse<ResultEnvelope>>, events: &mpsc::SyncSen
         let diagnostic = response.error.take().unwrap_or_else(|| message.to_owned());
         response.error = Some(diagnostic.clone());
         let mut envelope = ResultEnvelope::new(
-            if response.operation_id.is_some() { "keygen" } else { "memory-revision" },
+            response.envelope.as_ref().map(|envelope| envelope.command.as_str())
+                .unwrap_or(if response.operation_id.is_some() { "keygen" } else { "memory-revision" }),
             Status::Fail, serde_json::json!({}), Vec::new(),
         );
         envelope.errors.push(diagnostic);
@@ -97,6 +99,51 @@ fn receive_and_execute(
     let request: RpcRequest = read_frame()
         .map_err(|_| ("invalid_request", "invalid host control RPC frame"))?;
     response.id = request.id.clone();
+    use respire_protocol::host_control::{HostAuthAccountOutcome, HOST_AUTH_REGISTER_METHOD,
+        HOST_AUTH_LOGIN_METHOD, HOST_AUTH_ACCOUNT_RESULT_METHOD, HOST_AUTH_ACCOUNT_COMPLETE_METHOD,
+        HOST_AUTH_ACCOUNT_ROLLBACK_METHOD};
+    if [HOST_AUTH_REGISTER_METHOD, HOST_AUTH_LOGIN_METHOD, HOST_AUTH_ACCOUNT_RESULT_METHOD,
+        HOST_AUTH_ACCOUNT_COMPLETE_METHOD, HOST_AUTH_ACCOUNT_ROLLBACK_METHOD]
+        .contains(&request.method.as_str()) {
+        let account = crate::auth_control::AccountRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid account control request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("auth-account", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        if account.is_completion() {
+            crate::startup_identity::authorize_account_completion(grant)
+        } else {
+            crate::startup_identity::authorize_auth_control(grant)
+        }.map_err(|_| ("unauthorized", "account control launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "account control parent watch failed"))?;
+        let ownership = if account.is_completion() { None } else {
+            Some(crate::startup_identity::acquire_auth_ownership(account.binding(), account.identity())
+                .map_err(|_| ("auth_ownership_unavailable", "account control library ownership unavailable"))?)
+        };
+        crate::startup_identity::verify_auth_control_binding(account.binding(), account.identity())
+            .map_err(|_| ("scope_mismatch", "account control identity does not match the consumed grant"))?;
+        *control_ready = true;
+        let result = account.execute(&request, ownership).map_err(|failure| {
+            response.error = Some(format!("{failure:#}"));
+            ("account_outcome_unknown", "query the same account operation before retrying")
+        })?;
+        response.ok = matches!(result.outcome,
+            HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Committed);
+        response.exit = if response.ok { 0 } else { 2 };
+        response.code = match result.outcome {
+            HostAuthAccountOutcome::Unknown => Some("account_outcome_unknown".into()),
+            HostAuthAccountOutcome::RolledBack => Some("account_rolled_back".into()),
+            _ => None,
+        };
+        response.envelope = Some(ResultEnvelope::new("auth-account",
+            if response.ok { Status::Ok } else { Status::Fail },
+            serde_json::to_value(result).map_err(|_| ("account_outcome_unknown", "account receipt encoding failed"))?,
+            Vec::new()));
+        return Ok(());
+    }
     let auth = request.method == HOST_AUTH_KEYGEN_METHOD || request.method == HOST_AUTH_RESULT_METHOD;
     if auth {
         let params = validate_auth_request(&request)?;
@@ -129,9 +176,13 @@ fn receive_and_execute(
             serde_json::to_value(result).map_err(|_| ("auth_outcome_unknown", "auth result encoding failed"))?, Vec::new()));
         return Ok(());
     }
-    crate::startup_identity::authorize_control(grant)
-        .map_err(|_| ("unauthorized", "host control launch authorization failed"))?;
     let params = validate_request(&request)?;
+    let model_plan = request.method == HostControlOperation::ModelInstallPlan.method();
+    if model_plan {
+        crate::startup_identity::authorize_model_control(grant)
+    } else {
+        crate::startup_identity::authorize_control(grant)
+    }.map_err(|_| ("unauthorized", "host control launch authorization failed"))?;
     // Read both frames before letting the watcher own stdin. No further request
     // or argv dispatch is accepted; EOF/extra bytes revoke this read-only child.
     respire_spawn::watch_control_parent()
@@ -139,6 +190,20 @@ fn receive_and_execute(
     crate::startup_identity::verify_control_binding(&params.binding)
         .map_err(|_| ("scope_mismatch", "host control binding does not match consumed grant"))?;
     *control_ready = true;
+    if model_plan {
+        let plan = respire_commands::model_install::model_install_plan()
+            .map_err(|_| ("model_plan_unavailable", "selected model installation plan unavailable"))?;
+        crate::startup_identity::verify_control_binding(&params.binding)
+            .map_err(|_| ("scope_mismatch", "host control identity changed during model planning"))?;
+        let mut envelope = ResultEnvelope::new("model-install-plan", Status::Ok,
+            serde_json::json!({"complete":false}), Vec::new());
+        envelope.details = serde_json::to_value(plan)
+            .map_err(|_| ("model_plan_unavailable", "model installation plan encoding failed"))?;
+        response.envelope = Some(envelope);
+        response.ok = true;
+        response.exit = 0;
+        return Ok(());
+    }
     let revision = match respire_app::service::memory_revision() {
         Ok(revision) => revision,
         Err(failure) => {
@@ -207,7 +272,8 @@ pub(crate) fn validate_request(
     }
     if !uuid::Uuid::parse_str(&request.id)
         .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == request.id)
-        || request.method != HostControlOperation::MemoryRevision.method()
+        || ![HostControlOperation::MemoryRevision.method(), HostControlOperation::ModelInstallPlan.method()]
+            .contains(&request.method.as_str())
         || request.args.len() != 1
         || request.scope.is_some()
         || request.operation_id.is_some()

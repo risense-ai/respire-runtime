@@ -188,6 +188,18 @@ pub struct AssetsStatus {
     pub backend_load: Option<BackendLoadStatus>,
 }
 
+impl AssetsStatus {
+    /// An installation plan is not file inspection or backend readiness evidence.
+    pub fn installation_plan(assets: Vec<AssetRequirement>) -> Self {
+        Self {
+            complete: false,
+            missing: assets.clone(),
+            assets,
+            backend_load: None,
+        }
+    }
+}
+
 /// File-only checks may omit this block; wire consumers enforce readiness separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

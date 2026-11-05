@@ -46,12 +46,14 @@ pub struct HostControlMaintenanceBinding {
 #[serde(rename_all = "snake_case")]
 pub enum HostControlOperation {
     MemoryRevision,
+    ModelInstallPlan,
 }
 
 impl HostControlOperation {
     pub fn method(self) -> &'static str {
         match self {
             Self::MemoryRevision => "control.memory_revision",
+            Self::ModelInstallPlan => "control.model_install_plan",
         }
     }
 }
@@ -97,6 +99,76 @@ pub struct HostAuthKeygenParams {
 pub const HOST_AUTH_SCHEMA_V: u32 = 1;
 pub const HOST_AUTH_KEYGEN_METHOD: &str = "control.auth.keygen";
 pub const HOST_AUTH_RESULT_METHOD: &str = "control.auth.result";
+
+pub const HOST_AUTH_REGISTER_METHOD: &str = "control.auth.register";
+pub const HOST_AUTH_LOGIN_METHOD: &str = "control.auth.login";
+pub const HOST_AUTH_ACCOUNT_RESULT_METHOD: &str = "control.auth.account_result";
+pub const HOST_AUTH_ACCOUNT_COMPLETE_METHOD: &str = "control.auth.account_complete";
+pub const HOST_AUTH_ACCOUNT_ROLLBACK_METHOD: &str = "control.auth.account_rollback";
+
+/// Secrets travel only in the inherited request frame. Never log this value.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthRegisterParams {
+    pub schema_version: u32,
+    pub binding: ControlBinding,
+    pub identity: HostAuthIdentity,
+    pub addr: String,
+    pub user: String,
+    pub password: String,
+    pub super_password: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostAuthAuthorization {
+    Password { password: String, totp: Option<String> },
+    Browser { token: String, session_id: Option<String> },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginParams {
+    pub schema_version: u32,
+    pub binding: ControlBinding,
+    pub identity: HostAuthIdentity,
+    pub addr: String,
+    pub user: String,
+    pub authorization: HostAuthAuthorization,
+    pub super_password: String,
+}
+
+/// Query/finalization uses the original outer operation ID and idempotency key.
+/// Identity describes the current selected profile, not a caller-supplied proof.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthAccountParams {
+    pub schema_version: u32,
+    pub binding: ControlBinding,
+    pub identity: HostAuthIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAuthAccountOutcome {
+    AwaitingVerification,
+    Committed,
+    RolledBack,
+    Unknown,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthAccountResult {
+    pub operation_id: String,
+    pub outcome: HostAuthAccountOutcome,
+    pub source_profile: PathBuf,
+    pub target_profile: Option<PathBuf>,
+    pub account_id: Option<String>,
+    pub session_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub super_password: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use sha2::Digest;
 use respire_protocol::{HostAuthIdentity, HostAuthOutcome, HostAuthResult};
+use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
+    HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams};
 
 #[derive(Serialize, Deserialize)]
 struct Recovery {
@@ -19,6 +21,8 @@ struct Recovery {
     directory_existed: bool,
     #[serde(default)]
     operation_id: Option<String>,
+    #[serde(default)]
+    owns_config: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -31,7 +35,23 @@ struct Journal {
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AuthPhase { Admitted, Prepared, Committed, RolledBack }
+enum AuthPhase { Admitted, RemotePending, RemoteUnknown, Authorized, Prepared, AwaitingVerification, RollingBack, Committed, RolledBack }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountOperation {
+    register: bool,
+    addr: String,
+    user: String,
+    source_identity: HostAuthIdentity,
+    target: Option<PathBuf>,
+    authorization: Option<Value>,
+    vault: Option<Value>,
+    #[serde(default)]
+    published_vault: bool,
+    #[serde(default)]
+    vault_pending: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +67,8 @@ struct AuthRecord {
     alias: String,
     backend: Option<String>,
     phase: AuthPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<AccountOperation>,
 }
 
 fn digest(bytes: &[u8]) -> String { hex::encode(sha2::Sha256::digest(bytes)) }
@@ -142,7 +164,7 @@ mod tests {
                 fingerprint: keygen_fingerprint(&canonical_root, &canonical_root, false)?,
                 root: canonical_root.clone(), profile: canonical_root, original_sha256: None,
                 candidate: None, candidate_sha256: None, alias: "login-retained".into(), backend: None,
-                phase: AuthPhase::RolledBack,
+                phase: AuthPhase::RolledBack, account: None,
             }] })?;
             let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":"completed-account","token":"new-token"}), code.clone(), vault, None)?;
             prepared.commit()?;
@@ -169,11 +191,11 @@ mod tests {
         let current_config = br#"{"custom":"changed-outside-auth"}"#;
         let mut journal = Journal { schema_version: 2, active: Some(Recovery {
             directory: root.clone(), original: None, config: Some(previous_config.to_vec()), alias: alias.clone(),
-            backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()),
+            backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()), owns_config: false,
         }), operations: vec![AuthRecord {
             operation_id: id.clone(), idempotency_key: id.clone(), fingerprint: keygen_fingerprint(&root, &root, false)?,
             root: root.clone(), profile: root.clone(), original_sha256: None, candidate: None, candidate_sha256: None,
-            alias, backend: None, phase: AuthPhase::Admitted,
+            alias, backend: None, phase: AuthPhase::Admitted, account: None,
         }] };
         save_journal(&journal)?;
         std::fs::write(crate::service::client_config_path(), current_config)?;
@@ -193,17 +215,58 @@ mod tests {
         // Decode an actual legacy record, then preserve terminal auth receipts across login completion.
         let active = Recovery { directory: root.clone(), original: None, config: None,
             alias: format!("login-{}", uuid::Uuid::new_v4().simple()), backends: Vec::new(),
-            pass_backends: Vec::new(), directory_existed: true, operation_id: None };
+            pass_backends: Vec::new(), directory_existed: true, operation_id: None, owns_config: false };
         let mut legacy = serde_json::to_value(&active)?;
         legacy.as_object_mut().context("legacy recovery must be an object")?.remove("operation_id");
         private_write(&recovery_path(), &serde_json::to_vec(&legacy)?)?;
         assert!(load_journal()?.active.is_some());
         journal.active = Some(active);
         save_journal(&journal)?;
+        drop(ownership);
         recover_interrupted()?;
         assert!(!crate::service::client_config_path().exists(), "legacy login did not restore its absent configuration");
         assert!(!recovery_pending());
         assert_eq!(load_journal()?.operations.len(), 1);
+
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        let account_id = uuid::Uuid::new_v4().to_string();
+        let (mut account_journal, account_index, fresh) = admit_account(&ownership, &HostAuthIdentity::Absent,
+            &account_id, &account_id, true, "https://never-contact.invalid", "receipt-user")?;
+        assert!(fresh);
+        assert!(!admit_account(&ownership, &HostAuthIdentity::Absent, &account_id, &account_id,
+            true, "https://never-contact.invalid", "receipt-user")?.2);
+        assert!(admit_account(&ownership, &HostAuthIdentity::Absent, &account_id, &account_id,
+            true, "https://other.invalid", "receipt-user").is_err());
+        account_journal.operations[account_index].phase = AuthPhase::RemotePending;
+        save_journal(&account_journal)?;
+        let params = HostAuthRegisterParams {
+            schema_version: 1, binding: respire_protocol::ControlBinding {
+                installation_root: root.clone(), profile: root.clone(), launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None,
+            }, identity: HostAuthIdentity::Absent, addr: "https://never-contact.invalid".into(), user: "receipt-user".into(),
+            password: "must-not-be-durable".into(), super_password: Some("must-not-be-durable-either".into()),
+        };
+        // A replay must return before either network access or credential creation.
+        assert_eq!(control_register(&ownership, &account_id, &account_id, &params)?.outcome, HostAuthAccountOutcome::Unknown);
+        ownership.recover(&HostAuthIdentity::Absent)?;
+        drop(ownership);
+        assert!(recover_interrupted().is_err(), "account admission entered keygen recovery");
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        assert_eq!(control_account_result(&ownership, &HostAuthIdentity::Absent, &account_id, &account_id)?.outcome,
+            HostAuthAccountOutcome::Unknown);
+        assert!(control_account_result(&ownership, &HostAuthIdentity::Absent, &account_id, "wrong-key").is_err());
+        assert!(!String::from_utf8(std::fs::read(recovery_path())?)?.contains("must-not-be-durable"));
+        account_journal.operations[account_index].phase = AuthPhase::Admitted;
+        let owned_config = br#"{"custom":"account-before"}"#;
+        let active = account_journal.active.as_mut().context("account recovery is missing")?;
+        active.owns_config = true;
+        active.config = Some(owned_config.to_vec());
+        save_journal(&account_journal)?;
+        std::fs::write(crate::service::client_config_path(), serde_json::to_vec(&json!({"custom":"account-before","data_dir":root}))?)?;
+        assert_eq!(control_account_rollback(ownership, &HostAuthIdentity::Absent, &account_id, &account_id)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+        assert_eq!(std::fs::read(crate::service::client_config_path())?, owned_config);
+        assert!(!recovery_pending());
+        assert_eq!(load_journal()?.operations.len(), 2);
 
         keygen_overwrite_guard(&root, None, false)?;
         let database_path = crate::service::database_path(&root)?;
@@ -241,12 +304,12 @@ mod tests {
         let identity = HostAuthIdentity::Unbound { operation_id: id.clone(), session_sha256: digest(&candidate) };
         let journal = Journal { schema_version: 2, active: Some(Recovery {
             directory: root.clone(), original: None, config: None, alias: alias.clone(),
-            backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()),
+            backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()), owns_config: false,
         }), operations: vec![AuthRecord {
             operation_id: id.clone(), idempotency_key: id, fingerprint: keygen_fingerprint(&root, &root, false)?,
             root: root.clone(), profile: root.clone(), original_sha256: None,
             candidate: Some(candidate.clone()), candidate_sha256: Some(digest(&candidate)),
-            alias, backend: Some("unavailable-test-backend".into()), phase: AuthPhase::Prepared,
+            alias, backend: Some("unavailable-test-backend".into()), phase: AuthPhase::Prepared, account: None,
         }] };
         save_journal(&journal)?;
         std::fs::write(root.join("session.json"), &candidate)?;
@@ -260,6 +323,25 @@ mod tests {
 
 fn recovery_path() -> PathBuf {
     crate::service::client_config_path().with_file_name(".login-recovery.json")
+}
+
+fn auth_journal_lock() -> Result<std::fs::File> {
+    let path = recovery_path().with_extension("json.lock");
+    std::fs::create_dir_all(path.parent().context("auth recovery root is missing")?)?;
+    ensure!(!std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
+        "auth recovery lock must not be a symbolic link");
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                ensure!(std::time::Instant::now() < deadline, "auth recovery journal is busy");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
 }
 
 fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -295,7 +377,22 @@ pub fn recovery_pending() -> bool {
 }
 
 pub fn auth_recovery_pending() -> Result<bool> {
-    Ok(load_journal()?.active.as_ref().is_some_and(|active| active.operation_id.is_some()))
+    let journal = load_journal()?;
+    let Some(active) = journal.active.as_ref() else { return Ok(false); };
+    let Some(id) = active.operation_id.as_deref() else { return Ok(false); };
+    let record = journal.operations.iter().find(|record| record.operation_id == id)
+        .context("active auth recovery has no admission receipt")?;
+    if let Some(account) = &record.account {
+        if record.phase == AuthPhase::AwaitingVerification {
+            ensure!(record.root == crate::service::main_data_dir().canonicalize()?
+                && account.target.as_deref() == Some(active.directory.as_path())
+                && active.directory.canonicalize()? == crate::service::data_dir().canonicalize()?
+                && active.alias == record.alias, "runtime verification does not own the active account candidate");
+            verify_account_candidate(record)?;
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Called by the host under its takeover lock, after stopping the interrupted runtime.
@@ -303,9 +400,13 @@ pub fn auth_recovery_pending() -> Result<bool> {
 /// migration path, which proves that the old and new wraps contain the same URK.
 pub fn recover_interrupted() -> Result<()> {
     crate::service::require_profile_change_host()?;
+    let _journal_lock = auth_journal_lock()?;
     let mut journal = load_journal()?;
     let Some(record) = &journal.active else { return Ok(()); };
     if record.operation_id.is_some() {
+        ensure!(!journal.operations.iter().any(|operation|
+            Some(operation.operation_id.as_str()) == record.operation_id.as_deref() && operation.account.is_some()),
+            "account operation requires its original receipt; remote effects must not be automatically retried or rolled back");
         let root = crate::service::main_data_dir().canonicalize()?;
         let profile = crate::service::data_dir().canonicalize()?;
         return recover_keygen(&mut journal, &root, &profile);
@@ -315,13 +416,25 @@ pub fn recover_interrupted() -> Result<()> {
 }
 
 fn rollback_record(record: &Recovery) -> Result<()> {
+    rollback_record_inner(record, true)
+}
+
+fn quarantine_new_profile(record: &Recovery) -> Result<()> {
+    if !record.directory_existed && record.directory.exists() {
+        let parent = record.directory.parent().context("recovery directory has no parent")?;
+        std::fs::rename(&record.directory, parent.join(format!(".failed-{}", record.alias)))?;
+    }
+    Ok(())
+}
+
+fn rollback_record_inner(record: &Recovery, quarantine: bool) -> Result<()> {
     ensure!(record.alias.starts_with("login-") && record.alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'), "invalid recovery credential alias");
     ensure!(record.directory.exists() || record.original.is_none(), "original account directory is missing; retain the recovery record");
     if record.directory.exists() {
         read_original(&record.directory)?;
         restore(&record.directory.join("session.json"), record.original.as_deref())?;
     }
-    if record.operation_id.is_none() {
+    if record.operation_id.is_none() || record.owns_config {
         restore(&crate::service::client_config_path(), record.config.as_deref())?;
     }
     for backend in &record.backends {
@@ -330,10 +443,7 @@ fn rollback_record(record: &Recovery) -> Result<()> {
     for backend in &record.pass_backends {
         crate::keystore::remove_imported(&record.alias, "pass", backend)?;
     }
-    if !record.directory_existed && record.directory.exists() {
-        let parent = record.directory.parent().context("recovery directory has no parent")?;
-        std::fs::rename(&record.directory, parent.join(format!(".failed-{}", record.alias)))?;
-    }
+    if quarantine { quarantine_new_profile(record)?; }
     Ok(())
 }
 
@@ -427,6 +537,7 @@ pub struct AuthOwnership {
     profile: PathBuf,
     _root_lock: crate::lock::LibraryLock,
     _profile_lock: Option<crate::lock::LibraryLock>,
+    _journal_lock: std::fs::File,
 }
 
 impl AuthOwnership {
@@ -439,14 +550,18 @@ impl AuthOwnership {
         let root_lock = crate::lock::LibraryLock::acquire(&root, wait)?;
         let profile_lock = if root == profile { None }
             else { Some(crate::lock::LibraryLock::acquire(&profile, wait)?) };
-        Ok(Self { root, profile, _root_lock: root_lock, _profile_lock: profile_lock })
+        let journal_lock = auth_journal_lock()?;
+        Ok(Self { root, profile, _root_lock: root_lock, _profile_lock: profile_lock, _journal_lock: journal_lock })
     }
 
     pub fn recover(&self, identity: &HostAuthIdentity) -> Result<()> {
         let mut journal = load_journal()?;
         if journal.active.as_ref().is_some_and(|active| active.operation_id.is_some()) {
             verify_auth_identity_inner(&self.root, &self.profile, identity, true)?;
-            recover_keygen(&mut journal, &self.root, &self.profile)?;
+            if !journal.operations.iter().any(|record| record.account.is_some()
+                && journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(record.operation_id.as_str())) {
+                recover_keygen(&mut journal, &self.root, &self.profile)?;
+            }
         }
         Ok(())
     }
@@ -517,6 +632,7 @@ fn recover_keygen(journal: &mut Journal, root: &Path, profile: &Path) -> Result<
     let index = journal.operations.iter().position(|record| record.operation_id == id)
         .context("auth recovery has no admission receipt")?;
     let record = &journal.operations[index];
+    ensure!(record.account.is_none(), "account operation is not a keygen transaction");
     ensure!(record.root == root && record.profile == profile && active.directory == profile
         && record.alias == active.alias && record.original_sha256 == active.original.as_deref().map(digest),
         "auth recovery owner mismatch");
@@ -626,11 +742,11 @@ pub fn control_keygen(
     };
     journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(), config,
         alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true,
-        operation_id: Some(operation_id.to_owned()) });
+        operation_id: Some(operation_id.to_owned()), owns_config: false });
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: operation_id.to_owned(), idempotency_key: idempotency_key.to_owned(),
         fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted });
+        candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted, account: None });
     save_journal(&journal)?;
     let mutation = (|| -> Result<()> {
         let (secret, _urk, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
@@ -667,6 +783,372 @@ pub fn control_keygen(
         return Err(error.context("auth keygen did not commit; query its retained operation receipt"));
     }
     auth_result(&journal.operations[index])
+}
+
+fn checkpoint_account_candidate(journal: &mut Journal, index: usize, session: &Value) -> Result<()> {
+    ensure!(session.get("pass").is_none() && session.get("super").is_none(), "plaintext factors cannot enter recovery");
+    let bytes = serde_json::to_vec_pretty(session)?;
+    journal.operations[index].candidate_sha256 = Some(digest(&bytes));
+    journal.operations[index].candidate = Some(bytes);
+    Ok(())
+}
+
+fn account_fingerprint(ownership: &AuthOwnership, identity: &HostAuthIdentity, register: bool, addr: &str, user: &str) -> Result<String> {
+    // Replays never consume replacement credentials or repeat a remote request.
+    // Do not put a password or an offline password verifier in the receipt.
+    Ok(digest(&serde_json::to_vec(&json!({"schema_version":1,"register":register,
+        "root":ownership.root,"source":ownership.profile,"identity":identity,"addr":addr,"user":user}))?))
+}
+
+fn admit_account(ownership: &AuthOwnership, identity: &HostAuthIdentity, operation_id: &str,
+    key: &str, register: bool, addr: &str, user: &str) -> Result<(Journal, usize, bool)> {
+    crate::service::require_profile_change_host()?;
+    canonical_operation_id(operation_id)?;
+    ensure!(!key.is_empty() && key.len() <= 128 && key.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)), "invalid auth idempotency key");
+    ensure!(ownership.root == crate::service::main_data_dir().canonicalize()?
+        && ownership.profile == crate::service::data_dir().canonicalize()?, "auth ownership changed");
+    ensure!(!user.is_empty() && !addr.is_empty(), "account and server are required");
+    verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    let fingerprint = account_fingerprint(ownership, identity, register, addr, user)?;
+    let mut journal = load_journal()?;
+    if let Some(index) = journal.operations.iter().position(|record|
+        record.operation_id == operation_id || record.idempotency_key == key) {
+        let record = &journal.operations[index];
+        ensure!(record.operation_id == operation_id && record.idempotency_key == key
+            && record.root == ownership.root && record.profile == ownership.profile
+            && record.fingerprint == fingerprint && record.account.is_some(), "auth idempotency conflict");
+        return Ok((journal, index, false));
+    }
+    ensure!(journal.active.is_none(), "resolve the interrupted transaction before admitting another account operation");
+    ensure!(journal.operations.len() < 4096, "auth receipt capacity reached");
+    let original = read_original(&ownership.profile)?;
+    let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
+    journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(),
+        config: None, alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(),
+        directory_existed: true, operation_id: Some(operation_id.to_owned()), owns_config: false });
+    let index = journal.operations.len();
+    journal.operations.push(AuthRecord { operation_id: operation_id.to_owned(), idempotency_key: key.to_owned(),
+        fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(),
+        original_sha256: original.as_deref().map(digest), candidate: None, candidate_sha256: None,
+        alias, backend: None, phase: AuthPhase::Admitted, account: Some(AccountOperation {
+            register, addr: addr.to_owned(), user: user.to_owned(), source_identity: identity.clone(),
+            target: None, authorization: None, vault: None, published_vault: false, vault_pending: false,
+        }) });
+    save_journal(&journal)?;
+    Ok((journal, index, true))
+}
+
+fn account_result(record: &AuthRecord) -> Result<HostAuthAccountResult> {
+    let account = record.account.as_ref().context("operation is not account authentication")?;
+    let applied = record.phase == AuthPhase::AwaitingVerification || record.phase == AuthPhase::Committed;
+    if applied { verify_account_candidate(record)?; }
+    Ok(HostAuthAccountResult { operation_id: record.operation_id.clone(),
+        outcome: match record.phase {
+            _ if account.vault_pending && !account.published_vault => HostAuthAccountOutcome::Unknown,
+            AuthPhase::AwaitingVerification => HostAuthAccountOutcome::AwaitingVerification,
+            AuthPhase::Committed => HostAuthAccountOutcome::Committed,
+            AuthPhase::RolledBack => HostAuthAccountOutcome::RolledBack,
+            _ => HostAuthAccountOutcome::Unknown,
+        }, source_profile: record.profile.clone(), target_profile: account.target.clone(),
+        account_id: if applied { Some(digest(account.user.as_bytes())) } else { None },
+        session_sha256: if applied { record.candidate_sha256.clone() } else { None },
+        super_password: if account.register && applied {
+            Some(crate::keystore::read_imported(&record.alias, "super", record.backend.as_deref().context("account backend is missing")?)?)
+        } else { None },
+    })
+}
+
+fn commit_account(ownership: &AuthOwnership, journal: &mut Journal, index: usize, prepared: &mut PreparedLogin) -> Result<HostAuthAccountResult> {
+    ensure!(read_original(&ownership.profile)?.as_deref().map(digest) == journal.operations[index].original_sha256,
+        "source profile changed before account commit");
+    ensure!(read_original(&prepared.directory)? == prepared.original, "target profile changed before account commit");
+    prepared.alias = journal.operations[index].alias.clone();
+    prepared.session["keyring_account"] = json!(prepared.alias);
+    let active = journal.active.as_mut().context("account recovery is missing")?;
+    active.directory = prepared.directory.clone();
+    active.original = prepared.original.clone();
+    active.directory_existed = prepared.directory.exists();
+    active.config = match std::fs::read(crate::service::client_config_path()) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    active.owns_config = true;
+    journal.operations[index].account.as_mut().context("account receipt is missing")?.target = Some(prepared.directory.clone());
+    checkpoint_account_candidate(journal, index, &prepared.session)?;
+    save_journal(journal)?;
+    // Lock creation can create a new target directory, so its prior absence was journaled above.
+    let target = if prepared.directory.exists() { prepared.directory.canonicalize()? } else { prepared.directory.clone() };
+    let _target_lock = if target == ownership.root || target == ownership.profile { None }
+        else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
+    ensure!(read_original(&prepared.directory)? == prepared.original, "target changed while acquiring ownership");
+    prepared.commit_inner_for(Some(&journal.operations[index].operation_id))?;
+    *journal = load_journal()?;
+    account_result(&journal.operations[index])
+}
+
+/// A durable pending receipt is written before POST; an interrupted POST is never replayed.
+pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str,
+    params: &HostAuthRegisterParams) -> Result<HostAuthAccountResult> {
+    ensure!(params.schema_version == respire_protocol::HOST_AUTH_SCHEMA_V
+        && params.binding.installation_root == ownership.root && params.binding.profile == ownership.profile,
+        "registration binding mismatch");
+    let addr = params.addr.trim().trim_end_matches('/');
+    let (mut journal, index, fresh) = admit_account(ownership, &params.identity, operation_id, key, true, addr, &params.user)?;
+    if !fresh { return account_result(&journal.operations[index]); }
+    let source = read_original(&ownership.profile)?;
+    let local: Value = match source { Some(bytes) => serde_json::from_slice(&bytes)?, None => json!({}) };
+    let (secret, vault) = if local["wrapped_urk"].as_str().is_some_and(|wrap| !wrap.is_empty())
+        && !local["user"].as_str().is_some_and(|user| !user.is_empty()) {
+        let secret = match &params.identity {
+            HostAuthIdentity::Unbound { operation_id, .. } => {
+                let source = journal.operations.iter().find(|record| record.operation_id == *operation_id)
+                    .context("unbound source receipt is missing")?;
+                verify_candidate(source)?
+            }
+            _ => anyhow::bail!("registration requires a receipt-backed unbound vault"),
+        };
+        if let Some(expected) = &params.super_password { ensure!(*expected == secret, "recovery code does not match the unbound vault"); }
+        (secret, json!({"version":local["vault_version"],"kdf_salt":local["kdf_salt"],
+            "wrapped_urk":local["wrapped_urk"],"urk_nonce":local["urk_nonce"]}))
+    } else {
+        let (secret, _, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
+        (secret, json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}))
+    };
+    let alias = journal.operations[index].alias.clone();
+    let use_source = matches!(&params.identity, HostAuthIdentity::Absent | HostAuthIdentity::Unbound { .. });
+    journal.operations[index].account.as_mut().context("account receipt is missing")?.vault = Some(vault.clone());
+    crate::keystore::import_credential_checkpoint(&alias, "super", &secret, |backend| {
+        require_persistent_auth_backend(backend)?;
+        journal.operations[index].backend = Some(backend.to_owned());
+        journal.active.as_mut().context("account recovery is missing")?.backends.push(backend.to_owned());
+        save_journal(&journal)
+    })?;
+    journal.operations[index].phase = AuthPhase::RemotePending;
+    save_journal(&journal)?;
+    let authorized = match crate::auth::registration_authorization(addr, &params.user, &params.password) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            journal.operations[index].phase = AuthPhase::RemoteUnknown;
+            save_journal(&journal)?;
+            return Err(error.context("registration outcome unknown; query the original operation, do not resend"));
+        }
+    };
+    journal.operations[index].account.as_mut().context("account receipt is missing")?.authorization = Some(authorized.clone());
+    journal.operations[index].phase = AuthPhase::Authorized;
+    save_journal(&journal)?;
+    let mut prepared = PreparedLogin::prepare_with_vault_inner(addr, &authorized, secret, vault, None, use_source)?;
+    commit_account(ownership, &mut journal, index, &mut prepared)
+}
+
+pub fn control_login(ownership: &AuthOwnership, operation_id: &str, key: &str,
+    params: &HostAuthLoginParams) -> Result<HostAuthAccountResult> {
+    ensure!(params.schema_version == respire_protocol::HOST_AUTH_SCHEMA_V
+        && params.binding.installation_root == ownership.root && params.binding.profile == ownership.profile,
+        "login binding mismatch");
+    let addr = params.addr.trim().trim_end_matches('/');
+    let (mut journal, index, fresh) = admit_account(ownership, &params.identity, operation_id, key, false, addr, &params.user)?;
+    if !fresh { return account_result(&journal.operations[index]); }
+    journal.operations[index].phase = AuthPhase::RemotePending;
+    save_journal(&journal)?;
+    let mut authorized = match &params.authorization {
+        HostAuthAuthorization::Password { password, totp } =>
+            crate::auth::password_authorization_noninteractive(addr, &params.user, password, totp.as_deref())?,
+        HostAuthAuthorization::Browser { token, session_id } => {
+            ensure!(!token.is_empty(), "browser authorization token is missing");
+            json!({"addr":addr,"user":params.user,"token":token,"session_id":session_id})
+        }
+    };
+    let mut durable_authorization = authorized.clone();
+    durable_authorization.as_object_mut().context("authorization must be an object")?.remove("pass");
+    journal.operations[index].account.as_mut().context("account receipt is missing")?.authorization = Some(durable_authorization);
+    journal.operations[index].phase = AuthPhase::Authorized;
+    save_journal(&journal)?;
+    let vault = PreparedLogin::fetch_vault(addr, &authorized)?;
+    ensure!(!vault.is_null(), "cloud vault is absent; original key material was preserved");
+    let mut prepared = PreparedLogin::prepare_with_vault(addr, &authorized, params.super_password.clone(), vault, None)?;
+    authorized.as_object_mut().map(|object| object.remove("pass"));
+    commit_account(ownership, &mut journal, index, &mut prepared)
+}
+
+/// Result recovery never authenticates again and never resends a registration.
+pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIdentity,
+    operation_id: &str, key: &str) -> Result<HostAuthAccountResult> {
+    verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    let mut journal = load_journal()?;
+    let index = owned_account_index(&journal, &ownership.root, &ownership.profile, operation_id, key)?;
+    let record = &journal.operations[index];
+    if record.phase == AuthPhase::Prepared {
+        let target = record.account.as_ref().and_then(|account| account.target.as_ref()).context("account target is missing")?;
+        let active = journal.active.as_ref().context("account recovery is missing")?;
+        ensure!(active.operation_id.as_deref() == Some(operation_id) && active.directory == *target
+            && active.alias == record.alias && active.owns_config, "account recovery binding mismatch");
+        let _target_lock = if *target == ownership.root || *target == ownership.profile { None }
+            else { Some(crate::lock::LibraryLock::acquire(target, std::time::Duration::from_secs(1))?) };
+        let current = read_original(target)?;
+        ensure!(current == record.candidate || current == active.original, "interrupted account session changed");
+        verify_account_material(record, false)?;
+        verify_account_config(active)?;
+        if current != record.candidate {
+            private_write(&target.join("session.json"), record.candidate.as_deref().context("account candidate is missing")?)?;
+        }
+        crate::service::set_data_dir(&target.to_string_lossy())?;
+        journal.operations[index].phase = AuthPhase::AwaitingVerification;
+        save_journal(&journal)?;
+    }
+    if journal.operations[index].phase == AuthPhase::AwaitingVerification || journal.operations[index].phase == AuthPhase::Committed {
+        verify_account_candidate(&journal.operations[index])?;
+    }
+    account_result(&journal.operations[index])
+}
+
+fn owned_account_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &str) -> Result<usize> {
+    canonical_operation_id(id)?;
+    let index = journal.operations.iter().position(|record| record.operation_id == id && record.idempotency_key == key)
+        .context("account admission receipt is missing")?;
+    let record = &journal.operations[index];
+    let account = record.account.as_ref().context("operation is not account authentication")?;
+    ensure!(record.root == root && (record.profile == profile || account.target.as_deref() == Some(profile)), "account receipt owner mismatch");
+    let current = read_original(profile)?;
+    ensure!((record.profile == profile && current.as_deref().map(digest) == record.original_sha256)
+        || (account.target.as_deref() == Some(profile) && current.is_some() && current == record.candidate),
+        "account receipt no longer owns the selected session");
+    Ok(index)
+}
+
+fn verify_account_candidate(record: &AuthRecord) -> Result<()> {
+    verify_account_material(record, true)
+}
+
+fn verify_account_material(record: &AuthRecord, require_published: bool) -> Result<()> {
+    let account = record.account.as_ref().context("account receipt is missing")?;
+    let target = account.target.as_ref().context("account target is missing")?;
+    let bytes = record.candidate.as_deref().context("account candidate is missing")?;
+    ensure!(record.candidate_sha256.as_deref() == Some(digest(bytes).as_str())
+        && (!require_published || read_original(target)?.as_deref() == Some(bytes)), "account candidate changed");
+    let session: Value = serde_json::from_slice(bytes)?;
+    ensure!(session["user"].as_str() == Some(account.user.as_str())
+        && session["addr"].as_str() == Some(account.addr.as_str())
+        && session["keyring_account"].as_str() == Some(record.alias.as_str()), "account candidate identity mismatch");
+    let backend = record.backend.as_deref().context("account credential checkpoint is missing")?;
+    require_persistent_auth_backend(backend)?;
+    let secret = crate::keystore::read_imported(&record.alias,
+        if session["vault_version"] == 1 { "pass" } else { "super" }, backend)?;
+    let salt = session["kdf_salt"].as_str().context("account salt is missing")?;
+    let wrapped = session["wrapped_urk"].as_str().context("account wrap is missing")?;
+    let nonce = session["urk_nonce"].as_str().context("account nonce is missing")?;
+    match session["vault_version"].as_i64() {
+        Some(1) => crate::memory::SessionKeys::unlock(&secret, session["secret"].as_str().context("original account secret is missing")?, salt, wrapped, nonce)?,
+        Some(2) => crate::memory::SessionKeys::unlock_super(&secret, salt, wrapped, nonce)?,
+        Some(3) => crate::memory::SessionKeys::unlock_vault(&secret, session["secret_key"].as_str().context("original secret key is missing")?, salt, wrapped, nonce)?,
+        Some(4) => crate::memory::SessionKeys::unlock_v4(&secret, salt, wrapped, nonce)?,
+        _ => anyhow::bail!("unsupported account vault"),
+    };
+    Ok(())
+}
+
+fn verify_account_config(active: &Recovery) -> Result<()> {
+    let current = match std::fs::read(crate::service::client_config_path()) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if current != active.config {
+        let mut expected: Value = match &active.config { Some(bytes) => serde_json::from_slice(bytes)?, None => json!({}) };
+        expected["data_dir"] = json!(active.directory.to_string_lossy());
+        ensure!(current.as_ref().map(|bytes| serde_json::from_slice::<Value>(bytes)).transpose()? == Some(expected),
+            "client configuration changed outside the account transaction; retain recovery");
+    }
+    Ok(())
+}
+
+/// Completion owns the journal, not the running store's library lock. The callback
+/// must independently verify the live target Runtime; a client boolean is not proof.
+pub fn control_account_complete(root: &Path, profile: &Path, identity: &HostAuthIdentity,
+    operation_id: &str, key: &str, mut verify_runtime: impl FnMut(&HostAuthAccountResult) -> Result<()>) -> Result<HostAuthAccountResult> {
+    crate::service::require_profile_change_host()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    ensure!(root == crate::service::main_data_dir().canonicalize()?
+        && profile == crate::service::data_dir().canonicalize()?, "completion selection changed");
+    let _journal_lock = auth_journal_lock()?;
+    verify_auth_identity(&root, &profile, identity)?;
+    let mut journal = load_journal()?;
+    let index = owned_account_index(&journal, &root, &profile, operation_id, key)?;
+    let record = &journal.operations[index];
+    verify_account_candidate(record)?;
+    ensure!(record.account.as_ref().and_then(|account| account.target.as_deref()) == Some(profile.as_path()),
+        "completion requires the receipt's selected target");
+    if record.phase == AuthPhase::Committed { return account_result(record); }
+    ensure!(record.phase == AuthPhase::AwaitingVerification, "account is not ready for runtime verification");
+    ensure!(journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(operation_id),
+        "completion does not own active recovery");
+    verify_runtime(&account_result(record)?)?;
+    let account = record.account.as_ref().context("account receipt is missing")?;
+    if account.register && !account.published_vault {
+        let authorized = account.authorization.clone().context("registration authorization is missing")?;
+        let addr = account.addr.clone();
+        let vault = account.vault.clone().context("registration vault is missing")?;
+        let pending = account.vault_pending;
+        let current = PreparedLogin::fetch_vault(&addr, &authorized)?;
+        if current != vault {
+            ensure!(current.is_null(), "server vault differs; preserve local credentials and receipt");
+            if pending { return account_result(&journal.operations[index]); }
+            journal.operations[index].account.as_mut().context("account receipt is missing")?.vault_pending = true;
+            save_journal(&journal)?;
+            let token = authorized["token"].as_str().context("registration token is missing")?;
+            let sent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
+                .post(&format!("{addr}/api/self/vault"))
+                .set("Authorization", &format!("Bearer {token}")).set("If-None-Match", "*").send_json(vault.clone());
+            if sent.is_err() && PreparedLogin::fetch_vault(&addr, &authorized)? != vault {
+                return account_result(&journal.operations[index]);
+            }
+        }
+        journal.operations[index].account.as_mut().context("account receipt is missing")?.published_vault = true;
+        save_journal(&journal)?;
+    }
+    verify_account_candidate(&journal.operations[index])?;
+    verify_runtime(&account_result(&journal.operations[index])?)?;
+    journal.operations[index].phase = AuthPhase::Committed;
+    retire_active(&mut journal)?;
+    account_result(&journal.operations[index])
+}
+
+pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAuthIdentity,
+    operation_id: &str, key: &str) -> Result<HostAuthAccountResult> {
+    crate::service::require_profile_change_host()?;
+    verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    let mut journal = load_journal()?;
+    let index = owned_account_index(&journal, &ownership.root, &ownership.profile, operation_id, key)?;
+    let record = &journal.operations[index];
+    if record.phase == AuthPhase::RolledBack { return account_result(record); }
+    ensure!(record.phase != AuthPhase::Committed && record.phase != AuthPhase::RemotePending
+        && record.phase != AuthPhase::RemoteUnknown, "remote outcome must be resolved before compensation");
+    let account = record.account.as_ref().context("account receipt is missing")?;
+    ensure!(!account.vault_pending && !account.published_vault, "published or unknown remote vault cannot be compensated by deleting local keys");
+    let active = journal.active.as_ref().context("account recovery is missing")?;
+    ensure!(active.operation_id.as_deref() == Some(operation_id), "rollback does not own recovery");
+    let target_lock = if !active.directory.exists() || active.directory == ownership.root || active.directory == ownership.profile { None }
+        else { Some(crate::lock::LibraryLock::acquire(&active.directory, std::time::Duration::from_secs(1))?) };
+    let current = read_original(&active.directory)?;
+    ensure!(current == active.original || current == record.candidate, "target session changed outside the transaction");
+    if active.owns_config {
+        verify_account_config(active)?;
+    }
+    journal.operations[index].phase = AuthPhase::RollingBack;
+    save_journal(&journal)?;
+    rollback_record_inner(journal.active.as_ref().context("account recovery is missing")?, false)?;
+    // Windows cannot quarantine a directory while SQLite still owns its lock file.
+    // The root/source guards and the durable RollingBack record remain held.
+    drop(target_lock);
+    if journal.active.as_ref().is_some_and(|active| !active.directory_existed && active.directory == ownership.profile) {
+        drop(ownership._profile_lock.take());
+    }
+    quarantine_new_profile(journal.active.as_ref().context("account recovery is missing")?)?;
+    journal.operations[index].phase = AuthPhase::RolledBack;
+    retire_active(&mut journal)?;
+    account_result(&journal.operations[index])
 }
 
 impl PreparedLogin {
@@ -776,6 +1258,11 @@ impl PreparedLogin {
     }
 
     pub fn prepare_with_vault(addr: &str, authorized: &Value, super_password: String, vault: Value, legacy: Option<(Value, [u8; 32])>) -> Result<Self> {
+        Self::prepare_with_vault_inner(addr, authorized, super_password, vault, legacy, false)
+    }
+
+    fn prepare_with_vault_inner(addr: &str, authorized: &Value, super_password: String, vault: Value,
+        legacy: Option<(Value, [u8; 32])>, registration_source: bool) -> Result<Self> {
         crate::service::require_profile_change_host()?;
         let user = authorized["user"].as_str().filter(|user| !user.is_empty()).context("authorization did not return a user")?.to_owned();
         let token = authorized["token"].as_str().filter(|token| !token.is_empty()).context("authorization did not return a token")?;
@@ -786,7 +1273,8 @@ impl PreparedLogin {
         let wrapped = vault["wrapped_urk"].as_str().context("vault missing wrapped_urk")?;
         let nonce = vault["urk_nonce"].as_str().context("vault missing urk_nonce")?;
         let current = crate::service::data_dir();
-        let mut directory = if legacy.is_some() && crate::service::session_user_of_dir(&current) == user {
+        let mut directory = if (registration_source && crate::service::session_user_of_dir(&current).is_empty())
+            || (legacy.is_some() && crate::service::session_user_of_dir(&current) == user) {
             current.clone()
         } else { login_directory(base, &user)? };
         let original = read_original(&directory)?;
@@ -883,43 +1371,87 @@ impl PreparedLogin {
     }
 
     fn commit_inner(&mut self) -> Result<()> {
+        self.commit_inner_for(None)
+    }
+
+    fn commit_inner_for(&mut self, operation_id: Option<&str>) -> Result<()> {
+        let _legacy_journal_lock = if operation_id.is_none() { Some(auth_journal_lock()?) } else { None };
         let mut journal = load_journal()?;
-        ensure!(journal.active.is_none(), "interrupted login must be recovered before another commit");
+        let account_index = match operation_id {
+            Some(id) => {
+                let index = journal.operations.iter().position(|record| record.operation_id == id
+                    && record.account.is_some() && record.phase == AuthPhase::Authorized)
+                    .context("account admission is missing")?;
+                ensure!(journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(id),
+                    "account commit does not own recovery");
+                Some(index)
+            }
+            None => { ensure!(journal.active.is_none(), "interrupted login must be recovered before another commit"); None }
+        };
         let config = match std::fs::read(crate::service::client_config_path()) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+        let staged_backends = if account_index.is_some() {
+            journal.active.as_ref().context("account recovery is missing")?.backends.clone()
+        } else { Vec::new() };
+        let directory_existed = if account_index.is_some() {
+            journal.active.as_ref().context("account recovery is missing")?.directory_existed
+        } else { self.directory.exists() };
         journal.active = Some(Recovery { directory: self.directory.clone(), original: self.original.clone(), config,
-            alias: self.alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), directory_existed: self.directory.exists(), operation_id: None });
+            alias: self.alias.clone(), backends: staged_backends, pass_backends: Vec::new(),
+            directory_existed, operation_id: operation_id.map(str::to_owned), owns_config: account_index.is_some() });
+        if let Some(index) = account_index {
+            journal.operations[index].account.as_mut().context("account receipt is missing")?.target = Some(self.directory.clone());
+            checkpoint_account_candidate(&mut journal, index, &self.session)?;
+        }
         save_journal(&journal)?;
         self.recovery_written = true;
         if self.session["vault_version"] == 1 {
             let password = self.login_password.as_deref().context("original v1 login password is required")?;
-            if crate::env::var("RSRS_PASS").is_ok_and(|value| !value.is_empty() && value == password) {
+            if account_index.is_none() && crate::env::var("RSRS_PASS").is_ok_and(|value| !value.is_empty() && value == password) {
                 // Headless v1 retains its original password/Account Secret factors.
                 self.session.as_object_mut().map(|object| { object.remove("keyring_account"); object.remove("keyring_backend"); });
             } else {
                 crate::keystore::import_credential_checkpoint(&self.alias, "pass", password, |backend| {
+                    if account_index.is_some() { require_persistent_auth_backend(backend)?; }
                     journal.active.as_mut().context("login recovery is missing")?.pass_backends.push(backend.to_owned());
+                    if let Some(index) = account_index {
+                        self.session["keyring_backend"] = json!(backend);
+                        journal.operations[index].backend = Some(backend.to_owned());
+                        checkpoint_account_candidate(&mut journal, index, &self.session)?;
+                    }
                     save_journal(&journal)
                 })?;
             }
-        } else if crate::env::var("RSRS_SUPER").is_ok_and(|value| value == self.super_password) {
+        } else if account_index.is_none() && crate::env::var("RSRS_SUPER").is_ok_and(|value| value == self.super_password) {
             // Headless hosts explicitly supply the same verified key to their runtime.
             self.session.as_object_mut().map(|object| { object.remove("keyring_account"); object.remove("keyring_backend"); });
         } else {
             let backend = crate::keystore::import_credential_checkpoint(&self.alias, "super", &self.super_password, |backend| {
+                if account_index.is_some() { require_persistent_auth_backend(backend)?; }
                 journal.active.as_mut().context("login recovery is missing")?.backends.push(backend.to_owned());
+                if let Some(index) = account_index {
+                    self.session["keyring_backend"] = json!(backend);
+                    journal.operations[index].backend = Some(backend.to_owned());
+                    checkpoint_account_candidate(&mut journal, index, &self.session)?;
+                }
                 save_journal(&journal)
             })?;
             self.session["keyring_backend"] = json!(backend);
             if let Some(password) = self.login_password.as_deref() {
                 crate::keystore::import_credential_checkpoint(&self.alias, "pass", password, |backend| {
+                    if account_index.is_some() { require_persistent_auth_backend(backend)?; }
                     journal.active.as_mut().context("login recovery is missing")?.pass_backends.push(backend.to_owned());
                     save_journal(&journal)
                 })?;
             }
+        }
+        if let Some(index) = account_index {
+            checkpoint_account_candidate(&mut journal, index, &self.session)?;
+            journal.operations[index].phase = AuthPhase::Prepared;
+            save_journal(&journal)?;
         }
         if !self.directory.exists() {
             let parent = self.directory.parent().context("account directory has no parent")?;
@@ -928,6 +1460,10 @@ impl PreparedLogin {
         }
         private_write(&self.directory.join("session.json"), &serde_json::to_vec_pretty(&self.session)?)?;
         crate::service::set_data_dir(&self.directory.to_string_lossy())?;
+        if let Some(index) = account_index {
+            journal.operations[index].phase = AuthPhase::AwaitingVerification;
+            save_journal(&journal)?;
+        }
         Ok(())
     }
 
@@ -940,6 +1476,7 @@ impl PreparedLogin {
     }
 
     pub fn complete(&self) -> Result<()> {
+        let _journal_lock = auth_journal_lock()?;
         let mut journal = load_journal()?;
         let active = journal.active.as_ref().context("login recovery is missing")?;
         ensure!(active.operation_id.is_none() && active.alias == self.alias && active.directory == self.directory,

@@ -401,6 +401,37 @@ pub struct RestoreReceipt {
     rollback_sha256: String,
     #[serde(skip_serializing)]
     account_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<SnapshotOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotOperation {
+    pub operation_id: String,
+    pub request_fingerprint: String,
+}
+
+#[derive(Debug)]
+pub struct OperationConflict;
+
+impl std::fmt::Display for OperationConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("snapshot operation idempotency conflict")
+    }
+}
+
+impl std::error::Error for OperationConflict {}
+
+#[derive(Debug, Clone)]
+pub struct RestoreStatus {
+    pub phase: String,
+    pub receipt: RestoreReceipt,
+    pub cleanup_pending: bool,
+}
+
+fn terminal_phase(phase: &str) -> bool {
+    matches!(phase, "released" | "rolled_back")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -408,6 +439,39 @@ struct RecoveryJournal {
     schema_version: u32,
     phase: String,
     receipt: RecoveryReceipt,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    history: Vec<TerminalReceipt>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalReceipt {
+    phase: String,
+    restored: String,
+    before_restore: String,
+    sync_quarantined: bool,
+    account_fingerprint: String,
+    operation: SnapshotOperation,
+}
+
+// Never evict: one current operation plus its retained terminal predecessors.
+const MAX_RECORDED_OPERATIONS: usize = 64;
+
+fn next_history(previous: RecoveryJournal) -> Result<Vec<TerminalReceipt>> {
+    anyhow::ensure!(terminal_phase(&previous.phase), "an earlier snapshot recovery is pending");
+    let mut history = previous.history;
+    if let Some(operation) = previous.receipt.operation {
+        anyhow::ensure!(history.len() + 1 < MAX_RECORDED_OPERATIONS, "snapshot operation history is full; new restores are blocked");
+        history.push(TerminalReceipt {
+            phase: previous.phase,
+            restored: previous.receipt.restored,
+            before_restore: previous.receipt.before_restore,
+            sync_quarantined: true,
+            account_fingerprint: previous.receipt.account_fingerprint,
+            operation,
+        });
+    }
+    Ok(history)
 }
 #[derive(Serialize, Deserialize)]
 struct RecoveryReceipt {
@@ -416,6 +480,8 @@ struct RecoveryReceipt {
     rollback_file: String,
     rollback_sha256: String,
     account_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation: Option<SnapshotOperation>,
 }
 impl From<&RestoreReceipt> for RecoveryReceipt {
     fn from(value: &RestoreReceipt) -> Self {
@@ -425,6 +491,7 @@ impl From<&RestoreReceipt> for RecoveryReceipt {
             rollback_file: value.rollback_file.clone(),
             rollback_sha256: value.rollback_sha256.clone(),
             account_fingerprint: value.account_fingerprint.clone(),
+            operation: value.operation.clone(),
         }
     }
 }
@@ -437,6 +504,7 @@ impl From<RecoveryReceipt> for RestoreReceipt {
             rollback_file: value.rollback_file,
             rollback_sha256: value.rollback_sha256,
             account_fingerprint: value.account_fingerprint,
+            operation: value.operation,
         }
     }
 }
@@ -455,36 +523,64 @@ fn write_journal(root: &Path, receipt: &RestoreReceipt, phase: &str) -> Result<(
     write_record(root, receipt, phase, RECOVERY_FILE)
 }
 fn write_record(root: &Path, receipt: &RestoreReceipt, phase: &str, name: &str) -> Result<()> {
+    let history = match read_journal(root)? {
+        Some(previous) if previous.receipt.rollback_file != receipt.rollback_file => next_history(previous)?,
+        Some(previous) => previous.history,
+        None => Vec::new(),
+    };
+    let bytes = serde_json::to_vec(&RecoveryJournal {
+        schema_version: 1,
+        phase: phase.to_owned(),
+        receipt: receipt.into(),
+        // The gate retains its existing role. History lives in RECOVERY_FILE;
+        // read_journal merges the old terminal record during gate publication.
+        history: if name == RECOVERY_FILE { history } else { Vec::new() },
+    })?;
+    anyhow::ensure!(bytes.len() < 65536, "snapshot recovery journal capacity exceeded");
     let temporary = root.join(format!(
         ".snapshot-journal-{}.tmp",
         uuid::Uuid::new_v4().simple()
     ));
     let mut file = private_new(&temporary)?;
-    file.write_all(&serde_json::to_vec(&RecoveryJournal {
-        schema_version: 1,
-        phase: phase.to_owned(),
-        receipt: receipt.into(),
-    })?)?;
+    file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
     respire_spawn::durable::replace_file(&temporary, &root.join(name))?;
     Ok(())
 }
 fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
-    let mut found = None;
-    for name in [RECOVERY_FILE, MAINTENANCE_FILE] {
-        let path = root.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                found = Some((path, metadata));
-                break;
+    let recovery = read_record(root, RECOVERY_FILE)?;
+    let maintenance = read_record(root, MAINTENANCE_FILE)?;
+    match (recovery, maintenance) {
+        (Some(recovery), Some(mut maintenance)) => {
+            if recovery.receipt.rollback_file != maintenance.receipt.rollback_file {
+                anyhow::ensure!(
+                    terminal_phase(&recovery.phase) && maintenance.phase == "prepared",
+                    "snapshot recovery and maintenance journals disagree"
+                );
+                // A new operation published its gate before replacing the last
+                // terminal receipt. No live replacement can precede this gate.
+                maintenance.history = next_history(recovery)?;
+                return Ok(Some(maintenance));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            anyhow::ensure!(
+                recovery.receipt.rollback_sha256 == maintenance.receipt.rollback_sha256
+                    && recovery.receipt.operation == maintenance.receipt.operation,
+                "snapshot recovery and maintenance journals disagree"
+            );
+            Ok(Some(recovery))
         }
+        (Some(journal), None) | (None, Some(journal)) => Ok(Some(journal)),
+        (None, None) => Ok(None),
     }
-    let Some((path, meta)) = found else {
-        return Ok(None);
+}
+
+fn read_record(root: &Path, name: &str) -> Result<Option<RecoveryJournal>> {
+    let path = root.join(name);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
     anyhow::ensure!(
         meta.is_file() && !meta.file_type().is_symlink() && meta.len() < 65536,
@@ -495,7 +591,7 @@ fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
         journal.schema_version == 1
             && matches!(
                 journal.phase.as_str(),
-                "prepared" | "installed" | "verified"
+                "prepared" | "installed" | "verified" | "released" | "rolled_back"
             ),
         "unsupported snapshot recovery journal"
     );
@@ -505,7 +601,75 @@ fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
         .and_then(|name| name.strip_suffix(".db"))
         .context("invalid snapshot rollback filename")?;
     anyhow::ensure!(valid_id(id), "invalid snapshot rollback identity");
+    anyhow::ensure!(
+        !terminal_phase(&journal.phase) || journal.receipt.operation.is_some() || !journal.history.is_empty(),
+        "terminal snapshot journal is missing its operation identity"
+    );
+    anyhow::ensure!(journal.history.len() < MAX_RECORDED_OPERATIONS, "snapshot operation history capacity exceeded");
+    for (index, entry) in journal.history.iter().enumerate() {
+        anyhow::ensure!(
+            terminal_phase(&entry.phase)
+                && valid_id(&entry.restored)
+                && valid_id(&entry.before_restore)
+                && !journal.history[..index].iter().any(|earlier| earlier.operation.operation_id == entry.operation.operation_id)
+                && journal.receipt.operation.as_ref().is_none_or(|current| current.operation_id != entry.operation.operation_id),
+            "invalid snapshot operation history"
+        );
+    }
     Ok(Some(journal))
+}
+
+/// Read under the host's installation takeover lock. This also supports commit
+/// while the restarted runtime owns the library lock; it never opens the DB.
+pub fn operation_status(
+    root: &Path,
+    account: &str,
+    operation: &SnapshotOperation,
+) -> Result<Option<RestoreStatus>> {
+    let Some(journal) = read_journal(root)? else {
+        return Ok(None);
+    };
+    if let Some(entry) = journal.history.iter().find(|entry| entry.operation.operation_id == operation.operation_id) {
+        anyhow::ensure!(entry.account_fingerprint == format!("{:x}", Sha256::digest(account.as_bytes())), "snapshot recovery belongs to another account");
+        anyhow::ensure!(entry.operation.request_fingerprint == operation.request_fingerprint, OperationConflict);
+        return Ok(Some(RestoreStatus {
+            phase: entry.phase.clone(),
+            receipt: RestoreReceipt {
+                restored: entry.restored.clone(),
+                before_restore: entry.before_restore.clone(),
+                sync_quarantined: entry.sync_quarantined,
+                rollback_file: String::new(),
+                rollback_sha256: String::new(),
+                account_fingerprint: entry.account_fingerprint.clone(),
+                operation: Some(entry.operation.clone()),
+            },
+            cleanup_pending: false,
+        }));
+    }
+    anyhow::ensure!(
+        journal.receipt.account_fingerprint == format!("{:x}", Sha256::digest(account.as_bytes())),
+        "snapshot recovery belongs to another account"
+    );
+    let Some(recorded) = &journal.receipt.operation else {
+        if terminal_phase(&journal.phase) {
+            return Ok(None);
+        }
+        anyhow::bail!("legacy snapshot recovery has no request identity; explicit legacy recovery is required");
+    };
+    if recorded.operation_id != operation.operation_id {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        recorded.request_fingerprint == operation.request_fingerprint,
+        OperationConflict
+    );
+    let cleanup_pending = maintenance_present(root)?
+        || root.join(&journal.receipt.rollback_file).try_exists()?;
+    Ok(Some(RestoreStatus {
+        phase: journal.phase,
+        receipt: journal.receipt.into(),
+        cleanup_pending,
+    }))
 }
 
 fn maintenance_present(root: &Path) -> Result<bool> {
@@ -522,7 +686,7 @@ pub fn ensure_no_incomplete_restore(root: &Path) -> Result<()> {
         "snapshot maintenance blocks normal library access; host recovery/commit is required"
     );
     if let Some(journal) = read_journal(root)? {
-        anyhow::ensure!(journal.phase=="verified","interrupted snapshot restore; host must run snapshot recover --confirm before opening the library");
+        anyhow::ensure!(journal.phase=="verified" || terminal_phase(&journal.phase),"interrupted snapshot restore; host must run snapshot recover --confirm before opening the library");
     }
     Ok(())
 }
@@ -533,6 +697,9 @@ pub fn runtime_bootstrap_target(root: &Path) -> Result<Option<String>> {
     let Some(journal) = read_journal(root)? else {
         return Ok(None);
     };
+    if terminal_phase(&journal.phase) {
+        return Ok(None);
+    }
     anyhow::ensure!(
         matches!(journal.phase.as_str(), "installed" | "verified"),
         "snapshot restore preparation is incomplete; recover before startup"
@@ -590,14 +757,56 @@ fn restore_with_hook(
     ownership: &crate::lock::LibraryLock,
     hook: &dyn Fn(&str) -> Result<()>,
 ) -> Result<RestoreReceipt> {
+    restore_operation_with_hook(root, account, keys, id, ownership, None, hook)
+}
+
+/// First-attempt dispatch may create an unknown operation; resume never does.
+/// Retained history, including capacity refusal, prevents replay of older IDs.
+pub fn restore_operation_locked(
+    root: &Path,
+    account: &str,
+    keys: Option<&crate::SessionKeys>,
+    id: &str,
+    operation: &SnapshotOperation,
+    ownership: &crate::lock::LibraryLock,
+    first_attempt: bool,
+) -> Result<Option<RestoreStatus>> {
+    anyhow::ensure!(ownership.protects(root)?, "snapshot restore requires ownership of this library");
+    if let Some(status) = operation_status(root, account, operation)? {
+        anyhow::ensure!(status.receipt.restored == id, OperationConflict);
+        return Ok(Some(status));
+    }
+    if !first_attempt {
+        return Ok(None);
+    }
+    let keys = keys.context("initial snapshot restore requires runtime session keys")?;
+    restore_operation_with_hook(root, account, keys, id, ownership, Some(operation), &|_| Ok(()))?;
+    operation_status(root, account, operation)
+}
+
+fn restore_operation_with_hook(
+    root: &Path,
+    account: &str,
+    keys: &crate::SessionKeys,
+    id: &str,
+    ownership: &crate::lock::LibraryLock,
+    operation: Option<&SnapshotOperation>,
+    hook: &dyn Fn(&str) -> Result<()>,
+) -> Result<RestoreReceipt> {
     anyhow::ensure!(
         ownership.protects(root)?,
         "snapshot restore requires ownership of this library"
     );
-    anyhow::ensure!(
-        read_journal(root)?.is_none(),
-        "an earlier snapshot recovery is pending; run snapshot recover --confirm"
-    );
+    if let Some(previous) = read_journal(root)? {
+        anyhow::ensure!(
+            terminal_phase(&previous.phase)
+                && !maintenance_present(root)?
+                && !root.join(&previous.receipt.rollback_file).try_exists()?,
+            "an earlier snapshot recovery is pending; run snapshot recover --confirm"
+        );
+        // Check capacity before backups, journals, or any DB replacement.
+        next_history(previous)?;
+    }
     let live = crate::service::database_path(root)?;
     reject_live_symlink(&live)?;
     let selected = read_manifest(root, id)?;
@@ -639,6 +848,7 @@ fn restore_with_hook(
         rollback_sha256: digest_file(&rollback)?,
         rollback_file,
         account_fingerprint,
+        operation: operation.cloned(),
     };
     // Durable receipt exists before the first operation that can replace live.
     write_record(root, &receipt, "prepared", MAINTENANCE_FILE)?;
@@ -707,12 +917,18 @@ pub fn rollback_locked(
     );
     let journal = read_journal(root)?.context("snapshot recovery journal missing")?;
     anyhow::ensure!(
+        !terminal_phase(&journal.phase)
+            && (receipt.operation.is_none() || journal.phase != "verified"),
+        "snapshot restore is committed or rolled back; query before compensation"
+    );
+    anyhow::ensure!(
         journal.phase != "verified" || maintenance_present(root)?,
         "snapshot restore is committed; rollback would discard accepted writes"
     );
     anyhow::ensure!(
         journal.receipt.rollback_file == receipt.rollback_file
-            && journal.receipt.rollback_sha256 == receipt.rollback_sha256,
+            && journal.receipt.rollback_sha256 == receipt.rollback_sha256
+            && journal.receipt.operation == receipt.operation,
         "rollback receipt differs from durable journal"
     );
     let original = root.join(&receipt.rollback_file);
@@ -766,20 +982,40 @@ fn clear_with_hook(
     receipt: &RestoreReceipt,
     hook: &dyn Fn(&str) -> Result<()>,
 ) -> Result<()> {
+    // Keep terminal history in the existing journal before removing the gate
+    // or private rollback image. Legacy cleanup must preserve that history too.
+    let journal = read_journal(root)?.context("snapshot recovery journal missing")?;
+    let retain_journal = receipt.operation.is_some() || !journal.history.is_empty();
+    if retain_journal {
+        anyhow::ensure!(
+            journal.receipt.operation == receipt.operation
+                && journal.receipt.rollback_sha256 == receipt.rollback_sha256
+                && journal.receipt.rollback_file == receipt.rollback_file,
+            "snapshot cleanup receipt differs from durable journal"
+        );
+        let terminal = match journal.phase.as_str() {
+            "verified" | "released" => "released",
+            _ => "rolled_back",
+        };
+        write_journal(root, receipt, terminal)?;
+    }
     // Once verified is durable, gate removal is a one-way commit release. Any
     // later cleanup failure must retain the selected state, never roll it back.
     remove_if_present(&root.join(MAINTENANCE_FILE))?;
     hook("after_gate_removed")?;
     respire_spawn::durable::sync_directory(root)?;
-    remove_if_present(&root.join(RECOVERY_FILE))?;
-    respire_spawn::durable::sync_directory(root)?;
+    if !retain_journal {
+        remove_if_present(&root.join(RECOVERY_FILE))?;
+        respire_spawn::durable::sync_directory(root)?;
+    }
     remove_if_present(&root.join(&receipt.rollback_file))?;
     respire_spawn::durable::sync_directory(root)?;
     Ok(())
 }
 
 /// Persist commit while maintenance still blocks all normal requests. Failure
-/// here is fatal and the caller must roll back before releasing its lifecycle lock.
+/// Legacy callers compensate failures under their lifecycle lock. Controlled
+/// callers must query uncertain commits before choosing recovery or rollback.
 pub fn commit_restore(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
     commit_with_hook(root, receipt, &|_| Ok(()))
 }
@@ -795,7 +1031,9 @@ fn commit_with_hook(
     let journal = read_journal(root)?.context("snapshot completion journal missing")?;
     anyhow::ensure!(
         journal.receipt.rollback_file == receipt.rollback_file
-            && journal.receipt.rollback_sha256 == receipt.rollback_sha256,
+            && journal.receipt.rollback_sha256 == receipt.rollback_sha256
+            && journal.receipt.operation == receipt.operation
+            && matches!(journal.phase.as_str(), "installed" | "verified"),
         "snapshot completion receipt differs from durable journal"
     );
     hook("before_verified_write")?;
@@ -809,9 +1047,10 @@ fn commit_with_hook(
 pub fn release_restore(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
     let journal = read_journal(root)?.context("snapshot release journal missing")?;
     anyhow::ensure!(
-        journal.phase == "verified"
+        matches!(journal.phase.as_str(), "verified" | "released")
             && journal.receipt.rollback_file == receipt.rollback_file
-            && journal.receipt.rollback_sha256 == receipt.rollback_sha256,
+            && journal.receipt.rollback_sha256 == receipt.rollback_sha256
+            && journal.receipt.operation == receipt.operation,
         "snapshot release is not the committed operation"
     );
     clear_recovery(root, receipt)
@@ -832,7 +1071,7 @@ pub fn recover_locked(
         "recovery requires this library's ownership lock"
     );
     let journal = read_journal(root)?.context("no interrupted snapshot operation exists")?;
-    let verified = journal.phase == "verified";
+    let verified = journal.phase == "verified" || terminal_phase(&journal.phase);
     let receipt: RestoreReceipt = journal.receipt.into();
     anyhow::ensure!(
         receipt.account_fingerprint == format!("{:x}", Sha256::digest(account.as_bytes())),
@@ -925,6 +1164,140 @@ pub fn resume_sync(root: &Path, reviewed_revision: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn controlled_receipt() -> RestoreReceipt {
+        RestoreReceipt {
+            restored: "a".repeat(32),
+            before_restore: "b".repeat(32),
+            sync_quarantined: true,
+            rollback_file: format!(".snapshot-rollback-{}.db", "c".repeat(32)),
+            rollback_sha256: "d".repeat(64),
+            account_fingerprint: format!("{:x}", Sha256::digest(b"account")),
+            operation: Some(SnapshotOperation {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                request_fingerprint: "e".repeat(64),
+            }),
+        }
+    }
+
+    #[test]
+    fn legacy_receipts_remain_unbound_and_controlled_replay_never_restores() -> Result<()> {
+        let receipt = controlled_receipt();
+        let mut legacy = serde_json::to_value(RecoveryReceipt::from(&receipt))?;
+        legacy.as_object_mut().context("receipt must be an object")?.remove("operation");
+        let legacy: RecoveryReceipt = serde_json::from_value(legacy)?;
+        assert!(legacy.operation.is_none());
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+        let operation = receipt.operation.as_ref().context("controlled operation missing")?;
+        assert!(restore_operation_locked(root, "account", None, &receipt.restored, operation, &ownership, false)?.is_none());
+        write_record(root, &receipt, "installed", MAINTENANCE_FILE)?;
+        write_journal(root, &receipt, "installed")?;
+        for first_attempt in [false, true] {
+            let status = restore_operation_locked(root, "account", None, &receipt.restored, operation, &ownership, first_attempt)?
+                .context("original operation missing")?;
+            assert_eq!(status.phase, "installed");
+            assert_eq!(status.receipt.before_restore, receipt.before_restore);
+        }
+        assert!(!root.join("rsrs.db").exists());
+        let mut changed = operation.clone();
+        changed.request_fingerprint = "f".repeat(64);
+        assert!(operation_status(root, "account", &changed).is_err());
+        assert!(operation_status(root, "other-account", operation).is_err());
+        write_journal(root, &receipt, "verified")?;
+        release_restore(root, &receipt)?;
+        let status = restore_operation_locked(root, "account", None, &receipt.restored, operation, &ownership, true)?
+            .context("released operation missing")?;
+        assert_eq!(status.phase, "released");
+        assert!(!root.join("rsrs.db").exists());
+
+        let mut second = controlled_receipt();
+        second.restored = "b".repeat(32);
+        second.rollback_file = format!(".snapshot-rollback-{}.db", "f".repeat(32));
+        write_record(root, &second, "prepared", MAINTENANCE_FILE)?;
+        write_journal(root, &second, "verified")?;
+        release_restore(root, &second)?;
+        let before_retry = fs::read(root.join(RECOVERY_FILE))?;
+        for first_attempt in [false, true] {
+            let status = restore_operation_locked(root, "account", None, &receipt.restored, operation, &ownership, first_attempt)?
+                .context("historical operation missing")?;
+            assert_eq!(status.phase, "released");
+            assert_eq!(status.receipt.before_restore, receipt.before_restore);
+            assert!(status.receipt.rollback_file.is_empty());
+            assert!(status.receipt.rollback_sha256.is_empty());
+            assert!(!status.cleanup_pending);
+        }
+        let error = restore_operation_locked(root, "account", None, &receipt.restored, &changed, &ownership, true)
+            .err().context("historical fingerprint conflict was accepted")?;
+        assert!(error.downcast_ref::<OperationConflict>().is_some());
+        assert_eq!(fs::read(root.join(RECOVERY_FILE))?, before_retry);
+        assert!(!root.join("rsrs.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_cleanup_retains_terminal_identity_and_prefers_new_gate() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let receipt = controlled_receipt();
+        let operation = receipt.operation.as_ref().context("controlled operation missing")?;
+        write_record(root, &receipt, "prepared", MAINTENANCE_FILE)?;
+        write_journal(root, &receipt, "verified")?;
+        fs::write(root.join(&receipt.rollback_file), b"private rollback placeholder")?;
+        assert!(clear_with_hook(root, &receipt, &|_| anyhow::bail!("injected cleanup failure")).is_err());
+        let status = operation_status(root, "account", operation)?.context("terminal operation missing")?;
+        assert_eq!(status.phase, "released");
+        assert!(status.cleanup_pending);
+        release_restore(root, &receipt)?;
+        let status = operation_status(root, "account", operation)?.context("released operation missing")?;
+        assert_eq!(status.phase, "released");
+        assert!(!status.cleanup_pending);
+        assert!(ensure_no_incomplete_restore(root).is_ok());
+        assert!(runtime_bootstrap_target(root)?.is_none());
+        let mut next = controlled_receipt();
+        next.rollback_file = format!(".snapshot-rollback-{}.db", "f".repeat(32));
+        write_record(root, &next, "prepared", MAINTENANCE_FILE)?;
+        let journal = read_journal(root)?.context("new gate missing")?;
+        assert_eq!(journal.phase, "prepared");
+        assert_eq!(journal.receipt.operation, next.operation);
+        assert_eq!(operation_status(root, "account", operation)?.context("historical operation missing during gate publication")?.phase, "released");
+        write_journal(root, &next, "verified")?;
+        release_restore(root, &next)?;
+        for _ in 2..MAX_RECORDED_OPERATIONS {
+            let mut following = controlled_receipt();
+            following.rollback_file = format!(".snapshot-rollback-{}.db", uuid::Uuid::new_v4().simple());
+            write_record(root, &following, "prepared", MAINTENANCE_FILE)?;
+            write_journal(root, &following, "verified")?;
+            release_restore(root, &following)?;
+        }
+        let journal_bytes = fs::read(root.join(RECOVERY_FILE))?;
+        let document: serde_json::Value = serde_json::from_slice(&journal_bytes)?;
+        let history = document["history"].as_array().context("history must be an array")?;
+        assert_eq!(history.len(), MAX_RECORDED_OPERATIONS - 1);
+        for entry in history {
+            assert!(entry.get("rollback_file").is_none());
+            assert!(entry.get("rollback_sha256").is_none());
+        }
+        let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+        let keys = crate::SessionKeys::from_urk([7; 32])?;
+        let overflow = controlled_receipt();
+        let overflow_operation = overflow.operation.as_ref().context("controlled operation missing")?;
+        let error = restore_operation_locked(root, "account", Some(&keys), &overflow.restored, overflow_operation, &ownership, true)
+            .err().context("full history accepted a new restore")?;
+        assert!(error.to_string().contains("history is full"));
+        assert_eq!(fs::read(root.join(RECOVERY_FILE))?, journal_bytes);
+        assert!(!root.join(MAINTENANCE_FILE).exists());
+        assert!(!root.join("rsrs.db").exists());
+        let original = restore_operation_locked(root, "account", None, &receipt.restored, operation, &ownership, true)?
+            .context("full history lost the original operation")?;
+        assert_eq!(original.phase, "released");
+        let mut conflict = operation.clone();
+        conflict.request_fingerprint = "f".repeat(64);
+        assert!(operation_status(root, "account", &conflict).is_err());
+        Ok(())
+    }
     fn fixture() -> Result<(tempfile::TempDir, Connection)> {
         let directory = tempfile::tempdir()?;
         let db = Connection::open(directory.path().join("rsrs.db"))?;
@@ -1038,7 +1411,34 @@ mod tests {
         resume_sync(root, "0123456789abcdef0123456789abcdef")?;
         assert!(ensure_sync_allowed(root).is_ok());
         drop(restored);
-        assert!(restore_locked(root, "account", &keys, &manifest.id, &ownership)?.sync_quarantined);
+        let mut completed = Vec::new();
+        for _ in 0..2 {
+            let operation = controlled_receipt().operation.context("controlled operation missing")?;
+            let status = restore_operation_locked(root, "account", Some(&keys), &manifest.id, &operation, &ownership, true)?
+                .context("initial controlled restore missing")?;
+            assert!(status.receipt.sync_quarantined);
+            complete_restore(root, &status.receipt)?;
+            completed.push((operation, status.receipt));
+        }
+        let live = Connection::open(root.join("rsrs.db"))?;
+        live.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('after-o2','','')", [])?;
+        let before_retry = fs::read(root.join(RECOVERY_FILE))?;
+        let snapshot_count = list(root)?.len();
+        let (operation, first_receipt) = &completed[0];
+        for first_attempt in [false, true] {
+            let status = restore_operation_locked(root, "account", None, &manifest.id, operation, &ownership, first_attempt)?
+                .context("historical completed restore missing")?;
+            assert_eq!(status.phase, "released");
+            assert_eq!(status.receipt.before_restore, first_receipt.before_restore);
+        }
+        let mut conflict = operation.clone();
+        conflict.request_fingerprint = "f".repeat(64);
+        let error = restore_operation_locked(root, "account", None, &manifest.id, &conflict, &ownership, true)
+            .err().context("historical restore accepted conflicting parameters")?;
+        assert!(error.downcast_ref::<OperationConflict>().is_some());
+        assert_eq!(live.query_row("SELECT count(*) FROM memories WHERE id='after-o2'", [], |row| row.get::<_, u64>(0))?, 1);
+        assert_eq!(list(root)?.len(), snapshot_count);
+        assert_eq!(fs::read(root.join(RECOVERY_FILE))?, before_retry);
         Ok(())
     }
 

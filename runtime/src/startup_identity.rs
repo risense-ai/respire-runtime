@@ -28,6 +28,7 @@ struct Startup {
     context: LaunchContext,
     grant: Option<LaunchGrant>,
     auth_control: bool,
+    paused_control: bool,
 }
 
 pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -> Result<()> {
@@ -72,7 +73,7 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     };
     respire_commands::rpc_serve::set_launch_instance_id(&instance_id)?;
     STARTUP
-        .set(Startup { context, grant, auth_control: false })
+        .set(Startup { context, grant, auth_control: false, paused_control: false })
         .map_err(|_| anyhow::anyhow!("runtime startup identity was installed twice"))?;
     Ok(())
 }
@@ -84,14 +85,43 @@ pub(crate) fn managed_id() -> Option<&'static str> {
 /// An owned inherited channel is the capability, not the serialized identity.
 /// Do not consume a serving grant file or create runtime state for a read probe.
 pub(crate) fn authorize_control(grant: LaunchGrant) -> Result<()> {
-    authorize_control_inner(grant, false)
+    authorize_control_inner(grant, false, false)
 }
 
 pub(crate) fn authorize_auth_control(grant: LaunchGrant) -> Result<()> {
-    authorize_control_inner(grant, true)
+    anyhow::ensure!(grant.maintenance.is_some(), "auth control requires a paused maintenance owner");
+    authorize_control_inner(grant, true, true)
 }
 
-fn authorize_control_inner(grant: LaunchGrant, auth: bool) -> Result<()> {
+pub(crate) fn authorize_account_completion(grant: LaunchGrant) -> Result<()> {
+    anyhow::ensure!(grant.maintenance.is_some(), "account completion requires a verified maintenance owner");
+    authorize_control_inner(grant, true, false)?;
+    verify_account_completion_authority()
+}
+
+pub(crate) fn verify_account_completion_authority() -> Result<()> {
+    let startup = STARTUP.get().context("account completion grant is missing")?;
+    anyhow::ensure!(startup.auth_control && !startup.paused_control,
+        "account completion cannot use an offline auth grant");
+    verify_managed_boot()?;
+    let grant = startup.grant.as_ref().context("account completion grant is missing")?;
+    let binding = grant.maintenance.as_ref().context("account completion maintenance is missing")?;
+    let bytes = read_private_file(&startup.context.root.join("runtime/autostart/maintenance.json"))?
+        .context("account completion maintenance disappeared")?;
+    let marker = parse_control(&bytes)?;
+    anyhow::ensure!(hash(&bytes) == binding.marker_sha256 && marker["phase"] == "Verified",
+        "account completion requires the exact verified maintenance receipt");
+    Ok(())
+}
+
+pub(crate) fn authorize_model_control(grant: LaunchGrant) -> Result<()> {
+    anyhow::ensure!(grant.maintenance.is_some(), "model preparation requires a paused maintenance owner");
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+        "interrupted auth control must be recovered before model preparation");
+    authorize_control_inner(grant, false, true)
+}
+
+fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Result<()> {
     anyhow::ensure!(STARTUP.get().is_none(), "runtime control grant was already consumed");
     respire_commands::runtime_policy::require_host("offline host control")?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
@@ -109,12 +139,12 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool) -> Result<()> {
         &grant.nonce,
         now_ms()?,
     )?;
-    verify_authority_for_mode(Some(&grant), &context, auth)?;
+    verify_authority_for_mode(Some(&grant), &context, paused)?;
     // Strict parsing must precede accepting the legacy account/path hash.
     if !auth { control_account(&context.profile)?; }
     // Pin the exact resolved spelling used by memory_revision before it opens DB.
     if !auth { respire_app::service::install_runtime_profile(resolved_profile); }
-    STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth })
+    STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth, paused_control: paused })
         .map_err(|_| anyhow::anyhow!("runtime control grant was already consumed"))?;
     Ok(())
 }
@@ -204,7 +234,7 @@ pub(crate) fn verify_managed_boot() -> Result<()> {
         current_context(startup.context.port)? == startup.context,
         "runtime launch context changed before opening the store"
     );
-    verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.auth_control)
+    verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.paused_control)
 }
 
 fn current_context(port: u16) -> Result<LaunchContext> {
@@ -700,6 +730,14 @@ mod tests {
         }))?;
         assert!(request.scope.is_none());
         assert!(crate::host_control::validate_request(&request).is_ok());
+        request.method = respire_protocol::HostControlOperation::ModelInstallPlan.method().into();
+        assert!(crate::host_control::validate_request(&request).is_ok());
+        request.operation_id = Some(grant.instance_id.clone());
+        assert!(crate::host_control::validate_request(&request).is_err());
+        request.operation_id = None;
+        request.method = "control.arbitrary".into();
+        assert!(crate::host_control::validate_request(&request).is_err());
+        request.method = respire_protocol::HostControlOperation::MemoryRevision.method().into();
         request.scope = Some(respire_protocol::RuntimeRequestScope {
             account_id: context.account_id.clone(),
             instance_id: grant.instance_id.clone(),
@@ -738,6 +776,21 @@ mod tests {
         }))?;
         assert!(crate::host_control::validate_auth_request(&auth).is_ok());
         assert!(crate::host_control::validate_request(&auth).is_err());
+        let mut account_request = auth.clone();
+        account_request.method = respire_protocol::host_control::HOST_AUTH_REGISTER_METHOD.into();
+        account_request.args = vec![serde_json::to_string(&respire_protocol::host_control::HostAuthRegisterParams {
+            schema_version: respire_protocol::HOST_AUTH_SCHEMA_V,
+            binding: params.binding.clone(),
+            identity: respire_protocol::HostAuthIdentity::Absent,
+            addr: "https://example.invalid".into(), user: "fixture-user".into(),
+            password: "fixture-only-password".into(), super_password: None,
+        })?];
+        assert!(crate::auth_control::AccountRequest::parse(&account_request).is_ok());
+        account_request.operation_id = None;
+        assert!(crate::auth_control::AccountRequest::parse(&account_request).is_err());
+        account_request.operation_id = auth.operation_id.clone();
+        account_request.args.push("unexpected".into());
+        assert!(crate::auth_control::AccountRequest::parse(&account_request).is_err());
         let mut changed = auth.clone();
         changed.operation_id = None;
         assert!(crate::host_control::validate_auth_request(&changed).is_err());

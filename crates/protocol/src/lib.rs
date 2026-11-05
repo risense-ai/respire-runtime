@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod maintenance_control;
 pub mod host_control;
 pub use host_control::{
     HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,

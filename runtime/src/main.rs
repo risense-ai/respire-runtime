@@ -18,6 +18,8 @@
 
 mod startup_identity;
 mod host_control;
+mod maintenance_control;
+mod auth_control;
 
 use std::io::Write;
 use std::process::ExitCode;

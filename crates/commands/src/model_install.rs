@@ -345,6 +345,244 @@ fn managed_backend_probe(selection: &ProbeSelection) -> Result<serde_json::Value
     result.map_err(|error| anyhow!("native probe: {error}"))
 }
 
+/// Describe preparation without downloading, probing, changing selection or releasing native code.
+/// The caller binds this snapshot to the existing authenticated operation scope.
+pub fn model_install_plan() -> Result<AssetsStatus> {
+    use respire_app::memory::{bge, onnx};
+    let epoch = crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let selection = ProbeSelection::capture()?;
+    let identity = selection.identity()?;
+    let mut assets = Vec::new();
+    if let Some(profile) = &selection.profile {
+        profile.validate()?;
+        let backend = profile.backend_profile.backend.as_str();
+        if matches!(backend, "onnx" | "mlx") {
+            for (name, resource) in [
+                ("profile-tokenizer", &profile.profile.tokenizer),
+                ("profile-weights", &profile.profile.weights),
+            ] {
+                let resource = resource
+                    .as_ref()
+                    .context("selected profile resource missing")?;
+                let unsupported = (backend == "mlx" && !cfg!(target_os = "macos"))
+                    || (backend == "onnx"
+                        && profile.engine != onnx::Engine::Cpu
+                        && !cfg!(any(windows, target_os = "macos")));
+                let reason = if unsupported {
+                    Some("selected backend is unsupported on this platform")
+                } else if resource.download.is_none() {
+                    Some("selected profile has no pinned download source; Runtime-specific preparation is required")
+                } else {
+                    None
+                };
+                assets.push(planned_asset(
+                    name,
+                    profile.profile.embedding["revision"]
+                        .as_str()
+                        .context("profile revision missing")?,
+                    std::path::absolute(&resource.path)?,
+                    resource.size,
+                    &resource.sha256,
+                    resource.download.as_deref().unwrap_or(""),
+                    reason,
+                )?);
+            }
+        } else {
+            assets.push(unprepared_asset(
+                "profile-backend",
+                "selected backend has no local file preparation contract",
+            ));
+        }
+        let unsupported_provider = profile
+            .backend_profile
+            .native
+            .as_ref()
+            .is_some_and(|native| {
+                !((profile.engine == onnx::Engine::Cpu
+                    && native.provider == "CPUExecutionProvider")
+                    || (cfg!(windows)
+                        && profile.engine == onnx::Engine::Gpu
+                        && native.provider == "DmlExecutionProvider"))
+            });
+        if profile.engine == onnx::Engine::Npu || unsupported_provider {
+            assets.push(unprepared_asset("native-provider", "native catalog/provider preparation requires the Runtime platform interface; file pins alone cannot attest provider readiness"));
+        }
+    } else {
+        let engine = onnx::Engine::parse(&selection.engine)?;
+        let variant = onnx::parse_variant(&selection.variant)?;
+        let baseline = onnx::parse_variant("quantized")?;
+        // Match the existing installer target, including strict environment validation.
+        // Loading may discover a legacy/system directory; installation must not overwrite it.
+        let directory = std::path::absolute(install_target_dir(None)?)?;
+        let unsupported = engine != onnx::Engine::Cpu && !cfg!(any(windows, target_os = "macos"));
+        let reason = unsupported.then_some("selected engine is unsupported on this platform");
+        for (name, file, size, hash) in [
+            (
+                "bge-m3-tokenizer",
+                "tokenizer.json".to_owned(),
+                17_082_821,
+                TOKENIZER_SHA256,
+            ),
+            (
+                "bge-m3-baseline",
+                onnx::variant_file_name(baseline.name),
+                baseline.size,
+                baseline.sha256,
+            ),
+        ] {
+            assets.push(planned_asset(
+                name,
+                MODEL_REVISION,
+                directory.join(&file),
+                size,
+                hash,
+                &file_url("https://huggingface.co", &file),
+                reason,
+            )?);
+        }
+        if variant.name != baseline.name {
+            let file = onnx::variant_file_name(variant.name);
+            assets.push(planned_asset(
+                "bge-m3-model",
+                MODEL_REVISION,
+                directory.join(&file),
+                variant.size,
+                variant.sha256,
+                &file_url("https://huggingface.co", &file),
+                reason,
+            )?);
+        }
+        if selection.cpu_owned {
+            anyhow::ensure!(
+                respire_app::env::var_os("RSRS_CPU_OWNED_ORT_FILE").is_none(),
+                "unset RSRS_CPU_OWNED_ORT_FILE before preparing pinned weights"
+            );
+            assets.push(planned_asset(
+                "bge-m3-cpu-ort",
+                bge::CPU_ORT_REVISION,
+                std::path::absolute(bge::cpu_ort_cache_path()?)?,
+                bge::CPU_ORT_SIZE,
+                bge::CPU_ORT_SHA256,
+                bge::CPU_ORT_URL,
+                None,
+            )?);
+        }
+        if engine == onnx::Engine::Npu {
+            assets.push(unprepared_asset("native-provider", "NPU catalog/provider preparation requires the Runtime platform interface; do not copy or release the SDK catalog DLL in the client"));
+        }
+    }
+    anyhow::ensure!(
+        crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire) == epoch
+            && ProbeSelection::capture()?.identity()? == identity,
+        "selected model changed while planning installation"
+    );
+    Ok(AssetsStatus::installation_plan(assets))
+}
+
+fn planned_asset(
+    name: &str,
+    version: &str,
+    path: PathBuf,
+    size: u64,
+    hash: &str,
+    source: &str,
+    incompatible: Option<&str>,
+) -> Result<AssetRequirement> {
+    anyhow::ensure!(
+        path.is_absolute() && path.to_str().is_some(),
+        "model asset path must be absolute Unicode"
+    );
+    anyhow::ensure!(
+        size > 0 && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+        "model asset requires a fixed SHA-256 and size"
+    );
+    // Unsupported profile sources must not be advertised as executable Missing files.
+    let incompatible = incompatible.or_else(|| {
+        (!planned_source_supported(name, version, &path, source)).then_some(
+            "source is unsupported by client preparation: require an official immutable Hugging Face URL or pinned CPU release; use the Runtime-specific preparation interface",
+        )
+    });
+    Ok(AssetRequirement {
+        name: name.to_owned(),
+        version: Some(version.to_owned()),
+        path: Some(
+            path.to_str()
+                .context("model path is not Unicode")?
+                .to_owned(),
+        ),
+        expected_size: Some(size),
+        sha256: Some(hash.to_owned()),
+        suggested_source: source.to_owned(),
+        state: if incompatible.is_some() {
+            AssetState::Incompatible
+        } else {
+            AssetState::Missing
+        },
+        actual_size: None,
+        actual_sha256: None,
+        reason: incompatible.map(str::to_owned),
+    })
+}
+
+fn planned_source_supported(name: &str, version: &str, target: &Path, source: &str) -> bool {
+    // Match the client's restricted source contract, not a general URL allowlist.
+    let Some(filename) = target.file_name().and_then(|file| file.to_str()) else {
+        return false;
+    };
+    if filename.starts_with('.')
+        || !filename
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    {
+        return false;
+    }
+    let cpu = name == "bge-m3-cpu-ort";
+    let prefix = if cpu {
+        "https://github.com/risense-ai/respire-cli/releases/download/"
+    } else {
+        "https://huggingface.co/"
+    };
+    let Some(relative) = source.strip_prefix(prefix) else {
+        return false;
+    };
+    let path: Vec<_> = relative.split('/').collect();
+    if !path.iter().all(|part| {
+        !part.is_empty()
+            && *part != "."
+            && *part != ".."
+            && part
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    }) {
+        return false;
+    }
+    if cpu {
+        !version.is_empty() && path.len() == 2 && path[1] == filename
+    } else {
+        path.len() >= 5
+            && path[2] == "resolve"
+            && path[3] == version
+            && path.last().copied() == Some(filename)
+            && version.len() == 40
+            && version.bytes().all(|c| c.is_ascii_hexdigit())
+    }
+}
+
+fn unprepared_asset(name: &str, reason: &str) -> AssetRequirement {
+    AssetRequirement {
+        name: name.to_owned(),
+        version: None,
+        path: None,
+        expected_size: None,
+        sha256: None,
+        suggested_source: String::new(),
+        state: AssetState::Incompatible,
+        actual_size: None,
+        actual_sha256: None,
+        reason: Some(reason.to_owned()),
+    }
+}
+
 pub fn assets_status() -> Result<AssetsStatus> {
     let epoch = crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire);
     let selection = ProbeSelection::capture()?;
