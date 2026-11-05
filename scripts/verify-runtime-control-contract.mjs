@@ -789,10 +789,56 @@ function profileRecoveryFailure(payload, params, kind) {
   return null;
 }
 
+// These anchors describe fixture evidence, not a consumed launch grant.
+function settingsAuthorityFailure(payload, binding, context, identity, read) {
+  const a = context.authority, snapshot = payload.request.method === "control.snapshot.preflight";
+  if (a.installation_root !== binding.installation_root || a.profile !== binding.profile || a.launch_id !== binding.launch_id ||
+      (binding.expected_account_id ?? null) !== (snapshot ? null : identity.account_id)) return "settings_binding_mismatch";
+  if (!same(a.identity, identity) || a.serving_authorized !== false ||
+      ["parent_verified", "binding_verified_before", "binding_verified_after", "grant_verified", "registration_verified"].some(k => a[k] !== true) ||
+      a.grant_maintenance !== (payload.maintenance_phase === "Idle" ? "none" : payload.maintenance_phase) ||
+      !(read ? ["Idle", "Starting", "Verified"] : ["Paused"]).includes(payload.maintenance_phase)) return "settings_authority_mismatch";
+  return null;
+}
+
+function offlineReadFailure(payload) {
+  const {request, result, offline_context: c} = payload;
+  if (Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
+  if (["history", "original_operation_id", "original_fingerprint", "config_context", "write_context", "key_context",
+      "migration_context", "profile_context", "recovery_context", "progress", "ledger"].some(k => Object.hasOwn(payload, k)) ||
+      request.operation_id != null || request.idempotency_key != null) return "host_request_invalid";
+  let params;
+  try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
+  if (!hostSchemaValid(params, hostSchema.$defs.offlineReadParams)) return "host_params_invalid";
+  if (!c || !hostSchemaValid(c, hostSchema.$defs.offlineReadContext)) return "settings_context_mismatch";
+  const authority = settingsAuthorityFailure(payload, params.binding, c, c.authority.identity, true);
+  if (authority) return authority;
+  const snapshot = request.method === "control.snapshot.preflight", metadata = request.method === "control.metadata.status";
+  if (snapshot ? !c.snapshot_clear : c.auth_recovery_pending) return "offline_read_blocked";
+  if (c.mutated) return "offline_read_mutation";
+  if (payload.finish_maintenance) return "maintenance_not_terminal";
+  if (!result || !hostSchemaValid(result, hostSchema.$defs.offlineEnvelope) ||
+      !same(result, payload.private_response) ||
+      result.command !== (snapshot ? "snapshot-preflight" : metadata ? "metadata" : "agent-config") ||
+      !hostSchemaValid(result.summary, hostSchema.$defs[snapshot ? "snapshotPreflightSummary" : metadata ? "metadataStatusSummary" : "agentReadSummary"]) ||
+      (metadata ? !hostSchemaValid(result.details, hostSchema.$defs.metadataStatusDetails) ||
+        result.summary.enabled !== result.details.enabled || result.summary.mode !== result.details.mode : result.details !== null)) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const items = result.items.filter(i => i.name === name);
+    if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "host_result_invalid";
+  }
+  const r = payload.private_rpc_response;
+  if (!r || r.id !== request.id || r.operation_id != null || r.idempotency_key != null ||
+      !same(r.envelope, result) || r.ok !== true || r.exit !== 0 || r.code !== null) return "host_result_invalid";
+  return null;
+}
+
 function privateHostFailure(payload) {
   if (payload.channel !== "inherited_pipe") return "private_channel_required";
   if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
   const request = payload.request, method = hostSchema["x-methods"][request.method];
+  if (method.params === "offlineReadParams") return offlineReadFailure(payload);
+  if (Object.hasOwn(payload, "offline_context")) return "host_request_invalid";
   if (!["profileResult", "recoveryResult"].includes(method.result) &&
       ["profile_context", "recovery_context", "private_rpc_response"].some(key => Object.hasOwn(payload, key))) return "host_request_invalid";
   if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult", "migrationResult", "profileResult", "recoveryResult"].includes(method.result) &&
@@ -917,6 +963,23 @@ for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive"
     checked++;
   }
   if (checked !== newCount + extraCount || group.length + extraCount - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
+}
+
+const settingsExtension = manifest.extensions.settings;
+if (settingsExtension.schema !== "schema/private-host-control.schema.json" ||
+    settingsExtension.consumer !== "consumers/private_host_control.rs") fail("settings must reuse the shared schema and consumer");
+for (const [group, count] of [["positive", 7], ["negative", 26]]) {
+  const paths = settingsExtension.fixtures[group];
+  if (paths.length !== count || new Set(paths).size !== count) fail("settings fixture count drift");
+  for (const name of paths) {
+    if (!boundPaths.has(name) || [...positive, ...negative, ...profileRecoveryExtension.fixtures.positive,
+        ...profileRecoveryExtension.fixtures.negative].includes(name)) fail("unbound or duplicate settings fixture");
+    const f = readJSON(fixturePath(name));
+    if (f.fixture_type !== "private_host_control" || f.expected !== (group === "positive" ? "accept" : "reject")) fail("settings fixture kind");
+    if (group === "positive" && !hostSchemaValid(f, hostSchema)) fail("invalid settings fixture container");
+    const actual = privateHostFailure(f.payload), expected = group === "positive" ? null : f.error_code;
+    if (actual !== expected) fail(`${name}: settings rejection ${actual}, expected ${expected}`);
+  }
 }
 
 const spaceExtension = manifest.extensions.space;

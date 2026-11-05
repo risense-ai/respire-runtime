@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://respire.rs/contracts/runtime-control/private-host-control.schema.json",
   "title": "Inherited auth continuation, model preparation, snapshot maintenance and private secret fixtures; fixed identity writes, super-reset and model maintenance; frozen fivekeys/completion and local profile migration",
-  "description": "Frozen model_control.rs DTOs use HostModelParams and ModelPreparation. x-methods selects decoded args/result validation. Selection SHA-256 is opaque: fixtures bind request to response, never claim authoritative recomputation or native execution. Profile and legacy recovery contexts are fixture-only evidence anchors, not grants, journals, or proof of native filesystem exclusion. Recovery methods prohibit operation fields even when legacy recovery has local effects.",
+  "description": "Frozen model_control.rs DTOs use HostModelParams and ModelPreparation. x-methods selects decoded args/result validation. Selection SHA-256 is opaque: fixtures bind request to response, never claim authoritative recomputation or native execution. Profile and legacy recovery contexts are fixture-only evidence anchors, not grants, journals, or proof of native filesystem exclusion. Recovery methods prohibit operation fields even when legacy recovery has local effects. Offline settings contexts are fixture evidence anchors only; no grant is created or executed.",
   "type": "object",
   "required": [
     "fixture_type",
@@ -721,7 +721,10 @@
             "control.profile.remove",
             "control.profile.result",
             "control.auth.recovery_status",
-            "control.auth.recover_legacy"
+            "control.auth.recover_legacy",
+            "control.metadata.status",
+            "control.agent_config.read",
+            "control.snapshot.preflight"
           ]
         },
         "args": {
@@ -825,6 +828,9 @@
         },
         "private_rpc_response": {
           "$ref": "#/$defs/profileRecoveryResponse"
+        },
+        "offline_context": {
+          "$ref": "#/$defs/offlineReadContext"
         }
       },
       "additionalProperties": false
@@ -3880,6 +3886,308 @@
         "data_dir"
       ],
       "additionalProperties": false
+    },
+    "metadataIdentity": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "account_id",
+        "session_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "settingsAuthority": {
+      "type": "object",
+      "properties": {
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/metadataIdentity"
+        },
+        "grant_maintenance": {
+          "enum": [
+            "none",
+            "Paused",
+            "Verified",
+            "Starting"
+          ]
+        },
+        "serving_authorized": {
+          "type": "boolean"
+        },
+        "parent_verified": {
+          "type": "boolean"
+        },
+        "binding_verified_before": {
+          "type": "boolean"
+        },
+        "binding_verified_after": {
+          "type": "boolean"
+        },
+        "launch_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "grant_verified": {
+          "type": "boolean"
+        },
+        "registration_verified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "installation_root",
+        "profile",
+        "identity",
+        "grant_maintenance",
+        "serving_authorized",
+        "parent_verified",
+        "binding_verified_before",
+        "binding_verified_after",
+        "launch_id",
+        "grant_verified",
+        "registration_verified"
+      ],
+      "additionalProperties": false
+    },
+    "offlineReadParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding"
+      ],
+      "additionalProperties": false
+    },
+    "offlineReadContext": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/settingsAuthority"
+        },
+        "auth_recovery_pending": {
+          "type": "boolean"
+        },
+        "snapshot_clear": {
+          "type": "boolean"
+        },
+        "mutated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "authority",
+        "auth_recovery_pending",
+        "snapshot_clear",
+        "mutated"
+      ],
+      "additionalProperties": false
+    },
+    "offlineEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "enum": [
+            "metadata",
+            "agent-config",
+            "snapshot-preflight"
+          ]
+        },
+        "status": {
+          "const": "ok"
+        },
+        "summary": {
+          "type": "object"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {},
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadataStatusSummary": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "status"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "isolated",
+            "controlled_writers"
+          ]
+        },
+        "sdk_supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "enabled",
+        "mode",
+        "sdk_supported"
+      ],
+      "additionalProperties": false
+    },
+    "metadataStatusDetails": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "isolated",
+            "controlled_writers"
+          ]
+        },
+        "metadata_retained": {
+          "type": "boolean"
+        },
+        "backup": {}
+      },
+      "required": [
+        "enabled",
+        "mode",
+        "metadata_retained",
+        "backup"
+      ],
+      "additionalProperties": false
+    },
+    "agentReadSummary": {
+      "type": "object",
+      "required": [
+        "readonly",
+        "memory_off",
+        "workspace_mode",
+        "read_heat_runtime",
+        "recall_fusion_runtime"
+      ],
+      "properties": {
+        "readonly": {
+          "type": "boolean"
+        },
+        "memory_off": {
+          "type": "boolean"
+        },
+        "workspace_mode": {
+          "enum": [
+            "normal",
+            "readonly",
+            "off"
+          ]
+        }
+      }
+    },
+    "snapshotPreflightSummary": {
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "const": true
+        }
+      },
+      "required": [
+        "allowed"
+      ],
+      "additionalProperties": false
     }
   },
   "x-methods": {
@@ -4026,6 +4334,21 @@
     "control.auth.recover_legacy": {
       "params": "recoveryParams",
       "result": "recoveryResult",
+      "mutable": false
+    },
+    "control.metadata.status": {
+      "params": "offlineReadParams",
+      "result": "offlineEnvelope",
+      "mutable": false
+    },
+    "control.agent_config.read": {
+      "params": "offlineReadParams",
+      "result": "offlineEnvelope",
+      "mutable": false
+    },
+    "control.snapshot.preflight": {
+      "params": "offlineReadParams",
+      "result": "offlineEnvelope",
       "mutable": false
     }
   },

@@ -383,6 +383,57 @@ fn profile_recovery_failure(payload: &Value, params: &Value, kind: &str, schema:
     None
 }
 
+// Fixture authority anchors never create a grant or execute a product.
+fn settings_authority_failure(payload: &Value, binding: &Value, context: &Value, identity: &Value, read: bool) -> Option<&'static str> {
+    let a = &context["authority"];
+    let snapshot = payload["request"]["method"] == "control.snapshot.preflight";
+    if a["installation_root"] != binding["installation_root"] || a["profile"] != binding["profile"]
+        || a["launch_id"] != binding["launch_id"]
+        || binding["expected_account_id"] != if snapshot { Value::Null } else { identity["account_id"].clone() } {
+        return Some("settings_binding_mismatch");
+    }
+    if a["identity"] != *identity || a["serving_authorized"] != false
+        || ["parent_verified", "binding_verified_before", "binding_verified_after", "grant_verified", "registration_verified"]
+            .iter().any(|key| a[key] != true)
+        || a["grant_maintenance"] != if payload["maintenance_phase"] == "Idle" { serde_json::json!("none") } else { payload["maintenance_phase"].clone() }
+        || if read { !matches!(payload["maintenance_phase"].as_str(), Some("Idle" | "Starting" | "Verified")) }
+            else { payload["maintenance_phase"] != "Paused" } { return Some("settings_authority_mismatch"); }
+    None
+}
+
+fn offline_read_failure(payload: &Value, schema: &Value) -> Option<&'static str> {
+    let (request, result, c, d) = (&payload["request"], &payload["result"], &payload["offline_context"], &schema["$defs"]);
+    if payload.get("public_response").is_some() { return Some("private_secret_exposure"); }
+    if ["history", "original_operation_id", "original_fingerprint", "config_context", "write_context", "key_context",
+        "migration_context", "profile_context", "recovery_context", "progress", "ledger"].iter().any(|key| payload.get(key).is_some())
+        || !request["operation_id"].is_null() || !request["idempotency_key"].is_null() { return Some("host_request_invalid"); }
+    let params: Value = match request["args"][0].as_str().and_then(|text| serde_json::from_str(text).ok()) {
+        Some(value) => value, None => return Some("host_params_invalid"),
+    };
+    if !schema_valid(&params, &d["offlineReadParams"], d) { return Some("host_params_invalid"); }
+    if !schema_valid(c, &d["offlineReadContext"], d) { return Some("settings_context_mismatch"); }
+    if let Some(error) = settings_authority_failure(payload, &params["binding"], c, &c["authority"]["identity"], true) { return Some(error); }
+    let snapshot = request["method"] == "control.snapshot.preflight";
+    let metadata = request["method"] == "control.metadata.status";
+    if if snapshot { c["snapshot_clear"] != true } else { c["auth_recovery_pending"] != false } { return Some("offline_read_blocked"); }
+    if c["mutated"] != false { return Some("offline_read_mutation"); }
+    if payload["finish_maintenance"] == true { return Some("maintenance_not_terminal"); }
+    if !schema_valid(result, &d["offlineEnvelope"], d) || *result != payload["private_response"]
+        || result["command"] != if snapshot { "snapshot-preflight" } else if metadata { "metadata" } else { "agent-config" }
+        || !schema_valid(&result["summary"], &d[if snapshot { "snapshotPreflightSummary" } else if metadata { "metadataStatusSummary" } else { "agentReadSummary" }], d)
+        || if metadata { !schema_valid(&result["details"], &d["metadataStatusDetails"], d)
+            || result["summary"]["enabled"] != result["details"]["enabled"] || result["summary"]["mode"] != result["details"]["mode"] }
+            else { !result["details"].is_null() } { return Some("host_result_invalid"); }
+    for (name, status, value) in [("control_ready", "ok", "true"), ("store_ready", "skip", "false")] {
+        let items: Vec<_> = result["items"].as_array()?.iter().filter(|item| item["name"] == name).collect();
+        if items.len() != 1 || items[0]["status"] != status || items[0]["value"] != value { return Some("host_result_invalid"); }
+    }
+    let r = &payload["private_rpc_response"];
+    if r.is_null() || r["id"] != request["id"] || !r["operation_id"].is_null() || !r["idempotency_key"].is_null()
+        || r["envelope"] != *result || r["ok"] != true || r["exit"] != 0 || !r["code"].is_null() { return Some("host_result_invalid"); }
+    None
+}
+
 fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     if payload["channel"] != "inherited_pipe" { return Some("private_channel_required"); }
     let definitions = &schema["$defs"];
@@ -390,6 +441,8 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let request = &payload["request"];
     let method = request["method"].as_str()?;
     let spec = &schema["x-methods"][method];
+    if spec["params"] == "offlineReadParams" { return offline_read_failure(payload, schema); }
+    if payload.get("offline_context").is_some() { return Some("host_request_invalid"); }
     if !matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult"))
         && ["profile_context", "recovery_context", "private_rpc_response"].iter().any(|key| payload.get(key).is_some()) {
         return Some("host_request_invalid");
@@ -526,6 +579,13 @@ fn producer_types(payload: &Value) -> Result<()> {
         | "control.profile.remove" | "control.profile.result") {
         let parsed: respire_protocol::RpcResponse<Value> = serde_json::from_value(payload["private_rpc_response"].clone())?;
         assert_eq!(serde_json::to_value(parsed)?, payload["private_rpc_response"]);
+    }
+    if matches!(request.method.as_str(), "control.metadata.status" | "control.agent_config.read" | "control.snapshot.preflight") {
+        let parsed: respire_protocol::metadata_control::HostMetadataReadParams = serde_json::from_value(params.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, params);
+        let parsed: respire_protocol::RpcResponse<Value> = serde_json::from_value(payload["private_rpc_response"].clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, payload["private_rpc_response"]);
+        return Ok(());
     }
     match request.method.as_str() {
         HOST_AUTH_KEYGEN_METHOD | HOST_AUTH_RESULT_METHOD => { serde_json::from_value::<HostAuthKeygenParams>(params)?; }
@@ -678,5 +738,19 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
     }
     assert_eq!(count, 303);
     assert_eq!(extension_count, 153);
+    let settings = &manifest["extensions"]["settings"];
+    assert_eq!(settings["schema"], "schema/private-host-control.schema.json");
+    assert_eq!(settings["consumer"], "consumers/private_host_control.rs");
+    for (group, count) in [("positive", 7), ("negative", 26)] {
+        let paths = settings["fixtures"][group].as_array().context("settings fixtures")?;
+        assert_eq!(paths.len(), count);
+        for path in paths {
+            let path = path.as_str().context("settings fixture path")?;
+            let fixture: Value = serde_json::from_slice(&std::fs::read(root.join(path))?)?;
+            let expected = if group == "positive" { None } else { fixture["error_code"].as_str() };
+            assert_eq!(failure(&fixture["payload"], &schema), expected, "{path}");
+            if group == "positive" { producer_types(&fixture["payload"])?; }
+        }
+    }
     Ok(())
 }
