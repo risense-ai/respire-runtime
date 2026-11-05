@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 
 pub mod maintenance_control;
 pub mod host_control;
+pub mod model_control;
+pub mod secret_control;
+pub mod config_control;
+pub mod identity_control;
+pub mod identity_write_control;
+pub mod key_control;
+pub mod model_maintenance;
+pub use model_control::{HostModelParams, ModelInstallIntent, ModelPreparation, HOST_MODEL_SCHEMA_V};
 pub use host_control::{
     HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
     HOST_AUTH_SCHEMA_V, HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,

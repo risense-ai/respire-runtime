@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
+mod private_host_control {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/runtime-control/consumers/private_host_control.rs"));
+}
+
 #[test]
 fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     use respire_protocol::{HostControlOperation, HostControlParams, RpcRequest, HOST_CONTROL_SCHEMA_V};
@@ -55,6 +59,29 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     auth["identity"]["generation"] = json!(0);
     assert!(serde_json::from_value::<HostAuthKeygenParams>(auth).is_err());
     assert!(serde_json::from_value::<HostAuthIdentity>(json!({"kind":"anonymous"})).is_err());
+    use respire_protocol::host_control::{HostAuthRegisterParams, HostAuthLoginParams, HostAuthAccountParams};
+    let register = json!({"schema_version":1,"binding":params.binding,"identity":{"kind":"absent"},
+        "addr":"https://example.invalid","user":"roundtrip-user","password":"private-pipe-only","super_password":null});
+    let parsed: HostAuthRegisterParams = serde_json::from_value(register.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, register);
+    let mut unknown = register.clone();
+    unknown["argv"] = json!(["keygen"]);
+    assert!(serde_json::from_value::<HostAuthRegisterParams>(unknown).is_err());
+    let mut login = register;
+    let object = login.as_object_mut().context("login parameters are an object")?;
+    object.remove("password");
+    object.insert("authorization".into(), json!({"kind":"password","password":"private-pipe-only","totp":null}));
+    object.insert("super_password".into(), json!("recovery-code"));
+    let parsed: HostAuthLoginParams = serde_json::from_value(login.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, login);
+    login["authorization"]["exec"] = json!(true);
+    assert!(serde_json::from_value::<HostAuthLoginParams>(login).is_err());
+    let query = json!({"schema_version":1,"binding":params.binding,"identity":{"kind":"absent"}});
+    let parsed: HostAuthAccountParams = serde_json::from_value(query.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, query);
+    let mut unknown = query;
+    unknown["verified"] = json!(true);
+    assert!(serde_json::from_value::<HostAuthAccountParams>(unknown).is_err());
     Ok(())
 }
 
@@ -268,8 +295,8 @@ fn manifest_lists_the_frozen_fixture_sets() -> Result<()> {
     let negative = manifest["fixtures"]["negative"]
         .as_array()
         .context("negative fixtures")?;
-    assert_eq!(positive.len(), 25);
-    assert_eq!(negative.len(), 48);
+    assert_eq!(positive.len(), 53);
+    assert_eq!(negative.len(), 134);
     assert_eq!(manifest["contract"], "runtime-control");
     assert_eq!(manifest["release_metadata_schema_version"], 2);
     Ok(())

@@ -47,6 +47,7 @@ pub struct HostControlMaintenanceBinding {
 pub enum HostControlOperation {
     MemoryRevision,
     ModelInstallPlan,
+    ModelInstallVerify,
 }
 
 impl HostControlOperation {
@@ -54,6 +55,7 @@ impl HostControlOperation {
         match self {
             Self::MemoryRevision => "control.memory_revision",
             Self::ModelInstallPlan => "control.model_install_plan",
+            Self::ModelInstallVerify => "control.model_install_verify",
         }
     }
 }
@@ -135,7 +137,43 @@ pub struct HostAuthLoginParams {
     pub addr: String,
     pub user: String,
     pub authorization: HostAuthAuthorization,
-    pub super_password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub super_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<HostAuthLoginContinuation>,
+}
+
+/// Supplemental input travels on the inherited channel; never journal this object.
+/// Reuse the original operation/key; these fields cannot replace its bound intent.
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginContinuation {
+    pub legacy_password: Option<String>,
+    pub account_secret: Option<String>,
+    pub source_secret: Option<String>,
+    pub secret_key: Option<String>,
+    pub new_super: Option<String>,
+    // Admission intent: repeat these unchanged on every continuation of this operation.
+    #[serde(default)]
+    pub migrate_local: bool,
+    #[serde(default)]
+    pub migrate_vault: bool,
+    #[serde(default)]
+    pub offer_local_merge: bool,
+    // Supplemental confirmation of the destination already offered by Runtime.
+    pub merge_local: Option<bool>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginStatus {
+    pub required_inputs: Vec<String>,
+    pub user: String,
+    pub addr: String,
+    pub dir: Option<PathBuf>,
+    pub super_issued: Option<String>,
+    pub import: Option<serde_json::Value>,
+    pub sync: Option<serde_json::Value>,
 }
 
 /// Query/finalization uses the original outer operation ID and idempotency key.
@@ -151,6 +189,7 @@ pub struct HostAuthAccountParams {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostAuthAccountOutcome {
+    AwaitingInput,
     AwaitingVerification,
     Committed,
     RolledBack,
@@ -168,6 +207,8 @@ pub struct HostAuthAccountResult {
     pub session_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub super_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<HostAuthLoginStatus>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

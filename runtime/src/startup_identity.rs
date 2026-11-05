@@ -114,11 +114,26 @@ pub(crate) fn verify_account_completion_authority() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn consumed_control_grant() -> Result<&'static LaunchGrant> {
+    STARTUP.get().and_then(|startup| startup.grant.as_ref())
+        .context("runtime control grant is missing")
+}
+
+pub(crate) fn authorize_snapshot_control(grant: LaunchGrant, finalize: bool) -> Result<()> {
+    anyhow::ensure!(grant.maintenance.is_some(), "snapshot control requires maintenance ownership");
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+        "interrupted auth control must be recovered before snapshot maintenance");
+    authorize_control_inner(grant, false, !finalize)
+}
+
 pub(crate) fn authorize_model_control(grant: LaunchGrant) -> Result<()> {
     anyhow::ensure!(grant.maintenance.is_some(), "model preparation requires a paused maintenance owner");
     anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
         "interrupted auth control must be recovered before model preparation");
-    authorize_control_inner(grant, false, true)
+    authorize_control_inner(grant, false, true)?;
+    anyhow::ensure!(!respire_app::service::off_mode(), "model preparation is unavailable while memory is off");
+    respire_app::service::ensure_writable()?;
+    respire_app::snapshot::ensure_no_incomplete_restore(&respire_app::service::data_dir())
 }
 
 fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Result<()> {
@@ -180,6 +195,73 @@ pub(crate) fn acquire_auth_ownership(
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
     verify_managed_boot()?;
     Ok(ownership)
+}
+
+/// An owned identity transaction may remove its session; the serving fence stays strict.
+pub(crate) fn verify_identity_write_result(
+    binding: &respire_protocol::ControlBinding,
+    launched_identity: &respire_protocol::HostAuthIdentity,
+    result: &respire_protocol::identity_write_control::HostIdentityWriteResult,
+) -> Result<()> {
+    let startup = STARTUP.get().context("identity write grant is missing")?;
+    anyhow::ensure!(startup.auth_control && startup.paused_control,
+        "identity write requires a Paused private control grant");
+    let grant = startup.grant.as_ref().context("identity write grant is missing")?;
+    let original_account = match launched_identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, original_account)?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    verify_authority_for_mode(Some(grant), &startup.context, true)?;
+    respire_app::login_transaction::verify_auth_identity(
+        &startup.context.root, &startup.context.profile, &result.identity,
+    )?;
+    validate_identity_write_context(&startup.context, launched_identity,
+        &current_context(startup.context.port)?, result)
+}
+
+fn validate_identity_write_context(
+    original: &LaunchContext,
+    launched_identity: &respire_protocol::HostAuthIdentity,
+    current: &LaunchContext,
+    result: &respire_protocol::identity_write_control::HostIdentityWriteResult,
+) -> Result<()> {
+    use respire_protocol::HostAuthIdentity;
+    use respire_protocol::identity_write_control::{HostIdentityWriteOperation, HostIdentityWriteOutcome};
+    anyhow::ensure!(result.path == original.profile.join("session.json"),
+        "identity write receipt path differs from the owned profile");
+    match (launched_identity, &result.identity) {
+        (_, HostAuthIdentity::Absent) => anyhow::ensure!(
+            matches!(launched_identity, HostAuthIdentity::Absent)
+                || matches!(&result.operation, HostIdentityWriteOperation::Logout { full: true }),
+            "this identity operation cannot remove its session"),
+        (HostAuthIdentity::Bound { account_id: before, .. }, HostAuthIdentity::Bound { account_id: after, .. }) =>
+            anyhow::ensure!(before == after, "identity write cannot change the account"),
+        (HostAuthIdentity::Unbound { operation_id: before, .. }, HostAuthIdentity::Unbound { operation_id: after, .. }) =>
+            anyhow::ensure!(before == after, "identity write cannot replace the unbound operation"),
+        _ => anyhow::bail!("identity write created a different session identity"),
+    }
+    let session_sha256 = match &result.identity {
+        HostAuthIdentity::Absent => None,
+        HostAuthIdentity::Bound { session_sha256, .. }
+        | HostAuthIdentity::Unbound { session_sha256, .. } => Some(session_sha256.as_str()),
+    };
+    anyhow::ensure!(result.session_sha256.as_deref() == session_sha256,
+        "identity write receipt session digest mismatch");
+    if result.outcome == HostIdentityWriteOutcome::Committed
+        && matches!(&result.operation, HostIdentityWriteOperation::Logout { full: true }) {
+        anyhow::ensure!(matches!(&result.identity, HostAuthIdentity::Absent),
+            "completed full logout still has a session");
+    }
+    let mut expected = original.clone();
+    expected.account_id = match &result.identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => account_id.clone(),
+        _ => hash(original.profile.display().to_string().as_bytes()),
+    };
+    anyhow::ensure!(*current == expected,
+        "identity write changed more than its owned account identity");
+    Ok(())
 }
 
 pub(crate) fn verify_control_binding(binding: &respire_protocol::ControlBinding) -> Result<()> {
@@ -468,7 +550,7 @@ fn validate_control_for_mode(
 }
 
 /// Match the CLI launch producer's birth format without inspecting command lines.
-fn process_birth(pid: u32) -> Result<Option<String>> {
+pub(crate) fn process_birth(pid: u32) -> Result<Option<String>> {
     anyhow::ensure!(pid > 0, "invalid launch owner PID");
     #[cfg(windows)]
     {
@@ -564,7 +646,7 @@ fn parse_control(bytes: &[u8]) -> Result<Value> {
         .map_err(|_| anyhow::anyhow!("invalid runtime startup authorization JSON"))
 }
 
-fn read_private_file(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_private_file(path: &Path) -> Result<Option<Vec<u8>>> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
@@ -621,7 +703,7 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -731,19 +813,78 @@ mod tests {
         assert!(request.scope.is_none());
         assert!(crate::host_control::validate_request(&request).is_ok());
         request.method = respire_protocol::HostControlOperation::ModelInstallPlan.method().into();
+        assert!(crate::host_control::validate_request(&request).is_err());
+        let mut model_params = respire_protocol::HostModelParams {
+            schema_version: respire_protocol::HOST_MODEL_SCHEMA_V,
+            binding: binding.clone(),
+            intent: respire_protocol::ModelInstallIntent::default(),
+            selection_sha256: None,
+        };
+        request.args = vec![serde_json::to_string(&model_params)?];
         assert!(crate::host_control::validate_request(&request).is_ok());
+        request.method = respire_protocol::HostControlOperation::ModelInstallVerify.method().into();
+        assert!(crate::host_control::validate_request(&request).is_err());
+        model_params.selection_sha256 = Some("a".repeat(64));
+        request.args = vec![serde_json::to_string(&model_params)?];
+        assert!(crate::host_control::validate_request(&request).is_ok());
+        model_params.selection_sha256 = Some("A".repeat(64));
+        request.args = vec![serde_json::to_string(&model_params)?];
+        assert!(crate::host_control::validate_request(&request).is_err());
+        model_params.selection_sha256 = Some("a".repeat(64));
+        request.args = vec![serde_json::to_string(&model_params)?];
         request.operation_id = Some(grant.instance_id.clone());
         assert!(crate::host_control::validate_request(&request).is_err());
         request.operation_id = None;
         request.method = "control.arbitrary".into();
         assert!(crate::host_control::validate_request(&request).is_err());
         request.method = respire_protocol::HostControlOperation::MemoryRevision.method().into();
+        request.args = vec![serde_json::to_string(&params)?];
         request.scope = Some(respire_protocol::RuntimeRequestScope {
             account_id: context.account_id.clone(),
             instance_id: grant.instance_id.clone(),
             generation: 1,
         });
         assert!(crate::host_control::validate_request(&request).is_err());
+        let secret_params = respire_protocol::secret_control::HostSecretReadParams {
+            schema_version: respire_protocol::secret_control::HOST_SECRET_SCHEMA_V,
+            binding: binding.clone(),
+            identity: respire_protocol::HostAuthIdentity::Bound {
+                account_id: context.account_id.clone(), session_sha256: "a".repeat(64),
+            },
+            reveal: true,
+        };
+        let mut secret_request: respire_protocol::RpcRequest = serde_json::from_value(json!({
+            "v": respire_commands::rpc_worker::PROTOCOL_V,
+            "id": grant.instance_id,
+            "method": respire_protocol::secret_control::HOST_SECRET_READ_METHOD,
+            "args": [serde_json::to_string(&secret_params)?],
+        }))?;
+        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_ok());
+        assert!(crate::host_control::validate_request(&secret_request).is_err());
+        secret_request.operation_id = Some(grant.instance_id.clone());
+        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_err());
+        secret_request.operation_id = None;
+        let mut extra = serde_json::to_value(&secret_params)?;
+        extra["unexpected"] = json!(true);
+        secret_request.args = vec![serde_json::to_string(&extra)?];
+        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_err());
+        let sessions = respire_protocol::identity_control::HostIdentitySessionListParams {
+            schema_version: respire_protocol::identity_control::HOST_IDENTITY_SCHEMA_V,
+            binding: binding.clone(),
+            identity: secret_params.identity.clone(),
+        };
+        let mut sessions_request = secret_request.clone();
+        sessions_request.method = respire_protocol::identity_control::HOST_IDENTITY_SESSION_LIST_METHOD.into();
+        sessions_request.args = vec![serde_json::to_string(&sessions)?];
+        assert!(crate::identity_control::IdentityRequest::parse(&sessions_request).is_ok());
+        assert!(crate::host_control::validate_request(&sessions_request).is_err());
+        sessions_request.operation_id = Some(grant.instance_id.clone());
+        assert!(crate::identity_control::IdentityRequest::parse(&sessions_request).is_err());
+        sessions_request.operation_id = None;
+        let mut extra = serde_json::to_value(&sessions)?;
+        extra["unexpected"] = json!(true);
+        sessions_request.args = vec![serde_json::to_string(&extra)?];
+        assert!(crate::identity_control::IdentityRequest::parse(&sessions_request).is_err());
         let value = serde_json::to_value(&binding)?;
         for (field, replacement) in [
             ("installation_root", json!("other-root")),
@@ -801,6 +942,49 @@ mod tests {
             account_id: context.account_id.clone(), instance_id: grant.instance_id, generation: 1,
         });
         assert!(crate::host_control::validate_auth_request(&auth).is_err());
+        use respire_protocol::identity_write_control::{HostIdentityWriteOperation,
+            HostIdentityWriteOutcome, HostIdentityWriteResult};
+        let launched = respire_protocol::HostAuthIdentity::Bound {
+            account_id: context.account_id.clone(), session_sha256: "c".repeat(64),
+        };
+        let mut receipt = HostIdentityWriteResult {
+            operation_id: auth.id.clone(), fingerprint: "d".repeat(64),
+            operation: HostIdentityWriteOperation::Logout { full: true },
+            outcome: HostIdentityWriteOutcome::Committed,
+            path: context.profile.join("session.json"), session_found: true,
+            session_sha256: None, identity: respire_protocol::HostAuthIdentity::Absent,
+            revoke: None,
+        };
+        let mut after_logout = context.clone();
+        after_logout.account_id = hash(context.profile.display().to_string().as_bytes());
+        validate_identity_write_context(&context, &launched, &after_logout, &receipt)?;
+        for field in ["root", "profile", "account", "generation", "image", "digest", "port"] {
+            let mut foreign = after_logout.clone();
+            match field {
+                "root" => foreign.root = PathBuf::from("foreign-root"),
+                "profile" => foreign.profile = PathBuf::from("foreign-profile"),
+                "account" => foreign.account_id = "e".repeat(64),
+                "generation" => foreign.sync_generation += 1,
+                "image" => foreign.image_path = PathBuf::from("foreign-runtime"),
+                "digest" => foreign.image_sha256 = "f".repeat(64),
+                "port" => foreign.port += 1,
+                _ => unreachable!("fixed launch context field"),
+            }
+            assert!(validate_identity_write_context(&context, &launched, &foreign, &receipt).is_err(), "{field}");
+        }
+        receipt.operation = HostIdentityWriteOperation::SessionRevoke { session_id: auth.id.clone() };
+        assert!(validate_identity_write_context(&context, &launched, &after_logout, &receipt).is_err());
+        receipt.operation = HostIdentityWriteOperation::Logout { full: true };
+        receipt.path = context.root.join("foreign-session.json");
+        assert!(validate_identity_write_context(&context, &launched, &after_logout, &receipt).is_err());
+        receipt.path = context.profile.join("session.json");
+        receipt.identity = launched.clone();
+        receipt.session_sha256 = Some("c".repeat(64));
+        assert!(validate_identity_write_context(&context, &launched, &context, &receipt).is_err());
+        receipt.operation = HostIdentityWriteOperation::Logout { full: false };
+        validate_identity_write_context(&context, &launched, &context, &receipt)?;
+        receipt.session_sha256 = None;
+        assert!(validate_identity_write_context(&context, &launched, &context, &receipt).is_err());
         Ok(())
     }
 

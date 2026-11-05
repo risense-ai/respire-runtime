@@ -1,6 +1,6 @@
 //! One-shot offline control, dispatched before serving or opening a business store.
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result};
@@ -10,6 +10,7 @@ use respire_protocol::{
     HOST_CONTROL_MAX_FRAME_BYTES, HOST_CONTROL_SCHEMA_V,
     HostAuthKeygenParams, HostAuthOutcome, HOST_AUTH_SCHEMA_V,
     HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
+    HostModelParams, HOST_MODEL_SCHEMA_V,
 };
 
 const PROTOCOL_V: u32 = respire_commands::rpc_worker::PROTOCOL_V;
@@ -18,6 +19,7 @@ const CONTROL_DEADLINE: Duration = Duration::from_secs(10);
 enum ControlEvent {
     Finished(RpcResponse<ResultEnvelope>),
     ParentRevoked,
+    LongControlStarted,
 }
 
 pub(crate) fn run() -> Result<i32> {
@@ -28,8 +30,14 @@ pub(crate) fn run() -> Result<i32> {
         let response = execute(&worker_progress, &sent);
         let _ = sent.send(ControlEvent::Finished(response));
     })?;
-    let response = match received.recv_timeout(CONTROL_DEADLINE) {
-        Ok(ControlEvent::Finished(response)) => response,
+    let mut deadline = Instant::now() + CONTROL_DEADLINE;
+    let response = loop {
+        match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(ControlEvent::LongControlStarted) => {
+            deadline = Instant::now() + Duration::from_secs(180);
+            continue;
+        }
+        Ok(ControlEvent::Finished(response)) => break response,
         Ok(ControlEvent::ParentRevoked) | Err(_) => {
             let mut response = progress.lock().map_err(|_| anyhow::anyhow!("control progress unavailable"))?.clone();
             response.code = Some("control_outcome_unknown".into());
@@ -42,7 +50,8 @@ pub(crate) fn run() -> Result<i32> {
                     Item::new("store_ready", Status::Skip, "false"),
                 ],
             ));
-            response
+            break response;
+        }
         }
     };
     // All writes are journaled before effects. Main exits after the response;
@@ -99,6 +108,229 @@ fn receive_and_execute(
     let request: RpcRequest = read_frame()
         .map_err(|_| ("invalid_request", "invalid host control RPC frame"))?;
     response.id = request.id.clone();
+    use respire_protocol::key_control::{HostKeyOutcome, HOST_KEY_SUPER_RESET_METHOD,
+        HOST_KEY_RESULT_METHOD, HOST_KEY_ROLLBACK_METHOD};
+    if [HOST_KEY_SUPER_RESET_METHOD, HOST_KEY_RESULT_METHOD, HOST_KEY_ROLLBACK_METHOD]
+        .contains(&request.method.as_str()) {
+        let key = crate::key_control::KeyRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private key request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("key-control", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private key launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private key parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(key.binding(), key.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private key ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(key.binding(), key.identity())
+            .map_err(|_| ("scope_mismatch", "private key identity mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private key deadline unavailable"))?;
+        let result = key.execute(&request, ownership)
+            .map_err(|_| ("key_outcome_unknown", "query the original key operation before retrying"))?;
+        crate::startup_identity::verify_auth_control_binding(key.binding(), &result.identity)
+            .map_err(|_| ("key_outcome_unknown", "key operation completion identity could not be verified"))?;
+        if result.source_profile != key.binding().profile
+            || result.target_profile.as_ref().is_some_and(|profile| *profile != key.binding().profile) {
+            return Err(("key_outcome_unknown", "key operation completion profile could not be verified"));
+        }
+        *control_ready = true;
+        response.ok = result.outcome != HostKeyOutcome::Unknown;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("key_outcome_unknown".into()); }
+        let status = match result.outcome {
+            HostKeyOutcome::Committed | HostKeyOutcome::RolledBack => Status::Ok,
+            HostKeyOutcome::Pending | HostKeyOutcome::AwaitingInput => Status::Pending,
+            HostKeyOutcome::Unknown => Status::Fail,
+        };
+        // This receipt can contain the new super password: never copy it to progress.
+        response.envelope = Some(ResultEnvelope::new("key-control", status,
+            serde_json::to_value(result)
+                .map_err(|_| ("key_outcome_unknown", "private key receipt encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
+    if request.method == respire_protocol::model_maintenance::MODEL_MAINTENANCE_METHOD {
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "model maintenance deadline unavailable"))?;
+        let result = crate::model_maintenance::execute(grant, &request)
+            .map_err(|_| ("model_maintenance_failed", "private model maintenance failed"))?;
+        response.envelope = Some(result);
+        response.ok = true;
+        response.exit = 0;
+        *control_ready = true;
+        return Ok(());
+    }
+    use respire_protocol::identity_write_control::{HostIdentityWriteOutcome,
+        HOST_IDENTITY_LOGOUT_METHOD, HOST_IDENTITY_SESSION_REVOKE_METHOD,
+        HOST_IDENTITY_WRITE_RESULT_METHOD};
+    if [HOST_IDENTITY_LOGOUT_METHOD, HOST_IDENTITY_SESSION_REVOKE_METHOD,
+        HOST_IDENTITY_WRITE_RESULT_METHOD].contains(&request.method.as_str()) {
+        let identity = crate::identity_write_control::IdentityWriteRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private identity write request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("identity-write", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private identity write launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private identity write parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(identity.binding(), identity.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private identity write ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(identity.binding(), identity.identity())
+            .map_err(|_| ("scope_mismatch", "private identity write identity mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private identity write deadline unavailable"))?;
+        let result = identity.execute(&request, &ownership)
+            .map_err(|_| ("identity_write_outcome_unknown", "query the original identity operation before retrying"))?;
+        crate::startup_identity::verify_identity_write_result(identity.binding(), identity.identity(), &result)
+            .map_err(|_| ("identity_write_outcome_unknown", "identity write completion could not be verified"))?;
+        *control_ready = true;
+        response.ok = result.outcome != HostIdentityWriteOutcome::Unknown;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("identity_write_outcome_unknown".into()); }
+        let status = match result.outcome {
+            HostIdentityWriteOutcome::Committed => Status::Ok,
+            HostIdentityWriteOutcome::Pending => Status::Pending,
+            HostIdentityWriteOutcome::Unknown => Status::Fail,
+        };
+        response.envelope = Some(ResultEnvelope::new("identity-write", status,
+            serde_json::to_value(result)
+                .map_err(|_| ("identity_write_outcome_unknown", "identity write receipt encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
+    if request.method == respire_protocol::config_control::CONFIG_VALIDATE_METHOD {
+        let result = crate::config_control::execute(grant, &request)
+            .map_err(|_| ("config_validation_failed", "private configuration validation failed"))?;
+        response.envelope = Some(result);
+        response.ok = true;
+        response.exit = 0;
+        *control_ready = true;
+        return Ok(());
+    }
+    if request.method == respire_protocol::identity_control::HOST_IDENTITY_SESSION_LIST_METHOD {
+        let identity = crate::identity_control::IdentityRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private identity read request"))?;
+        response.envelope = Some(ResultEnvelope::new("session", Status::Fail,
+            serde_json::json!({}), Vec::new()));
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private identity read launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private identity read parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(identity.binding(), identity.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private identity read ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(identity.binding(), identity.identity())
+            .map_err(|_| ("scope_mismatch", "private identity read identity mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private identity read deadline unavailable"))?;
+        let result = identity.execute(&ownership)
+            .map_err(|_| ("identity_read_unavailable", "private identity read failed"))?;
+        crate::startup_identity::verify_auth_control_binding(identity.binding(), identity.identity())
+            .map_err(|_| ("scope_mismatch", "private identity read identity changed"))?;
+        let mut envelope = ResultEnvelope::new("session", Status::Ok,
+            serde_json::json!({"action":"list"}), Vec::new());
+        // Session details use only the inherited response, never progress or a ledger.
+        envelope.details = serde_json::to_value(result)
+            .map_err(|_| ("identity_read_unavailable", "private identity read encoding failed"))?;
+        response.envelope = Some(envelope);
+        response.ok = true;
+        response.exit = 0;
+        *control_ready = true;
+        return Ok(());
+    }
+    if [respire_protocol::secret_control::HOST_SECRET_READ_METHOD,
+        respire_protocol::secret_control::HOST_KEYS_EXPORT_READ_METHOD]
+        .contains(&request.method.as_str()) {
+        let secret = crate::secret_control::SecretRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private secret read request"))?;
+        if respire_app::login_transaction::auth_recovery_pending()
+            .map_err(|_| ("auth_recovery_pending", "auth recovery status unavailable"))? {
+            return Err(("auth_recovery_pending", "finish auth recovery before reading secrets"));
+        }
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private secret read launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private secret read parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(secret.binding(), secret.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private secret read ownership unavailable"))?;
+        if respire_app::login_transaction::auth_recovery_pending()
+            .map_err(|_| ("auth_recovery_pending", "auth recovery status unavailable"))? {
+            return Err(("auth_recovery_pending", "finish auth recovery before reading secrets"));
+        }
+        crate::startup_identity::verify_auth_control_binding(secret.binding(), secret.identity())
+            .map_err(|_| ("scope_mismatch", "private secret read identity mismatch"))?;
+        let result = secret.execute(&ownership)
+            .map_err(|_| ("secret_read_unavailable", "private secret read failed"))?;
+        crate::startup_identity::verify_auth_control_binding(secret.binding(), secret.identity())
+            .map_err(|_| ("scope_mismatch", "private secret read identity changed"))?;
+        // Secret payloads go only to the inherited response, never progress or receipts.
+        response.envelope = Some(result);
+        response.ok = true;
+        response.exit = 0;
+        *control_ready = true;
+        return Ok(());
+    }
+    if request.method == respire_protocol::maintenance_control::MAINTENANCE_CONTROL_METHOD {
+        use respire_protocol::maintenance_control::{MaintenanceAction, MaintenanceControlParams, MaintenanceState};
+        if request.args.len() != 1 { return Err(("invalid_request", "invalid snapshot maintenance shape")); }
+        let params: MaintenanceControlParams = serde_json::from_str(&request.args[0])
+            .map_err(|_| ("invalid_request", "invalid snapshot maintenance params"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("snapshot", Status::Pending, serde_json::json!({}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        let marker = crate::startup_identity::read_private_file(
+            &grant.installation_root.join("runtime/autostart/maintenance.json"))
+            .map_err(|_| ("unauthorized", "snapshot maintenance marker unavailable"))?
+            .ok_or(("unauthorized", "snapshot maintenance marker missing"))?;
+        let verified_query = params.action == MaintenanceAction::Query
+            && serde_json::from_slice::<serde_json::Value>(&marker)
+                .is_ok_and(|value| value["phase"] == "Verified");
+        let finalize = matches!(params.action, MaintenanceAction::Commit | MaintenanceAction::Release) || verified_query;
+        if finalize {
+            crate::snapshot_authority::validate_finalize_launch(&grant, &marker)
+        } else {
+            crate::snapshot_authority::validate_offline_launch(&grant, &marker)
+        }.map_err(|_| ("unauthorized", "snapshot capability or role is invalid"))?;
+        crate::startup_identity::authorize_snapshot_control(grant, finalize)
+            .map_err(|_| ("unauthorized", "snapshot launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "snapshot parent watch failed"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "snapshot controller unavailable"))?;
+        let session = respire_app::auth::read_session_json()
+            .map_err(|_| ("scope_mismatch", "snapshot session is invalid"))?;
+        let account = session["user"].as_str().filter(|value| !value.is_empty())
+            .ok_or(("scope_mismatch", "snapshot account is missing"))?;
+        let result = if finalize {
+            crate::snapshot_authority::dispatch_finalize(&request, account)
+        } else {
+            crate::snapshot_authority::authorize_offline(&params, crate::maintenance_control::Access::Offline)
+                .map_err(|_| ("unauthorized", "snapshot offline authorization failed"))?;
+            let keys = if params.action == MaintenanceAction::Restore {
+                Some(respire_app::auth::load_local_session_with_owner()
+                    .map_err(|_| ("credentials_unavailable", "snapshot credentials unavailable"))?.0)
+            } else { None };
+            crate::snapshot_authority::dispatch_offline(&request, account, keys.as_ref(),
+                if params.action == MaintenanceAction::Restore { crate::maintenance_control::RestoreDispatch::FirstAttempt }
+                    else { crate::maintenance_control::RestoreDispatch::Resume })
+        }.map_err(|failure| {
+            response.error = Some(format!("{failure:#}"));
+            ("snapshot_outcome_unknown", "query the original snapshot operation before retrying")
+        })?;
+        *control_ready = true;
+        response.ok = result.state != MaintenanceState::Unknown;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("snapshot_outcome_unknown".into()); }
+        response.envelope = Some(ResultEnvelope::new("snapshot",
+            if !response.ok { Status::Fail } else if result.cleanup_pending { Status::Warn } else { Status::Ok },
+            serde_json::to_value(result).map_err(|_| ("snapshot_outcome_unknown", "snapshot receipt encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
     use respire_protocol::host_control::{HostAuthAccountOutcome, HOST_AUTH_REGISTER_METHOD,
         HOST_AUTH_LOGIN_METHOD, HOST_AUTH_ACCOUNT_RESULT_METHOD, HOST_AUTH_ACCOUNT_COMPLETE_METHOD,
         HOST_AUTH_ACCOUNT_ROLLBACK_METHOD};
@@ -131,7 +363,8 @@ fn receive_and_execute(
             ("account_outcome_unknown", "query the same account operation before retrying")
         })?;
         response.ok = matches!(result.outcome,
-            HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Committed);
+            HostAuthAccountOutcome::AwaitingInput | HostAuthAccountOutcome::AwaitingVerification
+                | HostAuthAccountOutcome::Committed);
         response.exit = if response.ok { 0 } else { 2 };
         response.code = match result.outcome {
             HostAuthAccountOutcome::Unknown => Some("account_outcome_unknown".into()),
@@ -139,7 +372,8 @@ fn receive_and_execute(
             _ => None,
         };
         response.envelope = Some(ResultEnvelope::new("auth-account",
-            if response.ok { Status::Ok } else { Status::Fail },
+            if result.outcome == HostAuthAccountOutcome::AwaitingInput { Status::Pending }
+            else if response.ok { Status::Ok } else { Status::Fail },
             serde_json::to_value(result).map_err(|_| ("account_outcome_unknown", "account receipt encoding failed"))?,
             Vec::new()));
         return Ok(());
@@ -176,9 +410,10 @@ fn receive_and_execute(
             serde_json::to_value(result).map_err(|_| ("auth_outcome_unknown", "auth result encoding failed"))?, Vec::new()));
         return Ok(());
     }
-    let params = validate_request(&request)?;
+    let (params, model_params) = validate_request(&request)?;
     let model_plan = request.method == HostControlOperation::ModelInstallPlan.method();
-    if model_plan {
+    let model_verify = request.method == HostControlOperation::ModelInstallVerify.method();
+    if model_plan || model_verify {
         crate::startup_identity::authorize_model_control(grant)
     } else {
         crate::startup_identity::authorize_control(grant)
@@ -190,13 +425,27 @@ fn receive_and_execute(
     crate::startup_identity::verify_control_binding(&params.binding)
         .map_err(|_| ("scope_mismatch", "host control binding does not match consumed grant"))?;
     *control_ready = true;
-    if model_plan {
-        let plan = respire_commands::model_install::model_install_plan()
-            .map_err(|_| ("model_plan_unavailable", "selected model installation plan unavailable"))?;
+    if model_plan || model_verify {
+        let command = if model_verify { "model-install-verify" } else { "model-install-plan" };
+        response.envelope = Some(ResultEnvelope::new(command, Status::Pending, serde_json::json!({}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        if model_verify {
+            // Only the authenticated Paused operation can extend the initial input deadline.
+            events.send(ControlEvent::LongControlStarted)
+                .map_err(|_| ("control_unavailable", "model verification controller unavailable"))?;
+        }
+        let model = model_params.as_ref()
+            .ok_or(("invalid_request", "model preparation parameters missing"))?;
+        let plan = if model_verify {
+            respire_commands::model_install::model_preparation_verify(&model.intent,
+                model.selection_sha256.as_deref()
+                    .ok_or(("invalid_request", "model preparation selection digest missing"))?)
+        } else { respire_commands::model_install::model_preparation_plan(&model.intent) }
+            .map_err(|_| ("model_plan_unavailable", "selected model preparation status unavailable"))?;
         crate::startup_identity::verify_control_binding(&params.binding)
             .map_err(|_| ("scope_mismatch", "host control identity changed during model planning"))?;
-        let mut envelope = ResultEnvelope::new("model-install-plan", Status::Ok,
-            serde_json::json!({"complete":false}), Vec::new());
+        let mut envelope = ResultEnvelope::new(command, Status::Ok,
+            serde_json::json!({"complete":plan.assets.complete}), Vec::new());
         envelope.details = serde_json::to_value(plan)
             .map_err(|_| ("model_plan_unavailable", "model installation plan encoding failed"))?;
         response.envelope = Some(envelope);
@@ -266,13 +515,14 @@ pub(crate) fn validate_auth_request(request: &RpcRequest) -> std::result::Result
 
 pub(crate) fn validate_request(
     request: &RpcRequest,
-) -> std::result::Result<HostControlParams, ControlFailure> {
+) -> std::result::Result<(HostControlParams, Option<HostModelParams>), ControlFailure> {
     if request.v != PROTOCOL_V {
         return Err(("protocol_version_mismatch", "protocol_version_mismatch"));
     }
     if !uuid::Uuid::parse_str(&request.id)
         .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == request.id)
-        || ![HostControlOperation::MemoryRevision.method(), HostControlOperation::ModelInstallPlan.method()]
+        || ![HostControlOperation::MemoryRevision.method(), HostControlOperation::ModelInstallPlan.method(),
+            HostControlOperation::ModelInstallVerify.method()]
             .contains(&request.method.as_str())
         || request.args.len() != 1
         || request.scope.is_some()
@@ -284,12 +534,27 @@ pub(crate) fn validate_request(
     {
         return Err(("invalid_request", "unsupported host control RPC shape"));
     }
+    if request.method != HostControlOperation::MemoryRevision.method() {
+        let params: HostModelParams = serde_json::from_str(&request.args[0])
+            .map_err(|_| ("invalid_request", "invalid model preparation params"))?;
+        let verify = request.method == HostControlOperation::ModelInstallVerify.method();
+        if params.schema_version != HOST_MODEL_SCHEMA_V
+            || if verify {
+                !params.selection_sha256.as_deref().is_some_and(|digest| digest.len() == 64
+                    && digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+            } else { params.selection_sha256.is_some() }
+        {
+            return Err(("invalid_request", "invalid model preparation schema or selection digest"));
+        }
+        return Ok((HostControlParams { schema_version: HOST_CONTROL_SCHEMA_V,
+            binding: params.binding.clone() }, Some(params)));
+    }
     let params: HostControlParams = serde_json::from_str(&request.args[0])
         .map_err(|_| ("invalid_request", "invalid host control params"))?;
     if params.schema_version != HOST_CONTROL_SCHEMA_V {
         return Err(("invalid_request", "unsupported host control schema"));
     }
-    Ok(params)
+    Ok((params, None))
 }
 
 fn read_frame<T: serde::de::DeserializeOwned>() -> Result<T> {

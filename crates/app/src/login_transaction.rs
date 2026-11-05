@@ -9,6 +9,12 @@ use respire_protocol::{HostAuthIdentity, HostAuthOutcome, HostAuthResult};
 use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
     HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams};
 
+mod login;
+mod identity;
+pub use identity::{control_identity_write, control_identity_write_result};
+mod keys;
+pub use keys::{control_key, control_key_result, control_key_rollback};
+
 #[derive(Serialize, Deserialize)]
 struct Recovery {
     directory: PathBuf,
@@ -18,6 +24,8 @@ struct Recovery {
     backends: Vec<String>,
     #[serde(default)]
     pass_backends: Vec<String>,
+    #[serde(default)]
+    totp_backends: Vec<String>,
     directory_existed: bool,
     #[serde(default)]
     operation_id: Option<String>,
@@ -35,7 +43,7 @@ struct Journal {
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AuthPhase { Admitted, RemotePending, RemoteUnknown, Authorized, Prepared, AwaitingVerification, RollingBack, Committed, RolledBack }
+enum AuthPhase { Admitted, LoginInput, RemotePending, RemoteUnknown, Authorized, Prepared, AwaitingVerification, RollingBack, Committed, RolledBack }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +59,8 @@ struct AccountOperation {
     published_vault: bool,
     #[serde(default)]
     vault_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login: Option<login::LoginProgress>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +79,10 @@ struct AuthRecord {
     phase: AuthPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<AccountOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<identity::IdentityOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_operation: Option<keys::KeyOperation>,
 }
 
 fn digest(bytes: &[u8]) -> String { hex::encode(sha2::Sha256::digest(bytes)) }
@@ -99,6 +113,11 @@ fn save_journal(journal: &Journal) -> Result<()> {
 }
 
 fn retire_active(journal: &mut Journal) -> Result<()> {
+    if let Some(active) = &journal.active {
+        for backend in &active.totp_backends {
+            crate::keystore::remove_imported(&active.alias, "totp", backend)?;
+        }
+    }
     journal.active = None;
     if journal.operations.is_empty() {
         std::fs::remove_file(recovery_path())?;
@@ -164,7 +183,7 @@ mod tests {
                 fingerprint: keygen_fingerprint(&canonical_root, &canonical_root, false)?,
                 root: canonical_root.clone(), profile: canonical_root, original_sha256: None,
                 candidate: None, candidate_sha256: None, alias: "login-retained".into(), backend: None,
-                phase: AuthPhase::RolledBack, account: None,
+                phase: AuthPhase::RolledBack, account: None, identity: None, key_operation: None,
             }] })?;
             let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":"completed-account","token":"new-token"}), code.clone(), vault, None)?;
             prepared.commit()?;
@@ -191,11 +210,11 @@ mod tests {
         let current_config = br#"{"custom":"changed-outside-auth"}"#;
         let mut journal = Journal { schema_version: 2, active: Some(Recovery {
             directory: root.clone(), original: None, config: Some(previous_config.to_vec()), alias: alias.clone(),
-            backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()), owns_config: false,
+            backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()), owns_config: false,
         }), operations: vec![AuthRecord {
             operation_id: id.clone(), idempotency_key: id.clone(), fingerprint: keygen_fingerprint(&root, &root, false)?,
             root: root.clone(), profile: root.clone(), original_sha256: None, candidate: None, candidate_sha256: None,
-            alias, backend: None, phase: AuthPhase::Admitted, account: None,
+            alias, backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None,
         }] };
         save_journal(&journal)?;
         std::fs::write(crate::service::client_config_path(), current_config)?;
@@ -215,7 +234,7 @@ mod tests {
         // Decode an actual legacy record, then preserve terminal auth receipts across login completion.
         let active = Recovery { directory: root.clone(), original: None, config: None,
             alias: format!("login-{}", uuid::Uuid::new_v4().simple()), backends: Vec::new(),
-            pass_backends: Vec::new(), directory_existed: true, operation_id: None, owns_config: false };
+            pass_backends: Vec::new(), totp_backends: Vec::new(), directory_existed: true, operation_id: None, owns_config: false };
         let mut legacy = serde_json::to_value(&active)?;
         legacy.as_object_mut().context("legacy recovery must be an object")?.remove("operation_id");
         private_write(&recovery_path(), &serde_json::to_vec(&legacy)?)?;
@@ -268,6 +287,119 @@ mod tests {
         assert!(!recovery_pending());
         assert_eq!(load_journal()?.operations.len(), 2);
 
+        // Login intents are admission identity, not supplemental credentials.
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        let login_id = uuid::Uuid::new_v4().to_string();
+        let (mut login_journal, login_index, _) = admit_account_with_intent(&ownership,
+            &HostAuthIdentity::Absent, &login_id, &login_id, false,
+            "https://never-contact.invalid", "receipt-user", Some((false, false, false)))?;
+        let admitted_fingerprint = login_journal.operations[login_index].fingerprint.clone();
+        let admitted_bytes = std::fs::read(recovery_path())?;
+        for changed in [(true, false, false), (false, true, false), (true, true, false), (false, false, true)] {
+            assert!(admit_account_with_intent(&ownership, &HostAuthIdentity::Absent,
+                &login_id, &login_id, false, "https://never-contact.invalid", "receipt-user", Some(changed)).is_err());
+            assert_eq!(std::fs::read(recovery_path())?, admitted_bytes);
+        }
+        let mut login_params: HostAuthLoginParams = serde_json::from_value(json!({
+            "schema_version":1,"binding":params.binding,"identity":{"kind":"absent"},
+            "addr":"https://never-contact.invalid","user":"receipt-user",
+            "authorization":{"kind":"browser","token":"synthetic-unused-token"},"super_password":"",
+            "continuation":{"legacy_password":"must-not-be-durable","account_secret":"must-not-be-durable",
+                "source_secret":"must-not-be-durable","migrate_local":false,"migrate_vault":false}
+        }))?;
+        let challenge = serde_json::from_value(json!({"ticket":"synthetic-private-ticket","auth_salt":"synthetic-salt"}))?;
+        let payload = login::encode_challenge(&login_journal.operations[login_index], challenge)?;
+        let challenge_sha = digest(payload.as_bytes());
+        login::verify_challenge(&login_journal.operations[login_index], &challenge_sha, &payload)?;
+        login_journal.operations[login_index].fingerprint = "different-intent".into();
+        assert!(login::verify_challenge(&login_journal.operations[login_index], &challenge_sha, &payload).is_err());
+        login_journal.operations[login_index].fingerprint = admitted_fingerprint.clone();
+        login_journal.operations[login_index].operation_id = uuid::Uuid::new_v4().to_string();
+        assert!(login::verify_challenge(&login_journal.operations[login_index], &challenge_sha, &payload).is_err());
+        login_journal.operations[login_index].operation_id = login_id.clone();
+        assert!(login::verify_challenge(&login_journal.operations[login_index], &digest(b"changed"), &payload).is_err());
+        let mut input_record = serde_json::to_value(&login_journal.operations[login_index])?;
+        input_record["account"]["login"]["challenge"] = json!({"backend":"native","sha256":challenge_sha});
+        login_journal.operations[login_index] = serde_json::from_value(input_record)?;
+        login_journal.active.as_mut().context("challenge recovery missing")?.totp_backends.push("native".into());
+        login_journal.operations[login_index].phase = AuthPhase::LoginInput;
+        login_params.authorization = HostAuthAuthorization::Password { password: String::new(), totp: None };
+        save_journal(&login_journal)?;
+        let missing_totp = control_login(&ownership, &login_id, &login_id, &login_params)?;
+        assert_eq!(missing_totp.outcome, HostAuthAccountOutcome::AwaitingInput);
+        assert_eq!(missing_totp.login.context("TOTP input status missing")?.required_inputs, ["totp"]);
+        login_params.authorization = HostAuthAuthorization::Password { password: String::new(), totp: Some("invalid".into()) };
+        assert_eq!(control_login(&ownership, &login_id, &login_id, &login_params)?.outcome, HostAuthAccountOutcome::AwaitingInput);
+        assert!(!String::from_utf8(std::fs::read(recovery_path())?)?.contains("synthetic-private-ticket"));
+        login_journal.active.as_mut().context("challenge recovery missing")?.totp_backends.clear();
+        login_journal.operations[login_index].phase = AuthPhase::RemotePending;
+        save_journal(&login_journal)?;
+        // An uncertain authorization returns its receipt before any network or replacement factor.
+        assert_eq!(control_login(&ownership, &login_id, &login_id, &login_params)?.outcome, HostAuthAccountOutcome::Unknown);
+        login_journal.operations[login_index].phase = AuthPhase::Authorized;
+        let account = login_journal.operations[login_index].account.as_mut().context("login test receipt missing")?;
+        account.authorization = Some(json!({"user":"receipt-user","token":"synthetic-retained-token"}));
+        account.vault = Some(json!({"version":4}));
+        save_journal(&login_journal)?;
+        let supplemental = control_login(&ownership, &login_id, &login_id, &login_params)?;
+        assert_eq!(supplemental.outcome, HostAuthAccountOutcome::AwaitingInput);
+        assert_eq!(supplemental.login.context("input status missing")?.required_inputs, ["super_password"]);
+        assert_eq!(load_journal()?.operations[login_index].fingerprint, admitted_fingerprint);
+        assert!(!String::from_utf8(std::fs::read(recovery_path())?)?.contains("must-not-be-durable"));
+        // v1 rejects presence, including an explicitly empty super parameter.
+        let mut v1_journal = load_journal()?;
+        v1_journal.operations[login_index].account.as_mut().context("v1 receipt missing")?.vault = Some(json!({"version":1}));
+        save_journal(&v1_journal)?;
+        let before_explicit_super = std::fs::read(recovery_path())?;
+        assert_eq!(login_params.super_password.as_deref(), Some(""));
+        assert!(control_login(&ownership, &login_id, &login_id, &login_params).is_err());
+        assert_eq!(std::fs::read(recovery_path())?, before_explicit_super);
+        login_params.super_password = None;
+        let input = login_params.continuation.as_mut().context("v1 input missing")?;
+        input.legacy_password = None;
+        input.account_secret = None;
+        let v1_input = control_login(&ownership, &login_id, &login_id, &login_params)?;
+        assert_eq!(v1_input.outcome, HostAuthAccountOutcome::AwaitingInput);
+        assert!(v1_input.login.context("v1 input status missing")?.required_inputs.contains(&"account_secret".to_owned()));
+        let omitted = serde_json::to_value(&login_params)?;
+        assert!(omitted.get("super_password").is_none());
+        assert!(serde_json::from_value::<HostAuthLoginParams>(omitted)?.super_password.is_none());
+        login_params.continuation.as_mut().context("continuation missing")?.migrate_local = true;
+        assert!(control_login(&ownership, &login_id, &login_id, &login_params).is_err());
+        let mut merge = login::LoginProgress::new(false, false, true);
+        assert!(merge.confirm_merge(&root, true).is_err());
+        merge.offer_merge(&root)?;
+        merge.confirm_merge(&root, false)?;
+        let confirmed = serde_json::to_vec(&merge)?;
+        assert!(merge.confirm_merge(&root, true).is_err());
+        assert_eq!(serde_json::to_vec(&merge)?, confirmed);
+        assert!(merge.offer_merge(&root.join("another-target")).is_err());
+        assert_eq!(serde_json::to_vec(&merge)?, confirmed);
+        // Unknown authorization cannot restart password/browser authorization.
+        login_params.continuation.as_mut().context("continuation missing")?.migrate_local = false;
+        login_journal.operations[login_index].phase = AuthPhase::RemoteUnknown;
+        save_journal(&login_journal)?;
+        assert_eq!(control_login(&ownership, &login_id, &login_id, &login_params)?.outcome,
+            HostAuthAccountOutcome::Unknown);
+        login_journal.operations[login_index].phase = AuthPhase::Authorized;
+        save_journal(&login_journal)?;
+        assert_eq!(control_account_rollback(ownership, &HostAuthIdentity::Absent, &login_id, &login_id)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+
+        // Pre-continuation receipts keep their original fingerprint and result-only behavior.
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        let legacy_id = uuid::Uuid::new_v4().to_string();
+        let (legacy_journal, _, _) = admit_account(&ownership, &HostAuthIdentity::Absent,
+            &legacy_id, &legacy_id, false, "https://never-contact.invalid", "receipt-user")?;
+        let legacy_bytes = std::fs::read(recovery_path())?;
+        let legacy = control_login(&ownership, &legacy_id, &legacy_id, &login_params)?;
+        assert_eq!(legacy.outcome, HostAuthAccountOutcome::Unknown);
+        assert!(legacy.login.is_none());
+        assert_eq!(std::fs::read(recovery_path())?, legacy_bytes);
+        assert_eq!(load_journal()?.operations.len(), legacy_journal.operations.len());
+        assert_eq!(control_account_rollback(ownership, &HostAuthIdentity::Absent, &legacy_id, &legacy_id)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+
         keygen_overwrite_guard(&root, None, false)?;
         let database_path = crate::service::database_path(&root)?;
         assert!(!database_path.exists(), "overwrite guard initialized a store");
@@ -288,6 +420,47 @@ mod tests {
         assert!(verify_auth_identity(&root, &root, &HostAuthIdentity::Unbound {
             operation_id: id, session_sha256: digest(b"{}"),
         }).is_err());
+
+        // Missing source factors remain on the same admitted login without opening its store.
+        let source_user = format!("source-{}", uuid::Uuid::new_v4().simple());
+        let source_password = uuid::Uuid::new_v4().to_string();
+        let source_secret = crate::memory::crypto::generate_account_secret();
+        let source_salt = crate::memory::crypto::random_hex(16);
+        let source_kek = crate::memory::crypto::derive_kek(&source_password, &source_secret, &source_salt)?;
+        let (source_nonce, source_wrap) = crate::memory::crypto::wrap_key(&crate::memory::crypto::generate_key(), &source_kek)?;
+        let source_bytes = serde_json::to_vec(&json!({"user":source_user,"addr":"https://source.invalid",
+            "vault_version":1,"secret":source_secret,"kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
+        private_write(&root.join("session.json"), &source_bytes)?;
+        let source_identity = HostAuthIdentity::Bound { account_id: digest(source_user.as_bytes()), session_sha256: digest(&source_bytes) };
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        let import_id = uuid::Uuid::new_v4().to_string();
+        let (mut importing, index, _) = admit_account_with_intent(&ownership, &source_identity,
+            &import_id, &import_id, false, "https://never-contact.invalid", "import-target", Some((true, false, false)))?;
+        let (target_super, _, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
+        importing.operations[index].phase = AuthPhase::Authorized;
+        let account = importing.operations[index].account.as_mut().context("import receipt missing")?;
+        account.authorization = Some(json!({"user":"import-target","token":"synthetic-unused-token"}));
+        account.vault = Some(json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}));
+        save_journal(&importing)?;
+        let mut import_params: HostAuthLoginParams = serde_json::from_value(json!({
+            "schema_version":1,"binding":{"installation_root":root,"profile":root,
+                "launch_id":uuid::Uuid::new_v4().to_string(),"expected_account_id":digest(source_user.as_bytes())},
+            "identity":source_identity,"addr":"https://never-contact.invalid","user":"import-target",
+            "authorization":{"kind":"browser","token":"synthetic-unused-token"},"super_password":target_super,
+            "continuation":{"migrate_local":true,"migrate_vault":false,"offer_local_merge":false}
+        }))?;
+        let missing_source = control_login(&ownership, &import_id, &import_id, &import_params)?;
+        assert_eq!(missing_source.outcome, HostAuthAccountOutcome::AwaitingInput);
+        assert_eq!(missing_source.login.context("source input status missing")?.required_inputs, ["source_secret"]);
+        assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
+        assert!(!crate::service::database_path(&root)?.exists());
+        import_params.continuation.as_mut().context("import input missing")?.source_secret = Some("synthetic-wrong-source-password".into());
+        assert!(control_login(&ownership, &import_id, &import_id, &import_params).is_err());
+        assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
+        assert_eq!(control_account_rollback(ownership, &source_identity, &import_id, &import_id)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+        identity::assert_existing_recovery(&root)?;
+        keys::assert_existing_recovery(&root)?;
         Ok(())
     }
 
@@ -304,12 +477,12 @@ mod tests {
         let identity = HostAuthIdentity::Unbound { operation_id: id.clone(), session_sha256: digest(&candidate) };
         let journal = Journal { schema_version: 2, active: Some(Recovery {
             directory: root.clone(), original: None, config: None, alias: alias.clone(),
-            backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()), owns_config: false,
+            backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(), directory_existed: true, operation_id: Some(id.clone()), owns_config: false,
         }), operations: vec![AuthRecord {
             operation_id: id.clone(), idempotency_key: id, fingerprint: keygen_fingerprint(&root, &root, false)?,
             root: root.clone(), profile: root.clone(), original_sha256: None,
             candidate: Some(candidate.clone()), candidate_sha256: Some(digest(&candidate)),
-            alias, backend: Some("unavailable-test-backend".into()), phase: AuthPhase::Prepared, account: None,
+            alias, backend: Some("unavailable-test-backend".into()), phase: AuthPhase::Prepared, account: None, identity: None, key_operation: None,
         }] };
         save_journal(&journal)?;
         std::fs::write(root.join("session.json"), &candidate)?;
@@ -405,7 +578,8 @@ pub fn recover_interrupted() -> Result<()> {
     let Some(record) = &journal.active else { return Ok(()); };
     if record.operation_id.is_some() {
         ensure!(!journal.operations.iter().any(|operation|
-            Some(operation.operation_id.as_str()) == record.operation_id.as_deref() && operation.account.is_some()),
+            Some(operation.operation_id.as_str()) == record.operation_id.as_deref()
+                && (operation.account.is_some() || operation.identity.is_some() || operation.key_operation.is_some())),
             "account operation requires its original receipt; remote effects must not be automatically retried or rolled back");
         let root = crate::service::main_data_dir().canonicalize()?;
         let profile = crate::service::data_dir().canonicalize()?;
@@ -443,6 +617,9 @@ fn rollback_record_inner(record: &Recovery, quarantine: bool) -> Result<()> {
     for backend in &record.pass_backends {
         crate::keystore::remove_imported(&record.alias, "pass", backend)?;
     }
+    for backend in &record.totp_backends {
+        crate::keystore::remove_imported(&record.alias, "totp", backend)?;
+    }
     if quarantine { quarantine_new_profile(record)?; }
     Ok(())
 }
@@ -451,6 +628,17 @@ fn rollback_record_inner(record: &Recovery, quarantine: bool) -> Result<()> {
 /// WP-2c: the implementation moved into the domain crate (`service::local_snapshot`);
 /// this wrapper keeps the `respire_app::login_transaction::local_snapshot` path stable.
 pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
+    let session = crate::auth::read_session_json()?;
+    ensure!(session.is_object(), "source session must be an object");
+    let user = session["user"].as_str().unwrap_or("local");
+    let alias = session["keyring_account"].as_str().unwrap_or(user);
+    if session["vault_version"].as_i64().unwrap_or(1) == 1 && source_secret.is_none()
+        && session["pass"].as_str().is_none() && crate::keystore::load_login_pass(alias).is_none() {
+        for field in ["wrapped_urk", "urk_nonce", "kdf_salt", "secret"] {
+            ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()), "source session missing {field}");
+        }
+        return Err(crate::auth::SessionCredentialRequired("original source password required").into());
+    }
     crate::service::local_snapshot(source_secret)
 }
 
@@ -557,6 +745,12 @@ impl AuthOwnership {
     pub fn recover(&self, identity: &HostAuthIdentity) -> Result<()> {
         let mut journal = load_journal()?;
         if journal.active.as_ref().is_some_and(|active| active.operation_id.is_some()) {
+            // Identity writes resume only through their own fenced operation/result.
+            if journal.operations.iter().any(|record| (record.identity.is_some() || record.key_operation.is_some())
+                && journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(record.operation_id.as_str())) {
+                verify_auth_identity(&self.root, &self.profile, identity)?;
+                return Ok(());
+            }
             verify_auth_identity_inner(&self.root, &self.profile, identity, true)?;
             if !journal.operations.iter().any(|record| record.account.is_some()
                 && journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(record.operation_id.as_str())) {
@@ -632,7 +826,7 @@ fn recover_keygen(journal: &mut Journal, root: &Path, profile: &Path) -> Result<
     let index = journal.operations.iter().position(|record| record.operation_id == id)
         .context("auth recovery has no admission receipt")?;
     let record = &journal.operations[index];
-    ensure!(record.account.is_none(), "account operation is not a keygen transaction");
+    ensure!(record.account.is_none() && record.identity.is_none() && record.key_operation.is_none(), "operation is not a keygen transaction");
     ensure!(record.root == root && record.profile == profile && active.directory == profile
         && record.alias == active.alias && record.original_sha256 == active.original.as_deref().map(digest),
         "auth recovery owner mismatch");
@@ -741,12 +935,12 @@ pub fn control_keygen(
         Err(error) => return Err(error.into()),
     };
     journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(), config,
-        alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), directory_existed: true,
+        alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(), directory_existed: true,
         operation_id: Some(operation_id.to_owned()), owns_config: false });
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: operation_id.to_owned(), idempotency_key: idempotency_key.to_owned(),
         fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted, account: None });
+        candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None });
     save_journal(&journal)?;
     let mutation = (|| -> Result<()> {
         let (secret, _urk, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
@@ -802,6 +996,12 @@ fn account_fingerprint(ownership: &AuthOwnership, identity: &HostAuthIdentity, r
 
 fn admit_account(ownership: &AuthOwnership, identity: &HostAuthIdentity, operation_id: &str,
     key: &str, register: bool, addr: &str, user: &str) -> Result<(Journal, usize, bool)> {
+    admit_account_with_intent(ownership, identity, operation_id, key, register, addr, user, None)
+}
+
+fn admit_account_with_intent(ownership: &AuthOwnership, identity: &HostAuthIdentity, operation_id: &str,
+    key: &str, register: bool, addr: &str, user: &str,
+    login_intent: Option<(bool, bool, bool)>) -> Result<(Journal, usize, bool)> {
     crate::service::require_profile_change_host()?;
     canonical_operation_id(operation_id)?;
     ensure!(!key.is_empty() && key.len() <= 128 && key.bytes().all(|byte|
@@ -810,14 +1010,20 @@ fn admit_account(ownership: &AuthOwnership, identity: &HostAuthIdentity, operati
         && ownership.profile == crate::service::data_dir().canonicalize()?, "auth ownership changed");
     ensure!(!user.is_empty() && !addr.is_empty(), "account and server are required");
     verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
-    let fingerprint = account_fingerprint(ownership, identity, register, addr, user)?;
+    let base = account_fingerprint(ownership, identity, register, addr, user)?;
+    let fingerprint = match login_intent {
+        Some(intent) => digest(&serde_json::to_vec(&(&base, intent))?),
+        None => base.clone(),
+    };
     let mut journal = load_journal()?;
     if let Some(index) = journal.operations.iter().position(|record|
         record.operation_id == operation_id || record.idempotency_key == key) {
         let record = &journal.operations[index];
+        let legacy_login = login_intent == Some((false, false, false)) && record.fingerprint == base
+            && record.account.as_ref().is_some_and(|account| !account.register && account.login.is_none());
         ensure!(record.operation_id == operation_id && record.idempotency_key == key
             && record.root == ownership.root && record.profile == ownership.profile
-            && record.fingerprint == fingerprint && record.account.is_some(), "auth idempotency conflict");
+            && (record.fingerprint == fingerprint || legacy_login) && record.account.is_some(), "auth idempotency conflict");
         return Ok((journal, index, false));
     }
     ensure!(journal.active.is_none(), "resolve the interrupted transaction before admitting another account operation");
@@ -825,15 +1031,17 @@ fn admit_account(ownership: &AuthOwnership, identity: &HostAuthIdentity, operati
     let original = read_original(&ownership.profile)?;
     let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
     journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(),
-        config: None, alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(),
+        config: None, alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(),
         directory_existed: true, operation_id: Some(operation_id.to_owned()), owns_config: false });
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: operation_id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(),
         original_sha256: original.as_deref().map(digest), candidate: None, candidate_sha256: None,
-        alias, backend: None, phase: AuthPhase::Admitted, account: Some(AccountOperation {
+        alias, backend: None, phase: AuthPhase::Admitted, identity: None, key_operation: None, account: Some(AccountOperation {
             register, addr: addr.to_owned(), user: user.to_owned(), source_identity: identity.clone(),
             target: None, authorization: None, vault: None, published_vault: false, vault_pending: false,
+            login: login_intent.map(|(migrate_local, migrate_vault, offer_local_merge)|
+                login::LoginProgress::new(migrate_local, migrate_vault, offer_local_merge)),
         }) });
     save_journal(&journal)?;
     Ok((journal, index, true))
@@ -845,7 +1053,10 @@ fn account_result(record: &AuthRecord) -> Result<HostAuthAccountResult> {
     if applied { verify_account_candidate(record)?; }
     Ok(HostAuthAccountResult { operation_id: record.operation_id.clone(),
         outcome: match record.phase {
-            _ if account.vault_pending && !account.published_vault => HostAuthAccountOutcome::Unknown,
+            AuthPhase::Authorized | AuthPhase::LoginInput if account.login.as_ref()
+                .is_some_and(|login| login.awaiting_input()) => HostAuthAccountOutcome::AwaitingInput,
+            _ if account.vault_pending && !account.published_vault
+                || record.phase != AuthPhase::RolledBack && account.login.as_ref().is_some_and(|login| login.pending()) => HostAuthAccountOutcome::Unknown,
             AuthPhase::AwaitingVerification => HostAuthAccountOutcome::AwaitingVerification,
             AuthPhase::Committed => HostAuthAccountOutcome::Committed,
             AuthPhase::RolledBack => HostAuthAccountOutcome::RolledBack,
@@ -856,6 +1067,7 @@ fn account_result(record: &AuthRecord) -> Result<HostAuthAccountResult> {
         super_password: if account.register && applied {
             Some(crate::keystore::read_imported(&record.alias, "super", record.backend.as_deref().context("account backend is missing")?)?)
         } else { None },
+        login: account.login.as_ref().map(|login| login.status(record.phase == AuthPhase::RolledBack, account)),
     })
 }
 
@@ -944,32 +1156,7 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
 
 pub fn control_login(ownership: &AuthOwnership, operation_id: &str, key: &str,
     params: &HostAuthLoginParams) -> Result<HostAuthAccountResult> {
-    ensure!(params.schema_version == respire_protocol::HOST_AUTH_SCHEMA_V
-        && params.binding.installation_root == ownership.root && params.binding.profile == ownership.profile,
-        "login binding mismatch");
-    let addr = params.addr.trim().trim_end_matches('/');
-    let (mut journal, index, fresh) = admit_account(ownership, &params.identity, operation_id, key, false, addr, &params.user)?;
-    if !fresh { return account_result(&journal.operations[index]); }
-    journal.operations[index].phase = AuthPhase::RemotePending;
-    save_journal(&journal)?;
-    let mut authorized = match &params.authorization {
-        HostAuthAuthorization::Password { password, totp } =>
-            crate::auth::password_authorization_noninteractive(addr, &params.user, password, totp.as_deref())?,
-        HostAuthAuthorization::Browser { token, session_id } => {
-            ensure!(!token.is_empty(), "browser authorization token is missing");
-            json!({"addr":addr,"user":params.user,"token":token,"session_id":session_id})
-        }
-    };
-    let mut durable_authorization = authorized.clone();
-    durable_authorization.as_object_mut().context("authorization must be an object")?.remove("pass");
-    journal.operations[index].account.as_mut().context("account receipt is missing")?.authorization = Some(durable_authorization);
-    journal.operations[index].phase = AuthPhase::Authorized;
-    save_journal(&journal)?;
-    let vault = PreparedLogin::fetch_vault(addr, &authorized)?;
-    ensure!(!vault.is_null(), "cloud vault is absent; original key material was preserved");
-    let mut prepared = PreparedLogin::prepare_with_vault(addr, &authorized, params.super_password.clone(), vault, None)?;
-    authorized.as_object_mut().map(|object| object.remove("pass"));
-    commit_account(ownership, &mut journal, index, &mut prepared)
+    login::control_login(ownership, operation_id, key, params)
 }
 
 /// Result recovery never authenticates again and never resends a registration.
@@ -1000,6 +1187,8 @@ pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIden
     if journal.operations[index].phase == AuthPhase::AwaitingVerification || journal.operations[index].phase == AuthPhase::Committed {
         verify_account_candidate(&journal.operations[index])?;
     }
+    login::resume_import(ownership, &mut journal, index)?;
+    login::reconcile_publication(&mut journal, index)?;
     account_result(&journal.operations[index])
 }
 
@@ -1022,6 +1211,10 @@ fn verify_account_candidate(record: &AuthRecord) -> Result<()> {
 }
 
 fn verify_account_material(record: &AuthRecord, require_published: bool) -> Result<()> {
+    account_material_keys(record, require_published).map(|_| ())
+}
+
+fn account_material_keys(record: &AuthRecord, require_published: bool) -> Result<crate::memory::SessionKeys> {
     let account = record.account.as_ref().context("account receipt is missing")?;
     let target = account.target.as_ref().context("account target is missing")?;
     let bytes = record.candidate.as_deref().context("account candidate is missing")?;
@@ -1038,14 +1231,14 @@ fn verify_account_material(record: &AuthRecord, require_published: bool) -> Resu
     let salt = session["kdf_salt"].as_str().context("account salt is missing")?;
     let wrapped = session["wrapped_urk"].as_str().context("account wrap is missing")?;
     let nonce = session["urk_nonce"].as_str().context("account nonce is missing")?;
-    match session["vault_version"].as_i64() {
+    let keys = match session["vault_version"].as_i64() {
         Some(1) => crate::memory::SessionKeys::unlock(&secret, session["secret"].as_str().context("original account secret is missing")?, salt, wrapped, nonce)?,
         Some(2) => crate::memory::SessionKeys::unlock_super(&secret, salt, wrapped, nonce)?,
         Some(3) => crate::memory::SessionKeys::unlock_vault(&secret, session["secret_key"].as_str().context("original secret key is missing")?, salt, wrapped, nonce)?,
         Some(4) => crate::memory::SessionKeys::unlock_v4(&secret, salt, wrapped, nonce)?,
         _ => anyhow::bail!("unsupported account vault"),
     };
-    Ok(())
+    Ok(keys)
 }
 
 fn verify_account_config(active: &Recovery) -> Result<()> {
@@ -1085,6 +1278,12 @@ pub fn control_account_complete(root: &Path, profile: &Path, identity: &HostAuth
     ensure!(journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(operation_id),
         "completion does not own active recovery");
     verify_runtime(&account_result(record)?)?;
+    login::finish_migration(&mut journal, index)?;
+    if journal.operations[index].account.as_ref().and_then(|account| account.login.as_ref())
+        .is_some_and(|login| login.pending()) {
+        return account_result(&journal.operations[index]);
+    }
+    let record = &journal.operations[index];
     let account = record.account.as_ref().context("account receipt is missing")?;
     if account.register && !account.published_vault {
         let authorized = account.authorization.clone().context("registration authorization is missing")?;
@@ -1126,6 +1325,8 @@ pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAut
     ensure!(record.phase != AuthPhase::Committed && record.phase != AuthPhase::RemotePending
         && record.phase != AuthPhase::RemoteUnknown, "remote outcome must be resolved before compensation");
     let account = record.account.as_ref().context("account receipt is missing")?;
+    ensure!(!account.login.as_ref().is_some_and(|login| login.publication_started()),
+        "legacy publication is pending or complete; retain the original account receipt");
     ensure!(!account.vault_pending && !account.published_vault, "published or unknown remote vault cannot be compensated by deleting local keys");
     let active = journal.active.as_ref().context("account recovery is missing")?;
     ensure!(active.operation_id.as_deref() == Some(operation_id), "rollback does not own recovery");
@@ -1205,6 +1406,7 @@ impl PreparedLogin {
         let mut factors = authorized.clone();
         factors["pass"] = json!(password);
         if version == 1 { factors["secret"] = local["secret"].clone(); }
+        if version == 3 { factors["secret_key"] = local["secret_key"].clone(); }
         let mut prepared = Self::prepare_with_vault(addr, &factors, super_password, vault.clone(), Some((original, keys.urk)))?;
         if cloud != vault { prepared.migration_cloud = Some(cloud); }
         // Explicit cloud migration recalculates the authentication hash from the
@@ -1226,6 +1428,11 @@ impl PreparedLogin {
 
     /// Publish the unchanged URK's new wrap only after host/runtime verification.
     pub fn finish_migration(&self, addr: &str, authorized: &Value) -> Result<()> {
+        self.finish_migration_guarded(addr, authorized, |_, _| Ok(()))
+    }
+
+    fn finish_migration_guarded(&self, addr: &str, authorized: &Value,
+        mut checkpoint: impl FnMut(&str, bool) -> Result<()>) -> Result<()> {
         if self.migration_cloud.is_none() && self.migration_auth.is_none() { return Ok(()); }
         let token = authorized["token"].as_str().context("authorization did not return a token")?;
         if let Some(original) = self.migration_cloud.as_ref() {
@@ -1235,6 +1442,7 @@ impl PreparedLogin {
             .post(&format!("{}/api/self/vault", addr.trim().trim_end_matches('/')))
             .set("Authorization", &format!("Bearer {token}"));
         if original.is_null() { request = request.set("If-None-Match", "*"); }
+        checkpoint("vault", false)?;
         let result = request.send_json(vault.clone());
         if let Err(error) = result {
             // A lost HTTP response can follow a committed write; inspect that exact wrap once.
@@ -1242,9 +1450,11 @@ impl PreparedLogin {
                 return Err(anyhow!("legacy vault publication failed: {error}; retain the original super Key and library"));
             }
         }
+        checkpoint("vault", true)?;
         }
         if let Some(authentication) = self.migration_auth.as_ref() {
             let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build();
+            checkpoint("password", false)?;
             let result = agent.post(&format!("{}/api/self/password", addr.trim().trim_end_matches('/')))
                 .set("Authorization", &format!("Bearer {token}")).send_json(authentication.clone());
             if let Err(error) = result {
@@ -1253,6 +1463,7 @@ impl PreparedLogin {
                 ensure!(confirmed["salt"] == authentication["salt"],
                     "authentication namespace publication failed: {error}; retry explicit migration with the original password");
             }
+            checkpoint("password", true)?;
         }
         Ok(())
     }
@@ -1290,13 +1501,15 @@ impl PreparedLogin {
             .or_else(|| crate::keystore::load_login_pass(previous_alias));
         let account_secret = authorized["secret"].as_str().filter(|value| !value.is_empty())
             .or_else(|| session["secret"].as_str().filter(|value| !value.is_empty())).map(str::to_owned);
+        let secret_key = authorized["secret_key"].as_str().filter(|value| !value.is_empty())
+            .or_else(|| session["secret_key"].as_str().filter(|value| !value.is_empty())).map(str::to_owned);
         let verified = match version {
             1 => crate::memory::SessionKeys::unlock(
                 login_password.as_deref().context("original v1 login password is required")?,
                 account_secret.as_deref().context("original v1 Account Secret is required")?, salt, wrapped, nonce),
             2 => crate::memory::SessionKeys::unlock_super(&super_password, salt, wrapped, nonce),
             3 => crate::memory::SessionKeys::unlock_vault(&super_password,
-                session["secret_key"].as_str().context("original Secret Key is required; select the explicitly migrated profile")?,
+                secret_key.as_deref().context("original Secret Key is required; select the explicitly migrated profile")?,
                 salt, wrapped, nonce),
             _ => crate::memory::SessionKeys::unlock_v4(&super_password, salt, wrapped, nonce),
         }.context("original decryption factors do not unlock this account; the original account was preserved")?;
@@ -1334,6 +1547,7 @@ impl PreparedLogin {
         }
         let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
         if version == 1 { session["secret"] = json!(account_secret.context("original v1 Account Secret is required")?); }
+        if version == 3 { session["secret_key"] = json!(secret_key.context("original Secret Key is required")?); }
         for field in ["pass", "super"] { session.as_object_mut().map(|object| object.remove(field)); }
         if version >= 4 {
             for field in ["secret", "secret_key"] { session.as_object_mut().map(|object| object.remove(field)); }
@@ -1396,11 +1610,14 @@ impl PreparedLogin {
         let staged_backends = if account_index.is_some() {
             journal.active.as_ref().context("account recovery is missing")?.backends.clone()
         } else { Vec::new() };
+        let staged_totp_backends = if account_index.is_some() {
+            journal.active.as_ref().context("account recovery is missing")?.totp_backends.clone()
+        } else { Vec::new() };
         let directory_existed = if account_index.is_some() {
             journal.active.as_ref().context("account recovery is missing")?.directory_existed
         } else { self.directory.exists() };
         journal.active = Some(Recovery { directory: self.directory.clone(), original: self.original.clone(), config,
-            alias: self.alias.clone(), backends: staged_backends, pass_backends: Vec::new(),
+            alias: self.alias.clone(), backends: staged_backends, pass_backends: Vec::new(), totp_backends: staged_totp_backends,
             directory_existed, operation_id: operation_id.map(str::to_owned), owns_config: account_index.is_some() });
         if let Some(index) = account_index {
             journal.operations[index].account.as_mut().context("account receipt is missing")?.target = Some(self.directory.clone());

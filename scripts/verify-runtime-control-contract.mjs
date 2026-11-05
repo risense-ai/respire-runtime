@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 import process from "node:process";
+import { isDeepStrictEqual } from "node:util";
 
 const root = resolve("contracts/runtime-control");
 
@@ -42,8 +43,8 @@ if (manifest.release_metadata_schema_version !== 2) fail("wrong release metadata
 
 const positive = manifest.fixtures?.positive;
 const negative = manifest.fixtures?.negative;
-if (!Array.isArray(positive) || positive.length !== 25) fail("positive fixture count");
-if (!Array.isArray(negative) || negative.length !== 48) fail("negative fixture count");
+if (!Array.isArray(positive) || positive.length !== 53) fail("positive fixture count");
+if (!Array.isArray(negative) || negative.length !== 134) fail("negative fixture count");
 
 const boundPaths = new Set();
 for (const bound of manifest.files ?? []) {
@@ -508,4 +509,175 @@ for (const target of [
   if (!contract.includes(target)) fail(`compatibility contract omits ${target}`);
 }
 
-console.log(`runtime control contract verified: ${boundPaths.size} bound files`);
+const hostSchema = readJSON(fixturePath("schema/private-host-control.schema.json"));
+if (!boundPaths.has("schema/private-host-control.schema.json")) fail("private host schema is not digest-bound");
+if (!boundPaths.has("consumers/private_host_control.rs")) fail("shared Rust consumer is not digest-bound");
+for (const marker of ["private-host-control.schema.json", "awaiting_verification", "snapshot-restore-v1", "Terminal history"]) {
+  if (!contract.includes(marker)) fail(`private host contract omits ${marker}`);
+}
+
+// Only the keywords used by this frozen schema are evaluated. Context fields
+// declare test inputs, not proof of a consumed grant or a live process.
+function hostSchemaValid(value, schema) {
+  if (schema.$ref) return hostSchemaValid(value, hostSchema.$defs[schema.$ref.slice("#/$defs/".length)]);
+  if (schema.allOf?.some(child => !hostSchemaValid(value, child))) return false;
+  if (schema.not && hostSchemaValid(value, schema.not)) return false;
+  if (schema.if) {
+    const branch = hostSchemaValid(value, schema.if) ? schema.then : schema.else;
+    if (branch && !hostSchemaValid(value, branch)) return false;
+  }
+  if (schema.anyOf && !schema.anyOf.some(child => hostSchemaValid(value, child))) return false;
+  if (schema.oneOf && schema.oneOf.filter(child => hostSchemaValid(value, child)).length !== 1) return false;
+  if (Object.hasOwn(schema, "const") && value !== schema.const) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.type === "null" && value !== null) return false;
+  if (schema.type === "object" && (!value || typeof value !== "object" || Array.isArray(value))) return false;
+  if (schema.type === "array" && !Array.isArray(value)) return false;
+  if (schema.type === "string" && typeof value !== "string") return false;
+  if (schema.type === "boolean" && typeof value !== "boolean") return false;
+  if (schema.type === "integer" && !Number.isSafeInteger(value)) return false;
+  if (schema.minimum !== undefined && value < schema.minimum) return false;
+  if (schema.maximum !== undefined && value > schema.maximum) return false;
+  if (schema.minLength !== undefined && value.length < schema.minLength) return false;
+  if (schema.maxLength !== undefined && value.length > schema.maxLength) return false;
+  if (schema.pattern && !new RegExp(schema.pattern).test(value)) return false;
+  if (schema.required?.some(key => !Object.hasOwn(value, key))) return false;
+  if (schema.additionalProperties === false && Object.keys(value).some(key => !Object.hasOwn(schema.properties, key))) return false;
+  for (const [key, child] of Object.entries(schema.properties ?? {})) {
+    if (Object.hasOwn(value, key) && !hostSchemaValid(value[key], child)) return false;
+  }
+  if (schema.minItems !== undefined && value.length < schema.minItems) return false;
+  if (schema.maxItems !== undefined && value.length > schema.maxItems) return false;
+  if (schema.items && !value.every(item => hostSchemaValid(item, schema.items))) return false;
+  if (schema.uniqueItems && new Set(value.map(item => JSON.stringify(item))).size !== value.length) return false;
+  return true;
+}
+
+function configFixtureFailure(params, context) {
+  if (!context || !hostSchemaValid(context, hostSchema.$defs.configContext)) return "config_context_mismatch";
+  const digest = text => text == null ? null : createHash("sha256").update(text, "utf8").digest("hex");
+  if ((params.original_config ?? null) !== context.original_config ||
+      (params.original_revision ?? null) !== context.original_revision ||
+      digest(params.original_config) !== (params.original_revision ?? null) ||
+      params.candidate_revision !== context.candidate_revision ||
+      context.candidate_config !== context.reviewed_candidate_config ||
+      digest(context.candidate_config) !== params.candidate_revision) return "config_revision_mismatch";
+  if (params.target_profile !== params.binding.profile || params.source_profile !== context.source_profile ||
+      params.target_profile !== context.target_profile || !isDeepStrictEqual(params.source_identity, context.source_identity) ||
+      !isDeepStrictEqual(params.identity, context.target_identity)) return "config_context_mismatch";
+  let original, candidate;
+  try { original = params.original_config == null ? {} : JSON.parse(params.original_config); candidate = JSON.parse(context.candidate_config); }
+  catch { return "config_intent_mismatch"; }
+  if (!original || typeof original !== "object" || Array.isArray(original)) return "config_intent_mismatch";
+  const expected = structuredClone(original);
+  for (const key of ["data_dir", "addr", "autosync", "cure_auto", "rpc_parallelism"]) {
+    let value = params.intent[key];
+    if (value == null) continue;
+    if (key === "data_dir" || key === "addr") value = value.trim();
+    if (key === "data_dir" && value === "" || key === "rpc_parallelism" && value === 0) delete expected[key];
+    else expected[key] = value;
+  }
+  return isDeepStrictEqual(candidate, expected) ? null : "config_intent_mismatch";
+}
+
+function privateHostFailure(payload) {
+  if (payload.channel !== "inherited_pipe") return "private_channel_required";
+  if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
+  const request = payload.request, method = hostSchema["x-methods"][request.method];
+  if (["secretResult", "keysExportResult"].includes(method.result) &&
+      Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
+  if (method.mutable && (!request.operation_id || !request.idempotency_key)) return "host_operation_required";
+  if (!method.mutable && (request.operation_id != null || request.idempotency_key != null)) return "host_request_invalid";
+  let params;
+  try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
+  if (!hostSchemaValid(params, hostSchema.$defs[method.params])) return "host_params_invalid";
+  if (method.params === "modelParams" && (request.method === "control.model_install_plan"
+      ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
+  const snapshot = request.method === "control.snapshot_maintenance";
+  const verified = request.method === "control.auth.account_complete" || snapshot && ["commit", "release"].includes(params.action);
+  if (payload.maintenance_phase !== (verified ? "Verified" : "Paused")) return "maintenance_phase_mismatch";
+  if (payload.original_operation_id && payload.original_operation_id !== request.operation_id) return "host_operation_mismatch";
+  if (snapshot) {
+    if (params.operation_id !== request.operation_id) return "host_operation_mismatch";
+    const tuple = ["snapshot-restore-v1", params.binding.installation_root, params.binding.profile,
+      params.binding.expected_account_id ?? null, params.sync_generation, params.snapshot_id];
+    const fingerprint = createHash("sha256").update(JSON.stringify(tuple)).digest("hex");
+    if (params.request_fingerprint !== fingerprint || payload.original_fingerprint && payload.original_fingerprint !== fingerprint) return "host_fingerprint_mismatch";
+  }
+  if (method.params === "configParams") {
+    const failure = configFixtureFailure(params, payload.config_context);
+    if (failure) return failure;
+  }
+  const result = payload.result;
+  if (!result) return payload.finish_maintenance ? "maintenance_not_terminal" : null;
+  if (!hostSchemaValid(result, hostSchema.$defs[method.result])) return "host_result_invalid";
+  if (method.mutable && result.operation_id !== request.operation_id) return "host_operation_mismatch";
+  if (["identityResult", "configReceipt"].includes(method.result)) {
+    const envelope = payload.private_response;
+    const kind = method.result === "identityResult" ? "identityEnvelope" : "configEnvelope";
+    if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[kind]) ||
+        !isDeepStrictEqual(method.result === "identityResult" ? envelope.details : envelope.summary, result)) return "host_result_invalid";
+    for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+      const matching = envelope.items.filter(item => item.name === name);
+      if (matching.length !== 1 || matching[0].status !== status || matching[0].value !== value) return "host_result_invalid";
+    }
+    if (method.result === "configReceipt") {
+      for (const [receipt, parameter] of [["original_revision", "original_revision"], ["candidate_revision", "candidate_revision"],
+          ["source_profile", "source_profile"], ["target_profile", "target_profile"],
+          ["source_identity", "source_identity"], ["target_identity", "identity"]]) {
+        if (!isDeepStrictEqual(result[receipt] ?? null, params[parameter] ?? null)) return "config_receipt_mismatch";
+      }
+      for (const key of ["data_dir", "addr", "autosync", "cure_auto", "rpc_parallelism"]) {
+        if (!isDeepStrictEqual(result.intent[key] ?? null, params.intent[key] ?? null)) return "config_receipt_mismatch";
+      }
+    }
+  }
+
+  if (method.result === "modelPlan" && JSON.stringify(result.assets.assets) !== JSON.stringify(result.assets.missing)) return "host_result_invalid";
+  if (["modelPlan", "modelVerify"].includes(method.result)) {
+    if (method.result === "modelVerify" && result.selection_sha256 !== params.selection_sha256) return "host_selection_mismatch";
+    const envelope = payload.public_response;
+    const command = method.result === "modelPlan" ? "model-install-plan" : "model-install-verify";
+    if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs.modelEnvelope) ||
+        envelope.command !== command || envelope.summary.complete !== result.assets.complete ||
+        JSON.stringify(envelope.details) !== JSON.stringify(result) || assetsFailure(envelope.details.assets)) return "host_result_invalid";
+    for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+      const matching = envelope.items.filter(item => item.name === name);
+      if (matching.length !== 1 || matching[0].status !== status || matching[0].value !== value) return "host_result_invalid";
+    }
+  }
+  if (method.result === "accountResult") {
+    if (["awaiting_verification", "committed"].includes(result.outcome) &&
+        (!result.target_profile || !result.account_id || !result.session_sha256)) return "host_result_invalid";
+    if (result.outcome === "rolled_back" && (result.account_id != null || result.session_sha256 != null || result.super_password != null)) return "host_result_invalid";
+  }
+  if (snapshot) {
+    if (result.request_fingerprint !== params.request_fingerprint || result.snapshot_id !== params.snapshot_id) return "host_fingerprint_mismatch";
+    for (const previous of payload.history ?? []) {
+      if (previous.operation_id !== request.operation_id) continue;
+      if (previous.request_fingerprint !== params.request_fingerprint || previous.snapshot_id !== params.snapshot_id) return "terminal_history_conflict";
+      if (["released", "rolled_back"].includes(previous.state) && result.state !== previous.state ||
+          previous.state === "verified" && !["verified", "released"].includes(result.state)) return "terminal_history_conflict";
+    }
+  }
+  const terminal = method.result === "accountResult" && ["committed", "rolled_back"].includes(result.outcome) ||
+    snapshot && ["released", "rolled_back"].includes(result.state);
+  if (payload.finish_maintenance && !terminal) return "maintenance_not_terminal";
+  return null;
+}
+
+for (const [group, legacyCount, newCount] of [[positive, 25, 28], [negative, 48, 86]]) {
+  let checked = 0;
+  for (const name of group) {
+    const fixture = readJSON(fixturePath(name));
+    if (fixture.fixture_type !== "private_host_control") continue;
+    if (fixture.expected === "accept" && !hostSchemaValid(fixture, hostSchema)) fail(`${name}: invalid host fixture container`);
+    const expected = fixture.expected === "accept" ? null : fixture.error_code;
+    const actual = privateHostFailure(fixture.payload);
+    if (actual !== expected) fail(`${name}: host rejection ${actual}, expected ${expected}`);
+    checked++;
+  }
+  if (checked !== newCount || group.length - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
+}
+
+console.log(`runtime control contract verified: ${boundPaths.size} bound files (73 legacy, 114 private host cases, schema and shared Rust consumer)`);

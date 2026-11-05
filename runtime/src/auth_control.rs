@@ -99,16 +99,20 @@ fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<()> {
         && std::fs::canonicalize(&health.data_dir)? == target.canonicalize()?
         && health.runtime_version == env!("CARGO_PKG_VERSION"), "target Runtime is not ready for this account receipt");
     let process = respire_commands::net_rpc::runtime_process_identity(health.pid)?;
+    ensure!(respire_commands::net_rpc::instance_is_running(&health)?,
+        "target Runtime birth identity mismatch");
     let image = std::env::current_exe()?.canonicalize()?;
     ensure!(std::fs::canonicalize(&process.executable)? == image
-        && std::fs::canonicalize(&health.image_path)? == image
-        && process.started_at == health.process_start_id, "target Runtime process identity mismatch");
+        && std::fs::canonicalize(&health.image_path)? == image,
+        "target Runtime process identity mismatch");
     let mut file = std::fs::File::open(&image)?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
     ensure!(format!("{:x}", hasher.finalize()) == health.image_sha256, "target Runtime image digest mismatch");
     ensure!(respire_commands::net_rpc::runtime_process_identity(health.pid)? == process,
         "target Runtime changed during verification");
+    ensure!(respire_commands::net_rpc::instance_is_running(&health)?,
+        "target Runtime birth identity changed during verification");
     crate::startup_identity::verify_account_completion_authority()?;
     Ok(())
 }

@@ -372,3 +372,119 @@ and does not claim every node used an accelerator. CPU fallback policy is
 
 The shared assets fixtures and Node verifier enforce wire integrity without
 starting Runtime or claiming actual native SDK acceptance.
+
+### Private auth, installation plan/verify and snapshot maintenance
+
+`schema/private-host-control.schema.json` freezes the DTOs in
+`protocol::host_control` and `protocol::maintenance_control`. The existing Node
+verifier decodes the single JSON-string RPC argument before checking its schema.
+The existing Rust suites include the shared fixture consumer and deserialize
+positive cases with the producer DTOs. Client2 consumes the same cases in its
+existing Go fixture suite. No additional runner or application implementation is
+introduced. The original 73 fixtures and two schemas remain byte-bound unchanged.
+The legacy `bootstrap_route` fixture retains its historical CLI entry/coordinator
+assertion. It is not evidence that the new CLI executes authentication business
+logic locally; the inherited request is executed by Runtime.
+
+The `private_host_control` case container is not a wire DTO. Its `channel`,
+`maintenance_phase`, `finish_maintenance`, original-operation anchors and history
+are declared test inputs. They do not authorize anything. `request` is the real
+RPC request, `args[0]` is the real serialized parameter DTO, and `result`, when
+present, is the typed receipt or ModelPreparation. Model cases also contain
+`public_response`, the ResultEnvelope (not RpcResponse), checked against the
+strict modelEnvelope schema. Other command/status/error wrapping remains outside
+these fixtures; no values are guessed.
+
+All methods use a one-shot inherited pipe, never a privileged loopback HTTP
+route. Auth and snapshot operations require canonical lowercase UUIDv4 request
+and operation IDs, the original operation ID, and an ASCII idempotency key of
+1..128 letters, digits, underscore, period or hyphen. Business scope, lifecycle,
+queue and parent-operation fields cannot grant this access. Binding constrains
+installation root, profile, launch ID and optional expected account; it is not
+a credential. Bad JSON and arbitrary fields are rejected, including fields in
+the auth identity/authorization variants. No argv or arbitrary exec is accepted.
+
+Passwords, browser tokens and recovery codes exist only in the private auth
+request/receipt. They must not appear in public model-plan DTO fields. Fixtures
+contain synthetic strings, not credentials. Schema key allowlists cannot detect
+a secret hidden in arbitrary text, nor prove absence from logs, argv or storage.
+The public model plan has `complete=false`, equal `assets`/`missing` inventories
+and no backend evidence; it proves neither installed files nor backend readiness.
+
+`control.model_install_plan` and `control.model_install_verify` accept only
+HostModelParams (schema_version, binding, intent and selection_sha256), with no
+operation/key or argv. Intent preserves model, for_engine and mirror; paths and
+mirror authority still come from local host policy. Plan accepts no selection
+digest; verify requires the exact lowercase SHA-256 returned by plan. Runtime
+binds that digest to the authoritative selection, intent and pinned inventory,
+and rechecks the selection before and after the fresh probe.
+Both require Paused maintenance. Their response commands are `model-install-plan`
+and `model-install-verify`; details are strict ModelPreparation containing
+selection_sha256 and AssetsStatus assets. Summary contains only complete, equal
+to details.assets.complete (always false for plan). Both report
+control_ready=true and store_ready=false, with no related-memory payload. Verify
+accepts a failed/incomplete probe as incomplete; complete requires fresh-session,
+completed-inference evidence and the existing assets/provider/module invariants.
+The loaded fixture is synthetic evidence, not an actual probe result.
+
+Runtime must invalidate CPU ORT and run a fresh probe inside Paused maintenance.
+The outer deadline is 180 seconds, the internal probe limit is 150 seconds, and
+parent-pipe revocation must remain active. Schema and fixtures cannot establish
+any of these execution properties. Neither source code presence nor a passing
+fixture verifier counts as fresh-probe acceptance.
+
+Auth `awaiting_verification` is not `committed`. It retains maintenance ownership
+until the receipt target has started and has been independently verified.
+`unknown` never authorizes registration replay or automatic compensation.
+Committed keygen still has an unbound identity and must retain Paused maintenance;
+it is not an account-login commit. Account operations use Paused authorization,
+except `account_complete`, which needs the narrow Verified+receipt role. A local
+`rolled_back` receipt does not claim remote account deletion. Runtime must bind
+the original admission fingerprint and credential backend before effects; these
+fixtures do not establish journal durability or keyring recovery.
+
+Snapshot offline actions use Paused authorization. `commit` and `release` require
+Verified authorization and the receipt-bound live Runtime. A result query may use
+a fresh request/launch ID, but retains the original O, key and fingerprint. The
+fingerprint is SHA-256 of the exact JSON tuple
+`["snapshot-restore-v1", installation_root, profile, expected_account_id,
+sync_generation, snapshot_id]`; action and request/launch IDs are excluded.
+Node and Go recompute the tuple; Rust binds the frozen fingerprint anchor.
+Terminal history retains O/fingerprint/snapshot identity and cannot regress from
+released/rolled_back, or from verified to an uncommitted state. Cleanup warnings
+do not erase terminal history. These assertions do not prove a restore was not
+executed twice, process exit, lock ownership, file replacement or cleanup.
+
+Actual grant consumption, marker digest/token/controller birth, parent-pipe
+revocation, secret handling, source/target locks, strict credential identity,
+live Runtime verification and crash recovery require native acceptance. A green
+fixture verifier is not evidence that any of those runtime properties passed.
+
+### Fixed identity read and reviewed config validation
+
+`control.identity.session_list` accepts only HostIdentitySessionListParams:
+schema_version, binding and identity. It requires Paused maintenance, has no
+operation/key/business scope/argv, and returns HostIdentitySessionListResult.
+Its private ResultEnvelope uses command=session, summary={"action":"list"},
+and details={"details": remoteJson}. Session details may leave the coordinator
+only after the original owner is restored and verified. The GET limit is 30s;
+the CLI exchange limit is 35s. Fixtures do not prove deadlines or restoration.
+
+`control.config_validate` accepts the frozen ConfigValidateParams and returns
+ConfigValidationReceipt in the config-validate envelope summary; details is null.
+Both private methods report control_ready=true, store_ready=false. Neither a
+receipt, off_mode=true nor a successful private read proves serving store readiness
+or authorizes maintenance completion. Config validation has no O/key/scope/argv.
+
+Config cases bind the reviewed original UTF-8 bytes/revision, staged candidate
+bytes/revision, all five allowed intent fields, source and target profile, and
+both strict session identities. Unrelated original fields must survive. Receipt
+revision/intent/profile/identity values must match the request, not another edit.
+The fixture-only config_context declares observed files and identities; it is not
+a grant or filesystem proof. Node and Go independently recompute byte hashes;
+Rust binds the declared original/candidate byte and digest anchors and calls the
+actual ConfigChangeIntent::apply. The candidate-whitespace case fails the byte
+anchor in every consumer; only Node/Go claim independent hash recomputation. Native admission, symlink/canonicalization, locks,
+CAS publication, sync validation, parent watching, rollback and restored Runtime
+health remain outside these fixture checks. Private config/session values must
+not be copied to public HTTP, progress, logs or operation ledgers.
