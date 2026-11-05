@@ -1,0 +1,132 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.model_maintenance",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"kind\":\"install_engines\",\"phase\":\"verify\",\"expected\":{\"selection_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"revision_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "result": {
+      "plan": {
+        "kind": "install_engines",
+        "review": {
+          "selection_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "revision_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "preparation": {
+          "selection_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "assets": {
+            "complete": false,
+            "missing": [
+              {
+                "name": "synthetic-npu-asset",
+                "suggested_source": "https://fixture.invalid/asset",
+                "state": "missing"
+              }
+            ],
+            "assets": [
+              {
+                "name": "synthetic-npu-asset",
+                "suggested_source": "https://fixture.invalid/asset",
+                "state": "missing"
+              }
+            ]
+          }
+        },
+        "catalog": {
+          "version": "2.4.89",
+          "package_source": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.4.89/microsoft.windows.ai.machinelearning.2.4.89.nupkg",
+          "package_sha256": "5c68ecfb947223267abf159a023f5192ad42725e4e9cc995e7c1470dd54dff63",
+          "archive_member": "runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll",
+          "destination": "/foreign/catalog.dll",
+          "dll_size": 1234,
+          "dll_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        "uninstall_directory": null,
+        "cpu_candidate_sha256": null
+      },
+      "phase": "verify",
+      "verified": true,
+      "config_applied": false,
+      "npu_ready": false,
+      "warning": "Synthetic fixture only; catalog metadata is not native provider evidence."
+    },
+    "public_response": {
+      "command": "model-maintenance",
+      "status": "ok",
+      "summary": {
+        "kind": "install_engines",
+        "phase": "verify",
+        "verified": true
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": {
+        "plan": {
+          "kind": "install_engines",
+          "review": {
+            "selection_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "revision_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "preparation": {
+            "selection_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "assets": {
+              "complete": false,
+              "missing": [
+                {
+                  "name": "synthetic-npu-asset",
+                  "suggested_source": "https://fixture.invalid/asset",
+                  "state": "missing"
+                }
+              ],
+              "assets": [
+                {
+                  "name": "synthetic-npu-asset",
+                  "suggested_source": "https://fixture.invalid/asset",
+                  "state": "missing"
+                }
+              ]
+            }
+          },
+          "catalog": {
+            "version": "2.4.89",
+            "package_source": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.4.89/microsoft.windows.ai.machinelearning.2.4.89.nupkg",
+            "package_sha256": "5c68ecfb947223267abf159a023f5192ad42725e4e9cc995e7c1470dd54dff63",
+            "archive_member": "runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll",
+            "destination": "/foreign/catalog.dll",
+            "dll_size": 1234,
+            "dll_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+          },
+          "uninstall_directory": null,
+          "cpu_candidate_sha256": null
+        },
+        "phase": "verify",
+        "verified": true,
+        "config_applied": false,
+        "npu_ready": false,
+        "warning": "Synthetic fixture only; catalog metadata is not native provider evidence."
+      },
+      "related": []
+    }
+  },
+  "error_code": "model_receipt_mismatch"
+}

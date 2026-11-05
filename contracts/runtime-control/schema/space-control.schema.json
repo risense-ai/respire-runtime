@@ -1,0 +1,764 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://respire.rs/contracts/runtime-control/space-control.schema.json",
+  "title": "Frozen inherited space membership contract",
+  "description": "Fixture contexts declare expected traces and identity anchors. They prove no native execution, consumed grant, credential persistence or remote result.",
+  "type": "object",
+  "required": [
+    "fixture_type",
+    "expected",
+    "payload"
+  ],
+  "properties": {
+    "fixture_type": {
+      "const": "private_space_control"
+    },
+    "expected": {
+      "enum": [
+        "accept",
+        "reject"
+      ]
+    },
+    "payload": {
+      "$ref": "#/$defs/case"
+    },
+    "error_code": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "required": [
+        "installation_root",
+        "profile",
+        "launch_id"
+      ],
+      "properties": {
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "launch_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "expected_account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "absent"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "operation_id",
+            "session_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unbound"
+            },
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "session_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "account_id",
+            "session_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "bound"
+            },
+            "account_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "session_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "note",
+            "readonly"
+          ],
+          "properties": {
+            "kind": {
+              "const": "invite"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 121
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "readonly": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "invite_sha256",
+            "space",
+            "addr",
+            "user",
+            "readonly"
+          ],
+          "properties": {
+            "kind": {
+              "const": "join"
+            },
+            "invite_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "space": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "addr": {
+              "type": "string",
+              "minLength": 1
+            },
+            "user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "readonly": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "session_id",
+            "all"
+          ],
+          "properties": {
+            "kind": {
+              "const": "kick"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "all": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "v",
+        "id",
+        "method",
+        "args",
+        "operation_id",
+        "idempotency_key"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "method": {
+          "enum": [
+            "control.space.invite",
+            "control.space.join",
+            "control.space.kick",
+            "control.space.result"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scope": {
+          "type": "null"
+        },
+        "parent_operation_id": {
+          "type": "null"
+        },
+        "queue_wait_ms": {
+          "type": "null"
+        },
+        "lifecycle": {
+          "type": "null"
+        }
+      },
+      "additionalProperties": false
+    },
+    "params": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "source_identity",
+        "operation",
+        "invite_code"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "invite_code": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "fingerprint",
+        "profile",
+        "identity",
+        "operation",
+        "outcome",
+        "invite_code",
+        "session_id",
+        "target_profile",
+        "target_account_id",
+        "target_session_sha256",
+        "kick",
+        "remaining"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "outcome": {
+          "enum": [
+            "pending",
+            "unknown",
+            "committed",
+            "rejected"
+          ]
+        },
+        "invite_code": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kick": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/kickItem"
+          }
+        },
+        "remaining": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "kickItem": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "state"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "remote_pending",
+            "revoked",
+            "absent",
+            "rejected",
+            "unknown"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "required": [
+        "installation_root",
+        "profile",
+        "source_identity",
+        "operation",
+        "operation_id",
+        "idempotency_key",
+        "fingerprint",
+        "fingerprint_preimage",
+        "selected_profile",
+        "journal_phase",
+        "target_profile",
+        "target_account_id",
+        "target_session_sha256",
+        "readonly_team",
+        "kick_targets",
+        "previous_kick",
+        "remote_posts"
+      ],
+      "properties": {
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "fingerprint_preimage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "journal_phase": {
+          "enum": [
+            "admitted",
+            "authorized",
+            "remote_pending",
+            "remote_unknown",
+            "committed",
+            "rolled_back"
+          ]
+        },
+        "target_profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "readonly_team": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kick_targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        },
+        "previous_kick": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/kickItem"
+          }
+        },
+        "remote_posts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "envelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "space-control"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "pending",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/result"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "control_ready",
+                  "store_ready"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "skip"
+                ]
+              },
+              "value": {
+                "enum": [
+                  "true",
+                  "false"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "publicState": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "outcome": {
+          "enum": [
+            "pending",
+            "unknown",
+            "committed",
+            "rejected"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "channel",
+        "maintenance_phase",
+        "request",
+        "finish_maintenance",
+        "space_context",
+        "result",
+        "private_response"
+      ],
+      "properties": {
+        "channel": {
+          "enum": [
+            "inherited_pipe",
+            "public_http"
+          ]
+        },
+        "maintenance_phase": {
+          "enum": [
+            "Paused",
+            "Verified",
+            "Starting",
+            "Idle"
+          ]
+        },
+        "request": {
+          "$ref": "#/$defs/request"
+        },
+        "finish_maintenance": {
+          "type": "boolean"
+        },
+        "space_context": {
+          "$ref": "#/$defs/context"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "private_response": {
+          "$ref": "#/$defs/envelope"
+        },
+        "public_response": {
+          "type": "object"
+        },
+        "ledger": {},
+        "progress": {}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-methods": [
+    "control.space.invite",
+    "control.space.join",
+    "control.space.kick",
+    "control.space.result"
+  ]
+}

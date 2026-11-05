@@ -1,0 +1,28 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "error_code": "maintenance_not_terminal",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "12345678-1234-4234-8234-123456789abc",
+      "method": "control.auth.account_result",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
+      ]
+    },
+    "result": {
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "outcome": "unknown",
+      "source_profile": "/isolated/root/profile",
+      "target_profile": "/isolated/root/target",
+      "account_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "session_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "finish_maintenance": true
+  }
+}

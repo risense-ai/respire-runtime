@@ -26,7 +26,7 @@ pub fn is_write_command(c: &Command) -> bool {
             | Command::Resort { .. }
             | Command::Split { .. }
             | Command::Import { .. }
-            | Command::Extract { .. }
+            | Command::Extract { targets: false, .. }
             | Command::Repack
             | Command::RootCreate { .. }
             | Command::TreeCure { .. }
@@ -94,6 +94,7 @@ pub fn is_off_allowed(c: &Command) -> bool {
         Command::AgentConfig { .. } | Command::Inject { .. }
         // Status and doctor
         | Command::Status | Command::MemoryRevision | Command::Capabilities | Command::UpdateCheck { .. }
+        | Command::Extract { targets: true, .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
         | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
         | Command::Plugin { .. } | Command::Config { .. }

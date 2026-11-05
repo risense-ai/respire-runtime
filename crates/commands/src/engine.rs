@@ -219,23 +219,38 @@ pub fn collect_outline_json(
 
 pub fn run_agent_config(set: Option<&str>) -> Result<()> {
     if let Some(kv) = set {
-        let (k, v) = kv
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("format must be key=value (e.g. diary_mode=verbose)"))?;
-        let val =
-            serde_json::from_str::<serde_json::Value>(v).unwrap_or_else(|_| serde_json::json!(v));
-        respire_app::service::write_agent_config_key(k, &val)?;
-        let mut info = serde_json::json!({"action":"updated", "key":k, "value":val});
-        if k.trim() == "read_heat" {
-            info["read_heat_runtime"] = respire_app::read_heat::receipt()?;
-        }
-        return emit_result(ResultEnvelope::new(
-            "agent-config",
-            OutputStatus::Ok,
-            info,
-            vec![OutputItem::new(k, OutputStatus::Ok, v)],
-        ));
+        return emit_result(agent_config_set_result(kv)?);
     }
+    emit_result(agent_config_read_result()?)
+}
+
+/// The caller still owns write gates and maintenance; this does not authorize a write.
+pub fn agent_config_set_result(kv: &str) -> Result<ResultEnvelope> {
+    let (k, v) = kv
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("format must be key=value (e.g. diary_mode=verbose)"))?;
+    let val =
+        serde_json::from_str::<serde_json::Value>(v).unwrap_or_else(|_| serde_json::json!(v));
+    respire_app::service::write_agent_config_key(k, &val)?;
+    agent_config_updated_result(k, v, &val)
+}
+
+/// Format the original setter result after Runtime has verified a CAS candidate.
+pub fn agent_config_updated_result(k: &str, v: &str, val: &serde_json::Value) -> Result<ResultEnvelope> {
+    let mut info = serde_json::json!({"action":"updated", "key":k, "value":val});
+    if k.trim() == "read_heat" {
+        info["read_heat_runtime"] = respire_app::read_heat::receipt()?;
+    }
+    Ok(ResultEnvelope::new(
+        "agent-config",
+        OutputStatus::Ok,
+        info,
+        vec![OutputItem::new(k, OutputStatus::Ok, v)],
+    ))
+}
+
+/// Keep Core-owned read-heat and recall-fusion receipts on the Runtime side.
+pub fn agent_config_read_result() -> Result<ResultEnvelope> {
     let mut config = respire_app::service::read_agent_config();
     let object = config
         .as_object_mut()
@@ -249,7 +264,7 @@ pub fn run_agent_config(set: Option<&str>) -> Result<()> {
         .iter()
         .map(|(key, value)| OutputItem::new(key, OutputStatus::Ok, value.to_string()))
         .collect();
-    emit_result(ResultEnvelope::new(
+    Ok(ResultEnvelope::new(
         "agent-config",
         OutputStatus::Ok,
         config,
@@ -3836,9 +3851,14 @@ pub fn run_capabilities() -> Result<()> {
 }
 
 pub fn run_metadata_status() -> Result<()> {
+    emit_result(metadata_status_result()?)
+}
+
+/// Offline read: no session unlock, store creation, or resident startup.
+pub fn metadata_status_result() -> Result<ResultEnvelope> {
     let root = respire_app::service::data_dir();
     let path = respire_app::service::database_path(&root)?;
-    let details = if path.exists() {
+    let details = if path.try_exists()? {
         let store = respire_app::transport::local::LocalStore::open_read_only(&path)?;
         let backup = store.meta_get("memory_metadata_v1_backup")?
             .map(|value| serde_json::from_str::<serde_json::Value>(&value)).transpose()?;
@@ -3853,7 +3873,7 @@ pub fn run_metadata_status() -> Result<()> {
         serde_json::json!({"action":"status","enabled":details["enabled"],"mode":details["mode"],
             "sdk_supported":capabilities["memory_metadata_contract"].as_u64()==Some(1)}), Vec::new());
     result.details = details;
-    emit_result(result)
+    Ok(result)
 }
 
 pub fn change_metadata_profile(change: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
@@ -3896,16 +3916,9 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
             let root = root.clone();
             let details = details.clone();
             change_metadata_profile(move || {
-                let _ownership = respire_app::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
-                let store = respire_app::transport::local::LocalStore::open_existing(&respire_app::service::database_path(&root)?)?;
+                let ownership = respire_app::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
                 *details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? =
-                    store.write_transaction(|| {
-                    let mode = respire_app::metadata_gate::mode(&store)?;
-                    let retained = store.has_memory_metadata()?;
-                    store.meta_set("memory_metadata_v1_enabled", "0")?;
-                    Ok(serde_json::json!({"enabled":false,"mode":mode,
-                        "metadata_retained":retained,"sync_isolation_retained":true}))
-                })?;
+                    respire_app::metadata_gate::disable(&root, &ownership)?;
                 Ok(())
             })?;
         }

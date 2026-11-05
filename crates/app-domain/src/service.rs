@@ -977,7 +977,7 @@ pub fn validate_client_config() -> Result<()> {
     read_client_config_for_write().map(|_| ())
 }
 
-fn client_config_lock() -> Result<std::fs::File> {
+pub fn client_config_lock() -> Result<std::fs::File> {
     let path = client_config_path().with_extension("json.lock");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1110,7 +1110,7 @@ pub fn data_dir() -> PathBuf {
     data_dir_from_config(read_client_config().as_ref())
 }
 
-fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
+pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
     let env_root = env_root_dir();
     let from_config = config
         .and_then(|d| {
@@ -1487,7 +1487,8 @@ pub fn read_agent_config() -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+/// Validate Core-owned settings without publishing configuration or reloading it.
+pub fn validate_agent_runtime_setting(key: &str, value: &serde_json::Value) -> Result<()> {
     let key = key.trim();
     if key == "recall_fusion" {
         crate::recall_fusion::effective(value)?;
@@ -1497,6 +1498,12 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
         crate::read_heat::configured()?;
         crate::read_heat::require_support()?;
     }
+    Ok(())
+}
+
+pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+    let key = key.trim();
+    validate_agent_runtime_setting(key, value)?;
     if matches!(key, "memory_off" | "readonly") {
         let enabled = value.as_bool().ok_or_else(|| anyhow!("{key} must be true or false"))?;
         return set_workspace_mode(if !enabled { "normal" } else if key == "memory_off" { "off" } else { "readonly" });
@@ -1783,7 +1790,7 @@ pub fn resume_session() -> Result<serde_json::Value> {
 pub fn set_server_addr(addr: &str) -> Result<()> {
     let _config_lock = client_config_lock()?;
     let _ = read_client_config_for_write()?;
-    if database_path(&data_dir())?.exists() { crate::metadata_gate::ensure_sync_allowed(&open_store()?)?; }
+    validate_config_sync_change(true, false)?;
     let addr = addr.trim();
     if !(addr.starts_with("http://") || addr.starts_with("https://")) {
         anyhow::bail!("server address must start with http:// or https://");
@@ -1819,10 +1826,19 @@ pub fn autosync_active() -> bool {
 pub fn set_autosync(on: bool) -> Result<()> {
     let _config_lock = client_config_lock()?;
     let _ = read_client_config_for_write()?;
-    if on && database_path(&data_dir())?.exists() { crate::metadata_gate::ensure_sync_allowed(&open_store()?)?; }
+    validate_config_sync_change(false, on)?;
     let mut data = read_client_config_for_write()?;
     data["autosync"] = serde_json::json!(on);
     write_client_config(&data)
+}
+
+/// The original setters and private config validation share exactly this DB gate.
+/// Caller holds the client config lock; a helper also holds root/profile ownership.
+pub fn validate_config_sync_change(changing_addr: bool, enabling_autosync: bool) -> Result<()> {
+    if (changing_addr || enabling_autosync) && database_path(&data_dir())?.exists() {
+        crate::metadata_gate::ensure_sync_allowed(&open_store()?)?;
+    }
+    Ok(())
 }
 
 /// Periodic tree-cure switch (client.json cure_auto, default on): client background iterates cure every 10 minutes.

@@ -1,0 +1,130 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.model_install_verify",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"intent\":{},\"selection_sha256\":\"4444444444444444444444444444444444444444444444444444444444444444\"}"
+      ]
+    },
+    "result": {
+      "selection_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "assets": {
+        "complete": true,
+        "missing": [],
+        "assets": [],
+        "backend_load": {
+          "state": "loaded",
+          "evidence": {
+            "contract": 1,
+            "status": "loaded",
+            "ready": true,
+            "backend": "onnx",
+            "engine": "cpu",
+            "selected": "CPU",
+            "provider": "CPUExecutionProvider",
+            "fresh_session": true,
+            "inference_completed": true,
+            "model": "m3",
+            "index_identity": "m3",
+            "dimensions": 1024,
+            "node_assignment": "not_measured",
+            "cpu_node_fallback": "not_applicable",
+            "runtime": {
+              "kind": "onnxruntime",
+              "api_version": 22,
+              "version": "1.22.0",
+              "build_info_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+            },
+            "sdk_pin": {
+              "target": "x86_64-pc-windows-msvc",
+              "sdk_version": "0.0.0-dev.4",
+              "manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            },
+            "modules": [
+              {
+                "id": "linked-sdk-executable",
+                "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+              }
+            ],
+            "module_identity_source": "host_verified"
+          }
+        }
+      }
+    },
+    "finish_maintenance": false,
+    "public_response": {
+      "command": "model-install-verify",
+      "status": "ok",
+      "summary": {
+        "complete": true
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": {
+        "selection_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "assets": {
+          "complete": true,
+          "missing": [],
+          "assets": [],
+          "backend_load": {
+            "state": "loaded",
+            "evidence": {
+              "contract": 1,
+              "status": "loaded",
+              "ready": true,
+              "backend": "onnx",
+              "engine": "cpu",
+              "selected": "CPU",
+              "provider": "CPUExecutionProvider",
+              "fresh_session": true,
+              "inference_completed": true,
+              "model": "m3",
+              "index_identity": "m3",
+              "dimensions": 1024,
+              "node_assignment": "not_measured",
+              "cpu_node_fallback": "not_applicable",
+              "runtime": {
+                "kind": "onnxruntime",
+                "api_version": 22,
+                "version": "1.22.0",
+                "build_info_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+              },
+              "sdk_pin": {
+                "target": "x86_64-pc-windows-msvc",
+                "sdk_version": "0.0.0-dev.4",
+                "manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+              },
+              "modules": [
+                {
+                  "id": "linked-sdk-executable",
+                  "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+                }
+              ],
+              "module_identity_source": "host_verified"
+            }
+          }
+        }
+      },
+      "related": []
+    }
+  },
+  "error_code": "host_selection_mismatch"
+}

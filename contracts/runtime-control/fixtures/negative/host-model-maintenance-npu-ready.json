@@ -1,0 +1,78 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "error_code": "host_result_invalid",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.model_maintenance",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"kind\":\"reset_cpu\",\"phase\":\"apply\",\"expected\":{\"selection_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"revision_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "result": {
+      "plan": {
+        "kind": "reset_cpu",
+        "review": {
+          "selection_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "revision_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "preparation": null,
+        "catalog": null,
+        "uninstall_directory": null,
+        "cpu_candidate_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "phase": "apply",
+      "verified": true,
+      "config_applied": true,
+      "npu_ready": true,
+      "warning": null
+    },
+    "public_response": {
+      "command": "model-maintenance",
+      "status": "ok",
+      "summary": {
+        "kind": "reset_cpu",
+        "phase": "apply",
+        "verified": true
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": {
+        "plan": {
+          "kind": "reset_cpu",
+          "review": {
+            "selection_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "revision_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "preparation": null,
+          "catalog": null,
+          "uninstall_directory": null,
+          "cpu_candidate_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "phase": "apply",
+        "verified": true,
+        "config_applied": true,
+        "npu_ready": true,
+        "warning": null
+      },
+      "related": []
+    }
+  }
+}

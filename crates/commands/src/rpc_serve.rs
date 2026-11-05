@@ -310,7 +310,7 @@ impl Drop for AdmissionGuard {
 
 pub(crate) fn begin_admission(operation_id: String, kind: &'static str) -> Option<AdmissionGuard> {
     let mut admitted = ADMISSIONS.lock().ok()?;
-    if STOPPING.load(Ordering::Acquire) {
+    if business_paused() {
         return None;
     }
     admitted.push(Admitted {
@@ -318,6 +318,14 @@ pub(crate) fn begin_admission(operation_id: String, kind: &'static str) -> Optio
         kind,
     });
     Some(AdmissionGuard(operation_id))
+}
+
+fn business_paused() -> bool {
+    STOPPING.load(Ordering::Acquire) || crate::host_hooks::background_paused()
+}
+
+fn maintenance_control_method(method: &str) -> bool {
+    matches!(method, "runtime.status" | "runtime.stop" | "runtime.result" | "model.control" | "cli.progress")
 }
 
 pub(crate) fn admitted_list() -> Value {
@@ -1139,6 +1147,10 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
     };
     let mut deferred_operation = false;
     let response = (|| {
+        // Recheck after waiting for the execution gate, including unscoped reads.
+        if !maintenance_control_method(&request.method) && business_paused() {
+            return error_response(&request, "runtime_maintenance", "runtime maintenance rejected business execution");
+        }
         if operation.is_some() || request.method == "runtime.result" {
             let _fence = match ADMISSIONS.lock() {
                 Ok(fence) => fence,
@@ -1442,7 +1454,7 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
                 data_dir: Some(respire_app::service::data_dir().display().to_string()),
             },
             Err(error) => error_response(&request,
-                if error.starts_with("invalid_config:") { "invalid_config" } else if error.starts_with("scope_mismatch") { "scope_mismatch" } else { "daemon_unavailable" }, &error),
+                if error.starts_with("runtime_maintenance") { "runtime_maintenance" } else if error.starts_with("invalid_config:") { "invalid_config" } else if error.starts_with("scope_mismatch") { "scope_mismatch" } else { "daemon_unavailable" }, &error),
         },
         other => error_response(
             &request,
@@ -1480,7 +1492,7 @@ fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse 
             data_dir: Some(respire_app::service::data_dir().display().to_string()),
         },
         Err(error) => error_response(request,
-            if error.starts_with("invalid_config:") { "invalid_config" } else if error.starts_with("scope_mismatch") { "scope_mismatch" } else { "daemon_unavailable" }, &error),
+            if error.starts_with("runtime_maintenance") { "runtime_maintenance" } else if error.starts_with("invalid_config:") { "invalid_config" } else if error.starts_with("scope_mismatch") { "scope_mismatch" } else { "daemon_unavailable" }, &error),
     }
 }
 
@@ -1738,7 +1750,7 @@ pub fn enqueue_job(
     wait: Duration,
     operation_id: String,
 ) -> std::result::Result<Arc<crate::admission::QueueDeadline>, String> {
-    validate_business_config()?;
+    if !stop { validate_business_config()?; }
     enqueue_job_scoped(tx, args, stop, reply, wait, operation_id, current_scope())
 }
 
@@ -1751,7 +1763,10 @@ fn enqueue_job_scoped(
     operation_id: String,
     scope: RuntimeRequestScope,
 ) -> std::result::Result<Arc<crate::admission::QueueDeadline>, String> {
-    validate_business_config()?;
+    if !stop && business_paused() {
+        return Err("runtime_maintenance: runtime maintenance rejected queued business".to_owned());
+    }
+    if !stop { validate_business_config()?; }
     if !stop
         && !respire_app::service::off_mode()
         && needs_inference(&args)
@@ -1780,7 +1795,7 @@ fn enqueue_job_scoped(
             Duration::ZERO,
         )));
     }
-    let sync_context = if !respire_app::service::off_mode()
+    let sync_context = if !stop && !respire_app::service::off_mode()
         && matches!(
             command_name(&args),
             Some(
@@ -1804,9 +1819,10 @@ fn enqueue_job_scoped(
         let gate = shared_exclusive();
         let _held = gate.acquire(true);
         let mut admitted = ADMISSIONS.lock().map_err(|_| "admission_lock_poisoned".to_owned())?;
-        validate_job_scope(&scope)?;
-        if STOPPING.load(Ordering::Acquire) {
-            return Err("runtime is draining and rejected new business".to_owned());
+        if stop {
+            validate_scope(Some(&scope), &current_scope()).map_err(|(code, _)| code)?;
+        } else {
+            validate_job_scope(&scope)?;
         }
         admitted.push(Admitted {
             operation_id: operation_id.clone(),
@@ -3086,6 +3102,10 @@ fn operation_identity(request: &RpcRequest) -> Result<OperationIdentity, (String
 // The writer already owns the shared gate; other executors take it before
 // this check, then retain the captured generation in their thread context.
 fn validate_job_scope(scope: &RuntimeRequestScope) -> Result<(), String> {
+    // Reads can write querylog/statistics, so queued reads have no maintenance exemption.
+    if business_paused() {
+        return Err("runtime_maintenance: runtime maintenance rejected queued execution".to_owned());
+    }
     validate_business_config()?;
     validate_scope(Some(scope), &current_scope()).map_err(|(code, _)| code)?;
     respire_app::service::ensure_runtime_profile().map_err(|error| format!("scope_mismatch: {error:#}"))
@@ -3265,7 +3285,7 @@ fn admit_locked(
             Admission::Unknown
         });
     }
-    if STOPPING.load(Ordering::Acquire) {
+    if request.method != "model.control" && business_paused() {
         return Err((
             "runtime_maintenance".to_owned(),
             "runtime is draining and rejected new business".to_owned(),
@@ -3370,8 +3390,23 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_admission_replays_or_reports_unknown() {
+    fn idempotent_admission_replays_or_reports_unknown() -> Result<()> {
         let _serial = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        struct RestoreConfigEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for RestoreConfigEnv {
+            fn drop(&mut self) {
+                for (key, value) in [("RSRS_DATA_DIR", self.0.as_ref()), ("RSRS_M3_DIR", self.1.as_ref())] {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let _environment = RestoreConfigEnv(std::env::var_os("RSRS_DATA_DIR"), std::env::var_os("RSRS_M3_DIR"));
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        std::env::set_var("RSRS_M3_DIR", root.path().join("models"));
         fn request(id: &str, args: &[&str]) -> RpcRequest {
             RpcRequest {
                 scope: Some(fixture_scope("account-a", 1)),
@@ -3389,6 +3424,7 @@ mod tests {
 
         let first = request("request-1", &["a"]);
         for (error, code) in [
+            ("runtime_maintenance: queued execution was fenced", "runtime_maintenance"),
             ("invalid_config: malformed client config", "invalid_config"),
             ("scope_mismatch: stale generation", "scope_mismatch"),
             ("runtime worker is gone", "daemon_unavailable"),
@@ -3575,6 +3611,63 @@ mod tests {
         assert!(!INFLIGHT.lock().unwrap_or_else(|error| error.into_inner())
             .contains(&fresh_operation.storage_id));
         drop(restore);
+        let marker = root.path().join("runtime/autostart/maintenance.json");
+        std::fs::create_dir_all(marker.parent().context("maintenance marker parent missing")?)?;
+        for phase in ["Paused", "Starting", "Verified", "malformed"] {
+            let bytes = if phase == "malformed" { b"invalid JSON".to_vec() }
+                else { serde_json::to_vec(&json!({"phase":phase}))? };
+            std::fs::write(&marker, bytes)?;
+            assert!(business_paused(), "{phase} must fence business without STOPPING");
+            assert!(begin_admission(format!("background-{phase}"), "background_write").is_none());
+            assert!(matches!(admit_scoped(&fresh, &fresh_operation, &current),
+                Err((code, _)) if code == "runtime_maintenance"));
+            assert!(!INFLIGHT.lock().unwrap_or_else(|error| error.into_inner())
+                .contains(&fresh_operation.storage_id));
+            assert!(matches!(admit_scoped(&first, &operation, &current), Ok(Admission::Unknown)));
+            let mut control = request("maintenance-cancel", &["cancel"]);
+            control.method = "model.control".to_owned();
+            control.operation_id = Some(format!("cancel-{phase}"));
+            control.idempotency_key = None;
+            let cancellation = operation_identity_for_scope(&control, &current)
+                .map_err(|(code, error)| anyhow::anyhow!("{code}: {error}"))?;
+            match admit_scoped(&control, &cancellation, &current) {
+                Ok(Admission::New(guard)) => drop(guard),
+                _ => anyhow::bail!("maintenance must retain the scoped cancellation channel"),
+            }
+            INFLIGHT.lock().unwrap_or_else(|error| error.into_inner()).remove(&cancellation.storage_id);
+            let (jobs, queued) = mpsc::channel();
+            for args in [vec!["recall".to_owned(), "query".to_owned()], vec!["show".to_owned(), "entry".to_owned()], vec!["remember".to_owned(), "value".to_owned()]] {
+                assert!(matches!(enqueue_job_scoped(&jobs, args.clone(), false, Reply::new(|_| {}),
+                    Duration::from_secs(1), format!("queued-{phase}"), current.clone()),
+                    Err(error) if error.starts_with("runtime_maintenance")));
+                assert!(matches!(capture_scoped_locked(&current, args),
+                    Err(error) if error.starts_with("runtime_maintenance")));
+            }
+            assert!(matches!(queued.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            let mut catalog = request("fenced-catalog", &[]);
+            catalog.method = "model.catalog".to_owned();
+            assert_eq!(dispatch(catalog, &jobs).code.as_deref(), Some("runtime_maintenance"));
+            let mut status = request("maintenance-status", &[]);
+            status.method = "runtime.status".to_owned();
+            assert!(dispatch(status, &jobs).ok);
+            let live = current_scope();
+            let mut lookup = request("original-result-query", &["original-operation"]);
+            lookup.method = "runtime.result".to_owned();
+            lookup.scope = Some(live.clone());
+            let storage_id = scoped_operation_key(&operation_scope(&live), "original-operation");
+            remember(&storage_id, &status_response(&lookup));
+            let result = dispatch(lookup, &jobs);
+            assert!(result.ok);
+            assert!(result.envelope.is_some_and(|envelope| envelope.summary["state"] == "completed"));
+            for method in ["runtime.status", "runtime.stop", "runtime.result", "model.control", "cli.progress"] {
+                assert!(maintenance_control_method(method));
+            }
+            for method in ["cli.exec", "model.catalog", "model.progress", "assets.status", "model.prepare", "index.prepare"] {
+                assert!(!maintenance_control_method(method));
+            }
+        }
+        std::fs::remove_file(&marker)?;
+        assert!(!business_paused());
         {
             struct RestoreGeneration(usize);
             impl Drop for RestoreGeneration {
@@ -3619,6 +3712,7 @@ mod tests {
         let switched = fixture_scope("account-a", current.generation + 1);
         assert!(cached(&scoped_operation_key(&operation_scope(&switched), &internal_identity.operation_id)).is_none());
         assert!(matches!(admit_scoped(&internal, &internal_identity, &current), Ok(Admission::Replay(_))));
+        Ok(())
     }
 
     #[test]

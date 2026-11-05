@@ -210,6 +210,10 @@ pub fn capture_run(args: Vec<String>) -> Captured {
 }
 
 #[cfg(test)]
+#[path = "runtime_executor/legacy_cli_tests.rs"]
+mod legacy_cli_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -371,6 +375,10 @@ mod tests {
 
     #[test]
     fn installers_and_lifecycle_commands_are_not_business_execution() -> anyhow::Result<()> {
+        let host_source = include_str!("../../../runtime/src/main.rs");
+        assert!(host_source.contains("arg == \"--core-worker-internal\""));
+        assert!(host_source.contains("respire_core_sdk::worker::run()"));
+        assert!(host_source.contains("core workers cannot consume runtime boot authorization"));
         for args in [
             vec!["snapshot", "restore", "snapshot-id", "--confirm"],
             vec!["snapshot", "recover", "--confirm"],

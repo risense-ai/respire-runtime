@@ -1,0 +1,20 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "error_code": "host_request_invalid",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789ABC",
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "12345678-1234-4234-8234-123456789abc",
+      "method": "control.auth.register",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"unbound\",\"operation_id\":\"42345678-1234-4234-b234-123456789abc\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"addr\":\"https://fixture.invalid\",\"user\":\"fixture-user\",\"password\":\"fixture-password\",\"super_password\":null}"
+      ]
+    },
+    "finish_maintenance": false
+  }
+}

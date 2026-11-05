@@ -27,6 +27,35 @@ pub enum RuntimeCommand {
     Restart,
     /// Inspect the existing host without creating a profile or starting it.
     Status,
+    /// Recover the original private keygen operation; never generate another key.
+    AuthResult {
+        #[arg(long, value_parser = parse_auth_operation_id)]
+        operation_id: String,
+        /// Must match the original keygen request.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Recover/query the original account operation without authenticating again.
+    AccountResult {
+        #[arg(long, value_parser = parse_auth_operation_id)]
+        operation_id: String,
+        #[arg(long, value_name = "DIR")]
+        source_profile: PathBuf,
+        /// The original operation was registration rather than login.
+        #[arg(long)]
+        register: bool,
+    },
+    /// Explicitly compensate the original account operation when its receipt permits it.
+    AccountRollback {
+        #[arg(long, value_parser = parse_auth_operation_id)]
+        operation_id: String,
+        #[arg(long, value_name = "DIR")]
+        source_profile: PathBuf,
+        #[arg(long)]
+        register: bool,
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Manage opt-in current-user sign-in startup; never installs a system service.
     Autostart {
         #[command(subcommand)]
@@ -56,6 +85,14 @@ pub enum RuntimeCommand {
         #[arg(long, value_name = "DIR")]
         data_dir: PathBuf,
     },
+}
+
+fn parse_auth_operation_id(value: &str) -> Result<String, String> {
+    if uuid::Uuid::parse_str(value).is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value) {
+        Ok(value.to_owned())
+    } else {
+        Err("auth operation ID must be a canonical random UUID".into())
+    }
 }
 
 #[derive(Debug, Subcommand)]

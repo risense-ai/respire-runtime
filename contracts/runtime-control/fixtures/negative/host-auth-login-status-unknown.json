@@ -1,0 +1,43 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "12345678-1234-4234-8234-123456789abc",
+      "method": "control.auth.login",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"addr\":\"https://fixture.invalid\",\"user\":\"fixture-user\",\"authorization\":{\"kind\":\"password\",\"password\":\"fixture-password\",\"totp\":\"123456\"},\"super_password\":\"\",\"continuation\":{\"legacy_password\":\"\",\"account_secret\":null,\"source_secret\":\"fixture-source\",\"secret_key\":\"fixture-key\",\"new_super\":\"\",\"migrate_local\":true,\"migrate_vault\":false,\"offer_local_merge\":true,\"merge_local\":false}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "original_operation_id": "12345678-1234-4234-8234-123456789abc",
+    "result": {
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "outcome": "awaiting_input",
+      "source_profile": "/isolated/root/profile",
+      "target_profile": null,
+      "account_id": null,
+      "session_sha256": null,
+      "super_password": null,
+      "login": {
+        "required_inputs": [
+          "legacy_password",
+          "account_secret"
+        ],
+        "user": "fixture-user",
+        "addr": "https://fixture.invalid",
+        "dir": null,
+        "super_issued": null,
+        "import": null,
+        "sync": null,
+        "argv": []
+      }
+    }
+  },
+  "error_code": "host_result_invalid"
+}

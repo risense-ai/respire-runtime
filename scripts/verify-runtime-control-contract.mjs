@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 import process from "node:process";
+import { isDeepStrictEqual } from "node:util";
 
 const root = resolve("contracts/runtime-control");
 
@@ -42,8 +43,8 @@ if (manifest.release_metadata_schema_version !== 2) fail("wrong release metadata
 
 const positive = manifest.fixtures?.positive;
 const negative = manifest.fixtures?.negative;
-if (!Array.isArray(positive) || positive.length !== 25) fail("positive fixture count");
-if (!Array.isArray(negative) || negative.length !== 48) fail("negative fixture count");
+if (!Array.isArray(positive) || positive.length !== 89) fail("positive fixture count");
+if (!Array.isArray(negative) || negative.length !== 287) fail("negative fixture count");
 
 const boundPaths = new Set();
 for (const bound of manifest.files ?? []) {
@@ -508,4 +509,420 @@ for (const target of [
   if (!contract.includes(target)) fail(`compatibility contract omits ${target}`);
 }
 
-console.log(`runtime control contract verified: ${boundPaths.size} bound files`);
+const hostSchema = readJSON(fixturePath("schema/private-host-control.schema.json"));
+if (!boundPaths.has("schema/private-host-control.schema.json")) fail("private host schema is not digest-bound");
+if (!boundPaths.has("consumers/private_host_control.rs")) fail("shared Rust consumer is not digest-bound");
+for (const marker of ["private-host-control.schema.json", "awaiting_verification", "snapshot-restore-v1", "Terminal history"]) {
+  if (!contract.includes(marker)) fail(`private host contract omits ${marker}`);
+}
+
+// Only the keywords used by this frozen schema are evaluated. Context fields
+// declare test inputs, not proof of a consumed grant or a live process.
+function hostSchemaValid(value, schema, definitions = hostSchema.$defs) {
+  if (schema.$ref) return hostSchemaValid(value, definitions[schema.$ref.slice("#/$defs/".length)], definitions);
+  if (schema.allOf?.some(child => !hostSchemaValid(value, child, definitions))) return false;
+  if (schema.not && hostSchemaValid(value, schema.not, definitions)) return false;
+  if (schema.if) {
+    const branch = hostSchemaValid(value, schema.if, definitions) ? schema.then : schema.else;
+    if (branch && !hostSchemaValid(value, branch, definitions)) return false;
+  }
+  if (schema.anyOf && !schema.anyOf.some(child => hostSchemaValid(value, child, definitions))) return false;
+  if (schema.oneOf && schema.oneOf.filter(child => hostSchemaValid(value, child, definitions)).length !== 1) return false;
+  if (Object.hasOwn(schema, "const") && value !== schema.const) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.type === "null" && value !== null) return false;
+  if (schema.type === "object" && (!value || typeof value !== "object" || Array.isArray(value))) return false;
+  if (schema.type === "array" && !Array.isArray(value)) return false;
+  if (schema.type === "string" && typeof value !== "string") return false;
+  if (schema.type === "boolean" && typeof value !== "boolean") return false;
+  if (schema.type === "integer" && !Number.isSafeInteger(value)) return false;
+  if (schema.minimum !== undefined && value < schema.minimum) return false;
+  if (schema.maximum !== undefined && value > schema.maximum) return false;
+  if (schema.minLength !== undefined && value.length < schema.minLength) return false;
+  if (schema.maxLength !== undefined && value.length > schema.maxLength) return false;
+  if (schema.pattern && !new RegExp(schema.pattern).test(value)) return false;
+  if (schema.required?.some(key => !Object.hasOwn(value, key))) return false;
+  if (schema.additionalProperties === false && Object.keys(value).some(key => !Object.hasOwn(schema.properties, key))) return false;
+  for (const [key, child] of Object.entries(schema.properties ?? {})) {
+    if (Object.hasOwn(value, key) && !hostSchemaValid(value[key], child, definitions)) return false;
+  }
+  if (schema.minItems !== undefined && value.length < schema.minItems) return false;
+  if (schema.maxItems !== undefined && value.length > schema.maxItems) return false;
+  if (schema.items && !value.every(item => hostSchemaValid(item, schema.items, definitions))) return false;
+  if (schema.uniqueItems && new Set(value.map(item => JSON.stringify(item))).size !== value.length) return false;
+  return true;
+}
+
+function configFixtureFailure(params, context) {
+  if (!context || !hostSchemaValid(context, hostSchema.$defs.configContext)) return "config_context_mismatch";
+  const digest = text => text == null ? null : createHash("sha256").update(text, "utf8").digest("hex");
+  if ((params.original_config ?? null) !== context.original_config ||
+      (params.original_revision ?? null) !== context.original_revision ||
+      digest(params.original_config) !== (params.original_revision ?? null) ||
+      params.candidate_revision !== context.candidate_revision ||
+      context.candidate_config !== context.reviewed_candidate_config ||
+      digest(context.candidate_config) !== params.candidate_revision) return "config_revision_mismatch";
+  if (params.target_profile !== params.binding.profile || params.source_profile !== context.source_profile ||
+      params.target_profile !== context.target_profile || !isDeepStrictEqual(params.source_identity, context.source_identity) ||
+      !isDeepStrictEqual(params.identity, context.target_identity)) return "config_context_mismatch";
+  let original, candidate;
+  try { original = params.original_config == null ? {} : JSON.parse(params.original_config); candidate = JSON.parse(context.candidate_config); }
+  catch { return "config_intent_mismatch"; }
+  if (!original || typeof original !== "object" || Array.isArray(original)) return "config_intent_mismatch";
+  const expected = structuredClone(original);
+  for (const key of ["data_dir", "addr", "autosync", "cure_auto", "rpc_parallelism"]) {
+    let value = params.intent[key];
+    if (value == null) continue;
+    if (key === "data_dir" || key === "addr") value = value.trim();
+    if (key === "data_dir" && value === "" || key === "rpc_parallelism" && value === 0) delete expected[key];
+    else expected[key] = value;
+  }
+  return isDeepStrictEqual(candidate, expected) ? null : "config_intent_mismatch";
+}
+
+function fixedWriteModelFailure(payload, params, kind) {
+  if (!["identityWriteResult", "keyResult", "modelMaintenanceReceipt"].includes(kind)) return null;
+  const result = payload.result, binding = params.binding;
+  if (kind !== "modelMaintenanceReceipt") {
+    const context = payload.write_context;
+    if (!context || !hostSchemaValid(context, hostSchema.$defs.writeContext) ||
+        context.installation_root !== binding.installation_root || context.profile !== binding.profile ||
+        !isDeepStrictEqual(context.source_identity, params.source_identity) ||
+        !isDeepStrictEqual(context.operation, params.operation) ||
+        context.operation_id !== payload.request.operation_id || context.idempotency_key !== payload.request.idempotency_key) return "write_context_mismatch";
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const fingerprint = createHash("sha256").update(JSON.stringify(canonical({schema_version: 1,
+      method: kind === "keyResult" ? "control.key" : "control.identity.write", root: context.installation_root,
+      profile: context.profile, source_identity: context.source_identity, operation: context.operation}))).digest("hex");
+    if (result.fingerprint !== fingerprint || context.fingerprint !== fingerprint) return "host_fingerprint_mismatch";
+    if (!isDeepStrictEqual(result.operation, params.operation)) return "write_context_mismatch";
+    const before = params.identity, after = result.identity;
+    if ((binding.expected_account_id ?? null) !== (before.kind === "bound" ? before.account_id : null)) return "write_identity_mismatch";
+    const full = kind === "identityWriteResult" && params.operation.kind === "logout" && params.operation.full;
+    if (after.kind === "absent" ? before.kind !== "absent" && !full :
+        before.kind !== after.kind || (after.kind === "bound" ? before.account_id !== after.account_id : before.operation_id !== after.operation_id)) return "write_identity_mismatch";
+    if (kind === "identityWriteResult") {
+      if (result.path !== binding.profile + "/session.json" ||
+          (result.session_sha256 ?? null) !== (after.session_sha256 ?? null) ||
+          full && result.outcome === "committed" && after.kind !== "absent" ||
+          params.operation.kind === "logout" && result.revoke != null ||
+          params.operation.kind === "session_revoke" && (result.revoke != null && result.revoke.session_id.toLowerCase() !== params.operation.session_id.toLowerCase() ||
+            result.outcome === "committed" && result.revoke == null)) return "write_identity_mismatch";
+    } else {
+      if (result.verification_required === true || result.source_profile !== binding.profile || result.target_profile != null && result.target_profile !== binding.profile ||
+          result.outcome === "committed" && (result.target_profile !== binding.profile || after.kind !== "bound" ||
+            result.account_id !== after.account_id || result.session_sha256 !== after.session_sha256 || !result.super_password) ||
+          result.outcome !== "committed" && (result.super_password != null || result.account_id != null || result.session_sha256 != null) ||
+          (result.outcome === "awaiting_input") !== (result.required_inputs.length > 0)) return "write_identity_mismatch";
+    }
+  } else {
+    if (params.phase !== "plan" && !isDeepStrictEqual(params.expected, result.plan.review)) return "model_review_mismatch";
+    if (result.plan.kind !== params.kind || result.phase !== params.phase || result.verified !== (params.phase !== "plan") ||
+        result.config_applied !== (params.phase === "apply") ||
+        params.kind === "reset_cpu" && (!result.plan.cpu_candidate_sha256 || result.plan.preparation != null || result.plan.catalog != null || result.plan.uninstall_directory != null) ||
+        params.kind === "uninstall_m3" && (!result.plan.uninstall_directory || result.plan.cpu_candidate_sha256 != null || result.plan.preparation != null || result.plan.catalog != null) ||
+        params.kind === "install_engines" && (result.plan.uninstall_directory != null || result.plan.cpu_candidate_sha256 != null ||
+          (result.plan.preparation == null) !== (result.plan.catalog == null) || result.plan.catalog != null &&
+          result.plan.catalog.destination !== binding.installation_root + "/engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll")) return "model_receipt_mismatch";
+  }
+  const model = kind === "modelMaintenanceReceipt", envelope = model ? payload.public_response : payload.private_response;
+  const rule = model ? "modelMaintenanceEnvelope" : kind === "keyResult" ? "keyEnvelope" : "identityWriteEnvelope";
+  const status = model ? "ok" : result.outcome === "unknown" ? "fail" : ["pending", "awaiting_input"].includes(result.outcome) ? "pending" : "ok";
+  if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[rule]) || envelope.status !== status ||
+      !isDeepStrictEqual(model ? envelope.details : envelope.summary, result) || model &&
+      !isDeepStrictEqual(envelope.summary, {kind: params.kind, phase: params.phase, verified: result.verified})) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const matching = envelope.items.filter(item => item.name === name);
+    if (matching.length !== 1 || matching[0].status !== status || matching[0].value !== value) return "host_result_invalid";
+  }
+  return null;
+}
+
+// Fixture contexts are evidence anchors, never capabilities or native execution.
+function keyMigrationFailure(payload, params, kind) {
+  const request = payload.request, result = payload.result, binding = params.binding;
+  const same = isDeepStrictEqual;
+  const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  if (kind === "keyResult" && params.operation.kind === "fivekeys") {
+    const context = payload.key_context, write = payload.write_context;
+    if (!context || !hostSchemaValid(context, hostSchema.$defs.keyContext) ||
+        !write || !hostSchemaValid(write, hostSchema.$defs.writeContext) ||
+        write.installation_root !== binding.installation_root || !same(write.source_identity, params.source_identity) ||
+        !same(write.operation, params.operation) || write.operation_id !== request.operation_id ||
+        write.idempotency_key !== request.idempotency_key || binding.profile !== context.launch_profile ||
+        !same(params.identity, context.launch_identity)) return "write_context_mismatch";
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const fingerprint = hash(canonical({schema_version: 1, method: "control.key", root: write.installation_root,
+      profile: write.profile, source_identity: write.source_identity, operation: write.operation}));
+    if (write.fingerprint !== fingerprint || result.fingerprint !== fingerprint) return "host_fingerprint_mismatch";
+    if (!same(result.operation, params.operation) || result.source_profile !== write.profile ||
+        !same(result.identity, context.selected_identity) ||
+        (binding.expected_account_id ?? null) !== (params.identity.kind === "bound" ? params.identity.account_id : null)) return "write_identity_mismatch";
+    const applied = result.verification_required === true || result.outcome === "committed";
+    if (result.super_password != null || result.required_inputs.some(field => !["password", "super_password", "account_secret", "totp"].includes(field))) return "private_secret_exposure";
+    if (applied) {
+      const account = createHash("sha256").update(params.operation.user).digest("hex");
+      if (result.target_profile !== context.target_profile || context.selected_profile !== context.target_profile ||
+          !same(result.identity, context.target_identity) || result.identity.kind !== "bound" ||
+          result.account_id !== account || result.identity.account_id !== account ||
+          result.session_sha256 !== result.identity.session_sha256 || result.required_inputs.length ||
+          (result.verification_required === true ? result.outcome !== "pending" : result.outcome !== "committed") ||
+          (result.outcome === "committed" && !context.verified) ||
+          ![write.profile, context.target_profile].includes(binding.profile)) return "write_identity_mismatch";
+    } else if (result.account_id != null || result.session_sha256 != null ||
+        !same(result.identity, params.source_identity) || context.selected_profile !== write.profile ||
+        (result.outcome === "awaiting_input") !== (result.required_inputs.length > 0)) return "write_identity_mismatch";
+    if (request.method === "control.key.complete" && (!applied || result.outcome !== "committed" || result.verification_required === true || !context.verified ||
+        binding.profile !== context.target_profile || !same(params.identity, context.target_identity) || params.input != null)) return "key_completion_mismatch";
+    if (context.input_state === "initial" && request.method === "control.key.fivekeys" && params.input?.password == null &&
+        !(result.outcome === "awaiting_input" && result.required_inputs.includes("password"))) return "key_input_mismatch";
+    if (context.input_state === "continuation" && (payload.original_operation_id !== request.operation_id ||
+        !params.input || typeof params.input.totp !== "string")) return "key_input_mismatch";
+  } else if (kind === "migrationResult") {
+    const original = params.original, context = payload.migration_context;
+    if (!context || !hostSchemaValid(context, hostSchema.$defs.migrationContext)) return "migration_context_mismatch";
+    if (original.operation_id !== request.operation_id || original.key !== request.idempotency_key || original.key !== original.operation_id) return "host_operation_mismatch";
+    if (original.installation_root !== binding.installation_root || original.profile !== binding.profile ||
+        !same(original.identity, params.identity) || !same(result.identity, original.identity) ||
+        (binding.expected_account_id ?? null) !== (original.identity.kind === "bound" ? original.identity.account_id : null) ||
+        original.source_id !== context.source_id || original.account !== context.account) return "migration_context_mismatch";
+    const identity = original.identity.kind === "bound" ? {kind: "bound", account_id: original.identity.account_id, session_sha256: original.identity.session_sha256}
+      : original.identity.kind === "unbound" ? {kind: "unbound", operation_id: original.identity.operation_id, session_sha256: original.identity.session_sha256} : {kind: "absent"};
+    const fingerprint = hash([1, "control.migration.profile", original.installation_root, original.profile, identity, original.source_id, original.account]);
+    if (original.fingerprint !== fingerprint || result.fingerprint !== fingerprint || context.fingerprint_preimage !== JSON.stringify([1,
+        "control.migration.profile", original.installation_root, original.profile, identity, original.source_id, original.account])) return "host_fingerprint_mismatch";
+    const destination = original.installation_root + "/accounts/" + original.account, marker = context.marker;
+    if (result.outcome === "completed") {
+      if (context.publication !== "bound" || !marker || !same(marker.control, original) || marker.schema !== 2 ||
+          marker.complete !== true || marker.namespace_migrated !== true || marker.original_preserved !== true ||
+          marker.source_identity !== original.source_id || marker.source !== context.source || marker.destination !== destination ||
+          !same(marker.control_result, result.details) || !same(result.details, {state: "migrated", account: original.account,
+            dir: destination, source: context.source, original_preserved: true})) return "migration_marker_mismatch";
+    } else if (result.outcome === "already_migrated") {
+      if (request.method !== "control.migration.profile" || context.publication !== "legacy_unbound" || !marker ||
+          marker.control != null || marker.complete !== true || marker.source_identity !== original.source_id ||
+          result.details.state !== "already_migrated" || result.details.dir !== marker.destination) return "migration_marker_mismatch";
+    } else if (result.details !== null || context.publication === "bound") return "migration_marker_mismatch";
+  } else return null;
+  const rule = kind === "migrationResult" ? "migrationEnvelope" : "keyEnvelope", envelope = payload.private_response;
+  const status = result.outcome === "unknown" ? "fail" : ["pending", "awaiting_input"].includes(result.outcome) ? "pending" : "ok";
+  if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[rule]) || envelope.status !== status ||
+      !same(envelope.summary, result)) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const items = envelope.items.filter(item => item.name === name);
+    if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "host_result_invalid";
+  }
+  if (payload.progress != null || payload.ledger != null) return "private_secret_exposure";
+  return null;
+}
+
+function privateHostFailure(payload) {
+  if (payload.channel !== "inherited_pipe") return "private_channel_required";
+  if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
+  const request = payload.request, method = hostSchema["x-methods"][request.method];
+  if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult", "migrationResult"].includes(method.result) &&
+      Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
+  if (method.mutable && (!request.operation_id || !request.idempotency_key)) return "host_operation_required";
+  if (!method.mutable && (request.operation_id != null || request.idempotency_key != null)) return "host_request_invalid";
+  let params;
+  try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
+  if (!hostSchemaValid(params, hostSchema.$defs[method.params])) return "host_params_invalid";
+  if ((Object.hasOwn(payload, "progress") || Object.hasOwn(payload, "ledger")) &&
+      method.result !== "migrationResult" && !(method.result === "keyResult" && params.operation.kind === "fivekeys")) return "host_request_invalid";
+  if (method.params === "keyParams" && ((request.method === "control.key.super_reset" && params.operation.kind !== "super_reset") ||
+      ["control.key.fivekeys", "control.key.complete"].includes(request.method) && params.operation.kind !== "fivekeys")) return "host_params_invalid";
+  if (method.params === "identityWriteParams" && request.method !== "control.identity.write_result" &&
+      (request.method === "control.identity.logout") !== (params.operation.kind === "logout")) return "host_params_invalid";
+  if (method.params === "modelMaintenanceParams" && ((params.phase === "plan") !== (params.expected == null) ||
+      params.phase === "apply" && params.kind !== "reset_cpu" || params.phase === "verify" && params.kind === "reset_cpu")) return "host_params_invalid";
+  if (method.params === "modelParams" && (request.method === "control.model_install_plan"
+      ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
+  const snapshot = request.method === "control.snapshot_maintenance";
+  const verified = ["control.auth.account_complete", "control.key.complete"].includes(request.method) || snapshot && ["commit", "release"].includes(params.action);
+  if (payload.maintenance_phase !== (verified ? "Verified" : "Paused")) return "maintenance_phase_mismatch";
+  if (payload.original_operation_id && payload.original_operation_id !== request.operation_id) return "host_operation_mismatch";
+  if (snapshot) {
+    if (params.operation_id !== request.operation_id) return "host_operation_mismatch";
+    const tuple = ["snapshot-restore-v1", params.binding.installation_root, params.binding.profile,
+      params.binding.expected_account_id ?? null, params.sync_generation, params.snapshot_id];
+    const fingerprint = createHash("sha256").update(JSON.stringify(tuple)).digest("hex");
+    if (params.request_fingerprint !== fingerprint || payload.original_fingerprint && payload.original_fingerprint !== fingerprint) return "host_fingerprint_mismatch";
+  }
+  if (method.params === "configParams") {
+    const failure = configFixtureFailure(params, payload.config_context);
+    if (failure) return failure;
+  }
+  const result = payload.result;
+  if (!result) return payload.finish_maintenance ? "maintenance_not_terminal" : null;
+  if (!hostSchemaValid(result, hostSchema.$defs[method.result])) return "host_result_invalid";
+  if (method.mutable && result.operation_id !== request.operation_id) return "host_operation_mismatch";
+  const extension = method.result === "migrationResult" || method.result === "keyResult" && params.operation.kind === "fivekeys";
+  const fixedFailure = extension ? keyMigrationFailure(payload, params, method.result) : fixedWriteModelFailure(payload, params, method.result);
+  if (fixedFailure) return fixedFailure;
+  if (["identityResult", "configReceipt"].includes(method.result)) {
+    const envelope = payload.private_response;
+    const kind = method.result === "identityResult" ? "identityEnvelope" : "configEnvelope";
+    if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[kind]) ||
+        !isDeepStrictEqual(method.result === "identityResult" ? envelope.details : envelope.summary, result)) return "host_result_invalid";
+    for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+      const matching = envelope.items.filter(item => item.name === name);
+      if (matching.length !== 1 || matching[0].status !== status || matching[0].value !== value) return "host_result_invalid";
+    }
+    if (method.result === "configReceipt") {
+      for (const [receipt, parameter] of [["original_revision", "original_revision"], ["candidate_revision", "candidate_revision"],
+          ["source_profile", "source_profile"], ["target_profile", "target_profile"],
+          ["source_identity", "source_identity"], ["target_identity", "identity"]]) {
+        if (!isDeepStrictEqual(result[receipt] ?? null, params[parameter] ?? null)) return "config_receipt_mismatch";
+      }
+      for (const key of ["data_dir", "addr", "autosync", "cure_auto", "rpc_parallelism"]) {
+        if (!isDeepStrictEqual(result.intent[key] ?? null, params.intent[key] ?? null)) return "config_receipt_mismatch";
+      }
+    }
+  }
+
+  if (method.result === "modelPlan" && JSON.stringify(result.assets.assets) !== JSON.stringify(result.assets.missing)) return "host_result_invalid";
+  if (["modelPlan", "modelVerify"].includes(method.result)) {
+    if (method.result === "modelVerify" && result.selection_sha256 !== params.selection_sha256) return "host_selection_mismatch";
+    const envelope = payload.public_response;
+    const command = method.result === "modelPlan" ? "model-install-plan" : "model-install-verify";
+    if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs.modelEnvelope) ||
+        envelope.command !== command || envelope.summary.complete !== result.assets.complete ||
+        JSON.stringify(envelope.details) !== JSON.stringify(result) || assetsFailure(envelope.details.assets)) return "host_result_invalid";
+    for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+      const matching = envelope.items.filter(item => item.name === name);
+      if (matching.length !== 1 || matching[0].status !== status || matching[0].value !== value) return "host_result_invalid";
+    }
+  }
+  if (method.result === "accountResult") {
+    if (["awaiting_verification", "committed"].includes(result.outcome) &&
+        (!result.target_profile || !result.account_id || !result.session_sha256)) return "host_result_invalid";
+    if (result.outcome === "rolled_back" && (result.account_id != null || result.session_sha256 != null || result.super_password != null)) return "host_result_invalid";
+  }
+  if (snapshot) {
+    if (result.request_fingerprint !== params.request_fingerprint || result.snapshot_id !== params.snapshot_id) return "host_fingerprint_mismatch";
+    for (const previous of payload.history ?? []) {
+      if (previous.operation_id !== request.operation_id) continue;
+      if (previous.request_fingerprint !== params.request_fingerprint || previous.snapshot_id !== params.snapshot_id) return "terminal_history_conflict";
+      if (["released", "rolled_back"].includes(previous.state) && result.state !== previous.state ||
+          previous.state === "verified" && !["verified", "released"].includes(result.state)) return "terminal_history_conflict";
+    }
+  }
+  const terminal = method.result === "accountResult" && ["committed", "rolled_back"].includes(result.outcome) ||
+    extension && (method.result === "migrationResult" ? ["completed", "already_migrated"].includes(result.outcome) :
+      ["committed", "rolled_back"].includes(result.outcome) && !result.verification_required) ||
+    snapshot && ["released", "rolled_back"].includes(result.state);
+  if (payload.finish_maintenance && !terminal) return "maintenance_not_terminal";
+  return null;
+}
+
+for (const [group, legacyCount, newCount] of [[positive, 25, 64], [negative, 48, 239]]) {
+  let checked = 0;
+  for (const name of group) {
+    const fixture = readJSON(fixturePath(name));
+    if (fixture.fixture_type !== "private_host_control") continue;
+    if (fixture.expected === "accept" && !hostSchemaValid(fixture, hostSchema)) fail(`${name}: invalid host fixture container`);
+    const expected = fixture.expected === "accept" ? null : fixture.error_code;
+    const actual = privateHostFailure(fixture.payload);
+    if (actual !== expected) fail(`${name}: host rejection ${actual}, expected ${expected}`);
+    checked++;
+  }
+  if (checked !== newCount || group.length - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
+}
+
+const spaceExtension = manifest.extensions.space;
+const spaceSchema = readJSON(fixturePath(spaceExtension.schema));
+const spaceValid = (value, name) => hostSchemaValid(value, spaceSchema.$defs[name], spaceSchema.$defs);
+const canonical = value => JSON.stringify(sortKeys(value));
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, sortKeys(value[key])]));
+  return value;
+}
+const textHash = text => createHash("sha256").update(text, "utf8").digest("hex");
+function spaceFailure(p) {
+  if (p.channel !== "inherited_pipe") return "private_channel_required";
+  if (Object.hasOwn(p, "public_response")) return "private_secret_exposure";
+  const q = p.request;
+  if (!spaceValid(q, "request")) return "space_request_invalid";
+  let a;
+  try { a = JSON.parse(q.args[0]); } catch { return "space_params_invalid"; }
+  if (!spaceValid(a, "params")) return "space_params_invalid";
+  if (q.method !== "control.space.result" && q.method !== `control.space.${a.operation.kind}`) return "space_method_mismatch";
+  const r = p.result, c = p.space_context, op = a.operation;
+  if (!spaceValid(r, "result")) return "space_result_invalid";
+  for (const name of ["ledger", "progress"]) {
+    if (Object.hasOwn(p, name) && !spaceValid(p[name], "publicState")) return "private_secret_exposure";
+  }
+  if (p.maintenance_phase !== "Paused") return "maintenance_phase_mismatch";
+  if (!spaceValid(c, "context") || c.installation_root !== a.binding.installation_root || c.profile !== a.binding.profile ||
+      !isDeepStrictEqual(c.source_identity, a.source_identity) || !isDeepStrictEqual(c.operation, op) ||
+      c.operation_id !== q.operation_id || c.idempotency_key !== q.idempotency_key) return "space_context_mismatch";
+  if (r.operation_id !== q.operation_id || !isDeepStrictEqual(r.operation, op)) return "space_operation_mismatch";
+  const preimage = canonical({schema_version: 1, method: "control.space", root: c.installation_root,
+    profile: c.profile, source_identity: a.source_identity, operation: op});
+  if (c.fingerprint_preimage !== preimage || c.fingerprint !== textHash(preimage) || r.fingerprint !== c.fingerprint) return "space_fingerprint_mismatch";
+  if (r.profile !== c.profile || c.selected_profile !== c.profile || !isDeepStrictEqual(r.identity, a.source_identity) ||
+      !isDeepStrictEqual(a.identity, a.source_identity) || a.binding.expected_account_id !== a.source_identity.account_id) return "space_identity_mismatch";
+  const outcome = {admitted: "pending", authorized: "pending", remote_pending: "unknown", remote_unknown: "unknown", committed: "committed", rolled_back: "rejected"}[c.journal_phase];
+  if (r.outcome !== outcome || [p.ledger, p.progress].some(v => v && v.outcome !== r.outcome)) return "space_outcome_mismatch";
+  for (const state of [p.ledger, p.progress]) {
+    if (state && ["operation_id", "idempotency_key", "fingerprint"].some(k => Object.hasOwn(state, k) && state[k] !== ({...q, fingerprint: c.fingerprint})[k])) return "space_context_mismatch";
+  }
+  if (op.kind === "join") {
+    if (r.invite_code !== null || r.session_id !== null || r.kick.length || r.remaining !== null ||
+        r.target_profile !== c.target_profile || r.target_account_id !== c.target_account_id || r.target_session_sha256 !== c.target_session_sha256 ||
+        r.target_profile !== `${c.installation_root}/accounts/${op.space}` ||
+        r.outcome === "committed" && (c.readonly_team !== op.readonly || r.target_account_id !== textHash(op.user) || !r.target_session_sha256) ||
+        r.outcome !== "committed" && (r.target_account_id !== null || r.target_session_sha256 !== null)) return "space_join_mismatch";
+    if (a.invite_code !== null) {
+      try {
+        if (!/^1mem-invite:(?:[0-9a-f]{2})+$/.test(a.invite_code) || textHash(a.invite_code) !== op.invite_sha256) return "space_join_mismatch";
+        const invite = JSON.parse(Buffer.from(a.invite_code.slice(12), "hex").toString("utf8"));
+        if (["space", "addr", "user", "readonly"].some(k => invite[k] !== op[k])) return "space_join_mismatch";
+      } catch { return "space_join_mismatch"; }
+    }
+  } else if (op.kind === "kick") {
+    if (!isDeepStrictEqual(r.kick.map(k => k.session_id), c.kick_targets) ||
+        !op.all && (r.kick.length !== 1 || r.kick[0].session_id !== op.session_id) ||
+        op.all && r.remaining !== r.kick.filter(k => k.state !== "revoked").length ||
+        r.outcome === "committed" && r.kick.some(k => ["queued", "remote_pending", "unknown"].includes(k.state)) ||
+        [r.invite_code, r.session_id, r.target_profile, r.target_account_id, r.target_session_sha256].some(v => v !== null)) return "space_kick_mismatch";
+    if (q.method === "control.space.result" && c.remote_posts.length || c.previous_kick.some((old, i) =>
+      old.session_id !== r.kick[i]?.session_id || old.state === "revoked" && r.kick[i].state !== "revoked" ||
+      ["remote_pending", "unknown"].includes(old.state) && r.kick[i].state !== "unknown")) return "space_remote_replay";
+  } else {
+    if ([r.target_profile, r.target_account_id, r.target_session_sha256].some(v => v !== null) || r.kick.length) return "space_result_invalid";
+    if (r.outcome === "committed") {
+      try {
+        const code = JSON.parse(Buffer.from(r.invite_code.slice(12), "hex").toString("utf8"));
+        if (!r.invite_code.startsWith("1mem-invite:") || code.session_id !== r.session_id ||
+            code.control_operation_id !== q.operation_id || code.control_fingerprint !== r.fingerprint || code.readonly !== op.readonly) return "space_result_invalid";
+      } catch { return "space_result_invalid"; }
+    } else if (r.invite_code !== null || r.session_id !== null) return "space_result_invalid";
+  }
+  const e = p.private_response;
+  if (!spaceValid(e, "envelope") || !isDeepStrictEqual(e.summary, r) ||
+      e.status !== ({pending: "pending", unknown: "fail", committed: "ok", rejected: "fail"})[r.outcome]) return "space_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const items = e.items.filter(i => i.name === name);
+    if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "space_result_invalid";
+  }
+  if (p.finish_maintenance && !["committed", "rejected"].includes(r.outcome)) return "maintenance_not_terminal";
+  return null;
+}
+if (!boundPaths.has(spaceExtension.schema) || !boundPaths.has(spaceExtension.consumer)) fail("unbound space schema/consumer");
+for (const [group, count] of [["positive", 7], ["negative", 24]]) {
+  const paths = spaceExtension.fixtures[group];
+  if (paths.length !== count) fail("space fixture count drift");
+  for (const name of paths) {
+    if (!boundPaths.has(name)) fail(`unbound space fixture: ${name}`);
+    const f = readJSON(fixturePath(name));
+    if (f.fixture_type !== "private_space_control" || f.expected !== (group === "positive" ? "accept" : "reject")) fail(`space fixture kind: ${name}`);
+    if (group === "positive" && !hostSchemaValid(f, spaceSchema, spaceSchema.$defs)) fail(`invalid space container: ${name}`);
+    const actual = spaceFailure(f.payload), expected = group === "positive" ? null : f.error_code;
+    if (actual !== expected) fail(`${name}: space rejection ${actual}, expected ${expected}`);
+  }
+}
+console.log(`runtime control contract verified: ${boundPaths.size} bound files (original 380 retained; 7 positive / 24 negative space cases)`);

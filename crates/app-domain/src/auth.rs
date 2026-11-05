@@ -141,7 +141,7 @@ pub fn wrap_with_rsrs(super_pass: &str, urk: &[u8; 32]) -> Result<(String, Strin
 }
 
 /// v4 key material: generate a super password (A3- recovery code) and a fresh URK.
-fn new_vault_v4() -> Result<(String, [u8; 32], String, String, String)> {
+pub fn new_vault_v4() -> Result<(String, [u8; 32], String, String, String)> {
     let super_pass = crypto::generate_secret_key();
     let urk = crypto::generate_key();
     let (kdf_salt, wrapped_urk, urk_nonce) = wrap_with_rsrs(&super_pass, &urk)?;
@@ -260,10 +260,10 @@ pub fn unlock_session_keys(
                 .or_else(|| crate::keystore::load_super(user))
                 .or_else(|| data["secret_key"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_owned()))
                 .ok_or_else(|| {
-                    anyhow!(
+                    anyhow::Error::new(SessionCredentialRequired(
                         "super password required: --super <super-password> (A3-\u{2026}, system-generated recovery code). \
                          none in the local keyring \u{2014} on a new machine export from the old device with `rsrs keys-export` and retry"
-                    )
+                    ))
                 })?;
             crate::memory::SessionKeys::unlock_v4(&super_pass, salt, wrapped, nonce)
         }
@@ -275,7 +275,7 @@ pub fn unlock_session_keys(
             let super_pass = super_arg
                 .or_else(|| data["super"].as_str())
                 .or(stored_super.as_deref())
-                .ok_or_else(|| anyhow!("super password required"))?;
+                .ok_or_else(|| anyhow::Error::new(SessionCredentialRequired("super password required")))?;
             let secret_key = data["secret_key"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -290,7 +290,7 @@ pub fn unlock_session_keys(
             let super_pass = super_arg
                 .or_else(|| data["super"].as_str())
                 .or(stored_super.as_deref())
-                .ok_or_else(|| anyhow!("super password required"))?;
+                .ok_or_else(|| anyhow::Error::new(SessionCredentialRequired("super password required")))?;
             crate::memory::SessionKeys::unlock_super(super_pass, salt, wrapped, nonce)
         }
         // v1: original login password + Account Secret, retained during normal login.
@@ -308,6 +308,18 @@ pub fn unlock_session_keys(
         Ok(keys)
     }
 }
+
+/// Missing material is distinguishable from malformed sessions or failed decryption.
+#[derive(Debug)]
+pub struct SessionCredentialRequired(pub &'static str);
+
+impl std::fmt::Display for SessionCredentialRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for SessionCredentialRequired {}
 
 /// Current profile already belongs to a different user: switch to that user's
 /// profile and return its session. An empty profile stays put, so the first
@@ -376,10 +388,28 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
         apply_vault_v4(&mut data, user, &super_pass, kdf_salt, wrapped_urk, urk_nonce)?;
         issued = Some(super_pass);
     }
+    let authorization = registration_authorization(addr, user, pass)?;
+    let token = authorization["token"].as_str().context("registration token is missing")?;
+    if let Err(e) = crate::keystore::save_login_pass(user, pass) {
+        eprintln!("warning: login password not stored in keyring: {e}");
+    }
+    for field in ["auth_salt", "user", "addr", "token", "session_id"] {
+        data[field] = authorization[field].clone();
+    }
+    data.as_object_mut().map(|o| o.remove("pass"));
+    write_session_json(&data)?;
+    put_vault(addr, token, &data)?;
+    Ok(issued)
+}
+
+/// The caller must durably admit the operation before this non-idempotent POST.
+/// This helper changes neither local credentials nor the selected profile.
+pub fn registration_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
     let auth_salt = server_authentication_salt(addr, user)?;
     let pass_hash = crypto::derive_pass_hash(pass, &auth_salt)?;
-
-    let resp = match ureq::post(&format!("{}/register", addr.trim().trim_end_matches('/')))
+    let agent = ureq::AgentBuilder::new().redirects(0)
+        .timeout(std::time::Duration::from_secs(30)).build();
+    let resp = match agent.post(&format!("{}/register", addr.trim().trim_end_matches('/')))
         .send_json(serde_json::json!({
             "user": user,
             "pass_hash": pass_hash,
@@ -399,19 +429,9 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("register failed: {}", reply.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")))?
         .to_owned();
-    if let Err(e) = crate::keystore::save_login_pass(user, pass) {
-        eprintln!("warning: login password not stored in keyring: {e}");
-    }
-
-    data["auth_salt"] = serde_json::Value::String(auth_salt);
-    data["user"] = serde_json::Value::String(user.to_owned());
-    data["addr"] = serde_json::Value::String(addr.trim().trim_end_matches('/').to_owned());
-    data["token"] = serde_json::Value::String(token.clone());
-    data["session_id"] = reply.get("session_id").cloned().unwrap_or(serde_json::Value::Null);
-    data.as_object_mut().map(|o| o.remove("pass"));
-    write_session_json(&data)?;
-    put_vault(addr, &token, &data)?;
-    Ok(issued)
+    Ok(serde_json::json!({"auth_salt":auth_salt,"user":user,
+        "addr":addr.trim().trim_end_matches('/'),"token":token,
+        "session_id":reply.get("session_id")}))
 }
 
 /// Login: send the login password to the server → fetch cloud vault and reconcile with local material → unlock using the cloud as source of truth.
@@ -665,6 +685,13 @@ pub fn password_authorization_with_totp(addr: &str, user: &str, pass: &str, totp
     Ok(authorization)
 }
 
+/// Private control cannot prompt on its framed input channel.
+pub fn password_authorization_noninteractive(addr: &str, user: &str, pass: &str, totp: Option<&str>) -> Result<serde_json::Value> {
+    let mut authorization = serde_json::json!({});
+    authenticate_session_inner(&mut authorization, addr, user, pass, totp, false)?;
+    Ok(authorization)
+}
+
 fn server_authentication_salt(addr: &str, user: &str) -> Result<String> {
     let salt_response = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
         .get(&format!("{}/auth/salt", addr.trim().trim_end_matches('/'))).query("user", user).call();
@@ -682,45 +709,94 @@ fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pa
 }
 
 fn authenticate_session_with_totp(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str, totp:Option<&str>) -> Result<()> {
+    authenticate_session_inner(data, addr, user, pass, totp, true)
+}
+
+fn authenticate_session_inner(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str, totp: Option<&str>, allow_prompt: bool) -> Result<()> {
+    let authorization = match begin_password_authorization(addr, user, pass)? {
+        PasswordAuthorizationStep::Authorized(authorization) => authorization,
+        PasswordAuthorizationStep::TotpRequired(challenge) => {
+            if totp.is_none() && (!allow_prompt || !crate::prompt::interactive()) {
+                anyhow::bail!("TOTP verification requires an interactive terminal or browser authorization");
+            }
+            let code = match totp { Some(code) => code.to_owned(), None => crate::prompt::ask_secret("TOTP code (6 digits): ")? };
+            continue_password_authorization(addr, user, &challenge, &code)?
+        }
+    };
+    for (field, value) in authorization.as_object().context("authorization must be an object")? {
+        data[field] = value.clone();
+    }
+    data["pass"] = serde_json::Value::String(pass.to_owned());
+    Ok(())
+}
+
+/// Sensitive challenge material belongs only in the existing credential checkpoint.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordAuthorizationChallenge {
+    ticket: String,
+    auth_salt: String,
+}
+
+pub enum PasswordAuthorizationStep {
+    Authorized(serde_json::Value),
+    TotpRequired(PasswordAuthorizationChallenge),
+}
+
+/// Perform the password step once; callers must checkpoint before any continuation.
+pub fn begin_password_authorization(addr: &str, user: &str, pass: &str) -> Result<PasswordAuthorizationStep> {
     let auth_salt = server_authentication_salt(addr, user)?;
     let pass_hash = crypto::derive_pass_hash(pass, &auth_salt)?;
 
-    let resp = ureq::post(&format!("{}/login", addr.trim().trim_end_matches('/')))
+    let agent = ureq::AgentBuilder::new().redirects(0)
+        .timeout(std::time::Duration::from_secs(30)).build();
+    let resp = agent.post(&format!("{}/login", addr.trim().trim_end_matches('/')))
         .send_json(serde_json::json!({
             "user": user,
             "pass_hash": pass_hash,
             "device_name": device_name(),
         }))
         .map_err(|e| anyhow::anyhow!("login request failed: {e}"))?;
-    let mut reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
+    let reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
     if reply["totp_required"].as_bool() == Some(true) {
-        if totp.is_none() && !crate::prompt::interactive() {
-            anyhow::bail!("TOTP verification requires an interactive terminal or browser authorization");
-        }
         let ticket = reply["ticket"].as_str().ok_or_else(|| anyhow!("TOTP challenge did not return a ticket"))?;
-        let code = match totp {Some(code)=>code.to_owned(),None=>crate::prompt::ask_secret("TOTP code (6 digits): ")?};
-        let code = code.trim();
-        if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
-            anyhow::bail!("TOTP code must contain 6 digits");
-        }
-        let response = ureq::post(&format!("{}/login/totp", addr.trim().trim_end_matches('/')))
-            .send_json(serde_json::json!({"ticket":ticket,"code":code,"device_name":device_name()}))
-            .map_err(|error| anyhow!("TOTP verification failed: {error}"))?;
-        reply = response.into_json().map_err(|error| anyhow!("failed to parse TOTP response: {error}"))?;
+        anyhow::ensure!(!ticket.is_empty() && ticket.len() <= 16 * 1024, "invalid TOTP challenge ticket");
+        return Ok(PasswordAuthorizationStep::TotpRequired(PasswordAuthorizationChallenge {
+            ticket: ticket.to_owned(), auth_salt,
+        }));
     }
+    Ok(PasswordAuthorizationStep::Authorized(authorization_reply(addr, user, &auth_salt, &reply)?))
+}
+
+pub fn validate_totp_code(code: &str) -> Result<&str> {
+    let code = code.trim();
+    anyhow::ensure!(code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()),
+        "TOTP code must contain 6 digits");
+    Ok(code)
+}
+
+/// Submit only the admitted ticket: never fetch salt or POST /login here.
+pub fn continue_password_authorization(addr: &str, user: &str,
+    challenge: &PasswordAuthorizationChallenge, code: &str) -> Result<serde_json::Value> {
+    let code = validate_totp_code(code)?;
+    anyhow::ensure!(!challenge.ticket.is_empty() && challenge.ticket.len() <= 16 * 1024
+        && !challenge.auth_salt.is_empty(), "invalid TOTP challenge checkpoint");
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build();
+    let response = agent.post(&format!("{}/login/totp", addr.trim().trim_end_matches('/')))
+        .send_json(serde_json::json!({"ticket":challenge.ticket,"code":code,"device_name":device_name()}))
+        .map_err(|error| anyhow!("TOTP verification failed: {error}"))?;
+    let reply = response.into_json().map_err(|error| anyhow!("failed to parse TOTP response: {error}"))?;
+    authorization_reply(addr, user, &challenge.auth_salt, &reply)
+}
+
+fn authorization_reply(addr: &str, user: &str, auth_salt: &str, reply: &serde_json::Value) -> Result<serde_json::Value> {
     let token = reply["token"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("login failed: {}", reply.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")))?
         .to_owned();
 
-    // Fill addr/token/user (keep key material)
-    data["user"] = serde_json::Value::String(user.to_owned());
-    data["addr"] = serde_json::Value::String(addr.trim().trim_end_matches('/').to_owned());
-    data["token"] = serde_json::Value::String(token);
-    data["session_id"] = reply.get("session_id").cloned().unwrap_or(serde_json::Value::Null);
-    data["auth_salt"] = serde_json::Value::String(auth_salt);
-    data["pass"] = serde_json::Value::String(pass.to_owned());
-    Ok(())
+    Ok(serde_json::json!({"user":user,"addr":addr.trim().trim_end_matches('/'),"token":token,
+        "session_id":reply.get("session_id").cloned().unwrap_or(serde_json::Value::Null),"auth_salt":auth_salt}))
 }
 
 /// Five-piece kit attach (manual decrypt path on another machine): unlock verifies → write the full local session (then login fills the token).
@@ -814,6 +890,16 @@ mod tests {
     fn auth_salt_deterministic() -> Result<()> {
         assert_eq!(crypto::derive_auth_salt("Alice")?, crypto::derive_auth_salt("alice")?);
         assert_ne!(crypto::derive_auth_salt("Alice")?, crypto::derive_auth_salt("Bob")?);
+        assert_eq!(validate_totp_code(" 000000 ")?, "000000");
+        for invalid in ["", "00000", "0000000", "00000x"] { assert!(validate_totp_code(invalid).is_err()); }
+        let reply = authorization_reply("https://fixture.invalid/", "fixture-user", "fixture-salt",
+            &serde_json::json!({"token":"synthetic-token","session_id":"synthetic-session"}))?;
+        assert_eq!(reply["addr"], "https://fixture.invalid");
+        assert_eq!(reply["user"], "fixture-user");
+        assert_eq!(reply["session_id"], "synthetic-session");
+        assert!(reply.get("pass").is_none() && reply.get("ticket").is_none());
+        assert!(serde_json::from_value::<PasswordAuthorizationChallenge>(serde_json::json!({
+            "ticket":"synthetic-ticket","auth_salt":"fixture-salt","extra":true})).is_err());
         Ok(())
     }
 

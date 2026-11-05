@@ -133,13 +133,13 @@ pub fn variant_inventory() -> Result<serde_json::Value> {
 }
 
 #[derive(Clone)]
-struct RequiredAsset {
-    name: &'static str,
-    version: &'static str,
+struct RequiredAsset<'a> {
+    name: &'a str,
+    version: &'a str,
     path: PathBuf,
     size: u64,
     sha256: String,
-    suggested_source: &'static str,
+    suggested_source: &'a str,
     incompatible_reason: Option<String>,
 }
 
@@ -345,6 +345,365 @@ fn managed_backend_probe(selection: &ProbeSelection) -> Result<serde_json::Value
     result.map_err(|error| anyhow!("native probe: {error}"))
 }
 
+/// Describe preparation without downloading, probing, changing selection or releasing native code.
+/// The caller binds this snapshot to the existing authenticated operation scope.
+pub fn model_install_plan() -> Result<AssetsStatus> {
+    let epoch = crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let selection = ProbeSelection::capture()?;
+    let identity = selection.identity()?;
+    let plan = installation_plan_for(&selection)?;
+    anyhow::ensure!(
+        crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire) == epoch
+            && ProbeSelection::capture()?.identity()? == identity,
+        "selected model changed while planning installation"
+    );
+    Ok(plan)
+}
+
+fn installation_plan_for(selection: &ProbeSelection) -> Result<AssetsStatus> {
+    use respire_app::memory::{bge, onnx};
+    let mut assets = Vec::new();
+    if let Some(profile) = &selection.profile {
+        profile.validate()?;
+        let backend = profile.backend_profile.backend.as_str();
+        if matches!(backend, "onnx" | "mlx") {
+            for (name, resource) in [
+                ("profile-tokenizer", &profile.profile.tokenizer),
+                ("profile-weights", &profile.profile.weights),
+            ] {
+                let resource = resource
+                    .as_ref()
+                    .context("selected profile resource missing")?;
+                let unsupported = (backend == "mlx" && !cfg!(target_os = "macos"))
+                    || (backend == "onnx"
+                        && profile.engine != onnx::Engine::Cpu
+                        && !cfg!(any(windows, target_os = "macos")));
+                let reason = if unsupported {
+                    Some("selected backend is unsupported on this platform")
+                } else if resource.download.is_none() {
+                    Some("selected profile has no pinned download source; Runtime-specific preparation is required")
+                } else {
+                    None
+                };
+                assets.push(planned_asset(
+                    name,
+                    profile.profile.embedding["revision"]
+                        .as_str()
+                        .context("profile revision missing")?,
+                    std::path::absolute(&resource.path)?,
+                    resource.size,
+                    &resource.sha256,
+                    resource.download.as_deref().unwrap_or(""),
+                    reason,
+                )?);
+            }
+        } else {
+            assets.push(unprepared_asset(
+                "profile-backend",
+                "selected backend has no local file preparation contract",
+            ));
+        }
+        let unsupported_provider = profile
+            .backend_profile
+            .native
+            .as_ref()
+            .is_some_and(|native| {
+                !((profile.engine == onnx::Engine::Cpu
+                    && native.provider == "CPUExecutionProvider")
+                    || (cfg!(windows)
+                        && profile.engine == onnx::Engine::Gpu
+                        && native.provider == "DmlExecutionProvider"))
+            });
+        if profile.engine == onnx::Engine::Npu || unsupported_provider {
+            assets.push(unprepared_asset("native-provider", "native catalog/provider preparation requires the Runtime platform interface; file pins alone cannot attest provider readiness"));
+        }
+    } else {
+        let engine = onnx::Engine::parse(&selection.engine)?;
+        let variant = onnx::parse_variant(&selection.variant)?;
+        let baseline = onnx::parse_variant("quantized")?;
+        // Match the existing installer target, including strict environment validation.
+        // Loading may discover a legacy/system directory; installation must not overwrite it.
+        let directory = std::path::absolute(install_target_dir(None)?)?;
+        let unsupported = engine != onnx::Engine::Cpu && !cfg!(any(windows, target_os = "macos"));
+        let reason = unsupported.then_some("selected engine is unsupported on this platform");
+        for (name, file, size, hash) in [
+            (
+                "bge-m3-tokenizer",
+                "tokenizer.json".to_owned(),
+                17_082_821,
+                TOKENIZER_SHA256,
+            ),
+            (
+                "bge-m3-baseline",
+                onnx::variant_file_name(baseline.name),
+                baseline.size,
+                baseline.sha256,
+            ),
+        ] {
+            assets.push(planned_asset(
+                name,
+                MODEL_REVISION,
+                directory.join(&file),
+                size,
+                hash,
+                &file_url("https://huggingface.co", &file),
+                reason,
+            )?);
+        }
+        if variant.name != baseline.name {
+            let file = onnx::variant_file_name(variant.name);
+            assets.push(planned_asset(
+                "bge-m3-model",
+                MODEL_REVISION,
+                directory.join(&file),
+                variant.size,
+                variant.sha256,
+                &file_url("https://huggingface.co", &file),
+                reason,
+            )?);
+        }
+        if selection.cpu_owned {
+            anyhow::ensure!(
+                respire_app::env::var_os("RSRS_CPU_OWNED_ORT_FILE").is_none(),
+                "unset RSRS_CPU_OWNED_ORT_FILE before preparing pinned weights"
+            );
+            assets.push(planned_asset(
+                "bge-m3-cpu-ort",
+                bge::CPU_ORT_REVISION,
+                std::path::absolute(bge::cpu_ort_cache_path()?)?,
+                bge::CPU_ORT_SIZE,
+                bge::CPU_ORT_SHA256,
+                bge::CPU_ORT_URL,
+                None,
+            )?);
+        }
+        if engine == onnx::Engine::Npu {
+            assets.push(unprepared_asset("native-provider", "NPU catalog/provider preparation requires the Runtime platform interface; do not copy or release the SDK catalog DLL in the client"));
+        }
+    }
+    Ok(AssetsStatus::installation_plan(assets))
+}
+
+/// File discovery changes after installation; bind configured paths, not that side effect.
+fn preparation_selection(mut selection: ProbeSelection) -> Result<ProbeSelection> {
+    if selection.profile.is_none() {
+        selection.directory = std::path::absolute(install_target_dir(None)?)?;
+        if selection.cpu_owned && respire_app::env::var_os("RSRS_CPU_OWNED_ORT_FILE").is_none() {
+            selection.cpu_file = Some(std::path::absolute(respire_app::memory::bge::cpu_ort_cache_path()?)?);
+        }
+    }
+    Ok(selection)
+}
+
+fn preparation_snapshot(
+    intent: &respire_protocol::ModelInstallIntent,
+) -> Result<(respire_protocol::ModelPreparation, ProbeSelection)> {
+    use respire_app::memory::onnx;
+    if let Some(model) = &intent.model { onnx::parse_variant(model)?; }
+    if let Some(mirror) = &intent.mirror { model_origins(Some(mirror))?; }
+    let authoritative = preparation_selection(ProbeSelection::capture()?)?;
+    let target = if let Some(engine) = &intent.for_engine {
+        anyhow::ensure!(matches!(engine.as_str(), "cpu" | "gpu" | "npu"), "invalid install engine");
+        let engine = onnx::Engine::parse(engine)?;
+        onnx::with_selection(engine, intent.model.as_deref().unwrap_or(onnx::default_variant(engine)), || {
+            preparation_selection(ProbeSelection::capture_choice(None)?)
+        })?
+    } else {
+        authoritative.clone()
+    };
+    let mut plan = installation_plan_for(&target)?;
+    if let Some(model) = &intent.model {
+        // --model adds a legacy variant; without --for-engine it does not select it.
+        let variant = onnx::parse_variant(model)?;
+        let legacy = if intent.for_engine.is_some() { target.clone() }
+            else { preparation_selection(ProbeSelection::capture_choice(None)?)? };
+        let mut extra = installation_plan_for(&legacy)?.assets;
+        let file = onnx::variant_file_name(variant.name);
+        let engine = onnx::Engine::parse(&legacy.engine)?;
+        let reason = (engine != onnx::Engine::Cpu && !cfg!(any(windows, target_os = "macos")))
+            .then_some("selected engine is unsupported on this platform");
+        extra.push(planned_asset("bge-m3-model", MODEL_REVISION, legacy.directory.join(&file),
+            variant.size, variant.sha256, &file_url("https://huggingface.co", &file), reason)?);
+        for asset in extra {
+            if let Some(existing) = plan.assets.iter().find(|existing| existing.path == asset.path) {
+                anyhow::ensure!(existing.sha256 == asset.sha256 && existing.expected_size == asset.expected_size,
+                    "install intent has conflicting pins for one destination");
+            } else { plan.assets.push(asset); }
+        }
+        plan.missing = plan.assets.clone();
+    }
+    let selection_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(
+        &(respire_protocol::HOST_MODEL_SCHEMA_V, intent, &authoritative, &target, &plan))?));
+    Ok((respire_protocol::ModelPreparation { selection_sha256, assets: plan }, target))
+}
+
+/// The dispatcher supplies an authenticated Paused grant; this never changes selection.
+pub fn model_preparation_plan(intent: &respire_protocol::ModelInstallIntent) -> Result<respire_protocol::ModelPreparation> {
+    let epoch = crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let (plan, _) = preparation_snapshot(intent)?;
+    anyhow::ensure!(crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire) == epoch
+        && preparation_snapshot(intent)?.0 == plan, "model preparation scope changed while planning");
+    Ok(plan)
+}
+
+/// Caller installs the control-parent watch and budgets the existing 150s native probe.
+pub fn model_preparation_verify(
+    intent: &respire_protocol::ModelInstallIntent,
+    selection_sha256: &str,
+) -> Result<respire_protocol::ModelPreparation> {
+    anyhow::ensure!(selection_sha256.len() == 64
+        && selection_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "invalid model preparation selection digest");
+    let epoch = crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let (preparation, target) = preparation_snapshot(intent)?;
+    anyhow::ensure!(preparation.selection_sha256 == selection_sha256, "model preparation selection changed");
+    let unchanged = || -> Result<()> {
+        anyhow::ensure!(!probe_cancelled()
+            && crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire) == epoch
+            && preparation_snapshot(intent)?.0 == preparation, "model preparation selection changed");
+        Ok(())
+    };
+    let mut reports = Vec::new();
+    for asset in &preparation.assets.assets {
+        if asset.state == AssetState::Incompatible { reports.push(asset.clone()); continue; }
+        reports.push(required_asset_status(&RequiredAsset {
+            name: &asset.name, version: asset.version.as_deref().context("plan revision missing")?,
+            path: PathBuf::from(asset.path.as_deref().context("plan destination missing")?),
+            size: asset.expected_size.context("plan size missing")?,
+            sha256: asset.sha256.clone().context("plan SHA-256 missing")?,
+            suggested_source: &asset.suggested_source, incompatible_reason: None,
+        })?);
+    }
+    let missing: Vec<_> = reports.iter().filter(|asset| asset.state != AssetState::Complete).cloned().collect();
+    unchanged()?;
+    enable_backend_probe_host();
+    respire_app::memory::bge::invalidate_cpu_ort_validation()?;
+    let assets = with_backend_load(AssetsStatus { complete: missing.is_empty(), missing,
+        assets: reports, backend_load: None }, || {
+        unchanged()?;
+        let evidence = managed_backend_probe(&target)?;
+        unchanged()?;
+        Ok(evidence)
+    });
+    // Selection races are scope errors, not a readiness result for a different target.
+    unchanged()?;
+    Ok(respire_protocol::ModelPreparation { selection_sha256: selection_sha256.to_owned(), assets })
+}
+
+fn planned_asset(
+    name: &str,
+    version: &str,
+    path: PathBuf,
+    size: u64,
+    hash: &str,
+    source: &str,
+    incompatible: Option<&str>,
+) -> Result<AssetRequirement> {
+    anyhow::ensure!(
+        path.is_absolute() && path.to_str().is_some(),
+        "model asset path must be absolute Unicode"
+    );
+    anyhow::ensure!(
+        size > 0 && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+        "model asset requires a fixed SHA-256 and size"
+    );
+    // Unsupported profile sources must not be advertised as executable Missing files.
+    let incompatible = incompatible.or_else(|| {
+        (!planned_source_supported(name, version, &path, source)).then_some(
+            "source is unsupported by client preparation: require an official immutable Hugging Face URL or pinned CPU release; use the Runtime-specific preparation interface",
+        )
+    });
+    Ok(AssetRequirement {
+        name: name.to_owned(),
+        version: Some(version.to_owned()),
+        path: Some(
+            path.to_str()
+                .context("model path is not Unicode")?
+                .to_owned(),
+        ),
+        expected_size: Some(size),
+        sha256: Some(hash.to_owned()),
+        suggested_source: source.to_owned(),
+        state: if incompatible.is_some() {
+            AssetState::Incompatible
+        } else {
+            AssetState::Missing
+        },
+        actual_size: None,
+        actual_sha256: None,
+        reason: incompatible.map(str::to_owned),
+    })
+}
+
+fn planned_source_supported(name: &str, version: &str, target: &Path, source: &str) -> bool {
+    // Match the client's restricted source contract, not a general URL allowlist.
+    let Some(filename) = target.file_name().and_then(|file| file.to_str()) else {
+        return false;
+    };
+    if filename.starts_with('.')
+        || !filename
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    {
+        return false;
+    }
+    let cpu = name == "bge-m3-cpu-ort";
+    let prefix = if cpu {
+        "https://github.com/risense-ai/respire-cli/releases/download/"
+    } else {
+        "https://huggingface.co/"
+    };
+    let Some(relative) = source.strip_prefix(prefix) else {
+        return false;
+    };
+    let path: Vec<_> = relative.split('/').collect();
+    if !path.iter().all(|part| {
+        !part.is_empty()
+            && *part != "."
+            && *part != ".."
+            && part
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    }) {
+        return false;
+    }
+    if cpu {
+        !version.is_empty() && path.len() == 2 && path[1] == filename
+    } else {
+        path.len() >= 5
+            && path[2] == "resolve"
+            && path[3] == version
+            && path.last().copied() == Some(filename)
+            && version.len() == 40
+            && version.bytes().all(|c| c.is_ascii_hexdigit())
+    }
+}
+
+fn unprepared_asset(name: &str, reason: &str) -> AssetRequirement {
+    AssetRequirement {
+        name: name.to_owned(),
+        version: None,
+        path: None,
+        expected_size: None,
+        sha256: None,
+        suggested_source: String::new(),
+        state: AssetState::Incompatible,
+        actual_size: None,
+        actual_sha256: None,
+        reason: Some(reason.to_owned()),
+    }
+}
+
+/// Verify prepared files and fresh native loading for the current authoritative selection.
+/// The authenticated paused dispatcher must install `watch_control_parent` after reading
+/// both frames, and allow the 150s native probe plus file validation and child cleanup.
+pub fn model_install_verify() -> Result<AssetsStatus> {
+    // Private control dispatch bypasses normal startup's probe-host initialization.
+    enable_backend_probe_host();
+    respire_app::memory::bge::invalidate_cpu_ort_validation()?;
+    assets_status()
+}
+
 pub fn assets_status() -> Result<AssetsStatus> {
     let epoch = crate::rpc_worker::GENERATION.load(std::sync::atomic::Ordering::Acquire);
     let selection = ProbeSelection::capture()?;
@@ -500,7 +859,7 @@ fn file_assets_status_for(selection: &ProbeSelection) -> Result<AssetsStatus> {
     required_assets_status(&assets)
 }
 
-fn required_assets_status(assets: &[RequiredAsset]) -> Result<AssetsStatus> {
+fn required_assets_status(assets: &[RequiredAsset<'_>]) -> Result<AssetsStatus> {
     let mut reports = Vec::with_capacity(assets.len());
     for asset in assets {
         reports.push(required_asset_status(asset)?);
@@ -518,7 +877,7 @@ fn required_assets_status(assets: &[RequiredAsset]) -> Result<AssetsStatus> {
     })
 }
 
-fn required_asset_status(asset: &RequiredAsset) -> Result<AssetRequirement> {
+fn required_asset_status(asset: &RequiredAsset<'_>) -> Result<AssetRequirement> {
     let mut requirement = AssetRequirement {
         name: asset.name.to_owned(),
         version: Some(asset.version.to_owned()),

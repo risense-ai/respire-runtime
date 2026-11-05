@@ -42,6 +42,14 @@ pub fn enable(
     root: &std::path::Path, lock: &crate::lock::LibraryLock,
     account: &str, keys: &crate::SessionKeys, deployment: Deployment,
 ) -> Result<EnableReceipt> {
+    enable_inner(root, lock, account, keys, deployment, None)
+}
+
+fn enable_inner(
+    root: &std::path::Path, lock: &crate::lock::LibraryLock,
+    account: &str, keys: &crate::SessionKeys, deployment: Deployment,
+    original: Option<&respire_protocol::metadata_control::HostMetadataOperation>,
+) -> Result<EnableReceipt> {
     ensure!(lock.protects(root)?, "metadata gate requires the library ownership lock");
     require_support()?;
     if let Deployment::ControlledWriters { all_writers_upgraded, old_clients_disconnected, offline_writes_reconciled } = &deployment {
@@ -54,14 +62,83 @@ pub fn enable(
     let backup = crate::snapshot::create(root, account, "before enabling memory metadata v1", keys)?;
     let backup = crate::snapshot::verify_backup(root, &backup.id, keys)?;
     let mode = match deployment { Deployment::Isolated => "isolated", Deployment::ControlledWriters { .. } => "controlled_writers" };
+    let receipt = EnableReceipt { enabled: true, deployment, backup };
     store.write_transaction(|| {
         ensure!(store.memory_revision()? == revision, "library changed while creating metadata backup; gate remains unchanged");
         store.meta_set(MODE_KEY, mode)?;
-        store.meta_set("memory_metadata_v1_deployment", &serde_json::to_string(&deployment)?)?;
-        store.meta_set("memory_metadata_v1_backup", &serde_json::to_string(&backup)?)?;
-        store.meta_set("memory_metadata_v1_enabled", "1")
+        store.meta_set("memory_metadata_v1_deployment", &serde_json::to_string(&receipt.deployment)?)?;
+        store.meta_set("memory_metadata_v1_backup", &serde_json::to_string(&receipt.backup)?)?;
+        store.meta_set("memory_metadata_v1_enabled", "1")?;
+        if let Some(original) = original {
+            save_control_result(&store, original, serde_json::json!({"receipt":receipt,
+                "deployment_review":match &original.intent {
+                    respire_protocol::metadata_control::HostMetadataIntent::Enable { deployment_review, .. } => deployment_review.as_ref(),
+                    _ => None,
+                }, "deployment_assurance":"operator_attestation_only","old_client_access_enforced":false}))?;
+        }
+        Ok(())
     })?;
-    Ok(EnableReceipt { enabled: true, deployment, backup })
+    Ok(receipt)
+}
+
+fn save_control_result(store: &LocalStore,
+    original: &respire_protocol::metadata_control::HostMetadataOperation,
+    details: serde_json::Value) -> Result<()> {
+    use respire_protocol::metadata_control::{HostMetadataOutcome, HostMetadataResult};
+    let receipt = HostMetadataResult { original: original.clone(), outcome: HostMetadataOutcome::Committed, details };
+    store.meta_set(&format!("memory_metadata_v1_control_{}", original.operation_id), &serde_json::to_string(&receipt)?)
+}
+
+/// The gate and its original-operation receipt commit in the same SQLite transaction.
+pub fn enable_control(root: &std::path::Path, lock: &crate::lock::LibraryLock,
+    account: &str, keys: &crate::SessionKeys, deployment: Deployment,
+    original: &respire_protocol::metadata_control::HostMetadataOperation) -> Result<()> {
+    enable_inner(root, lock, account, keys, deployment, Some(original))?;
+    Ok(())
+}
+
+pub fn disable(root: &std::path::Path, lock: &crate::lock::LibraryLock) -> Result<serde_json::Value> {
+    disable_inner(root, lock, None)
+}
+
+pub fn disable_control(root: &std::path::Path, lock: &crate::lock::LibraryLock,
+    original: &respire_protocol::metadata_control::HostMetadataOperation) -> Result<()> {
+    disable_inner(root, lock, Some(original))?;
+    Ok(())
+}
+
+fn disable_inner(root: &std::path::Path, lock: &crate::lock::LibraryLock,
+    original: Option<&respire_protocol::metadata_control::HostMetadataOperation>) -> Result<serde_json::Value> {
+    ensure!(lock.protects(root)?, "metadata gate requires the library ownership lock");
+    let store = LocalStore::open_existing(&crate::service::database_path(root)?)?;
+    store.write_transaction(|| {
+        let mode = mode(&store)?;
+        let retained = store.has_memory_metadata()?;
+        store.meta_set("memory_metadata_v1_enabled", "0")?;
+        let details = serde_json::json!({"enabled":false,"mode":mode,
+            "metadata_retained":retained,"sync_isolation_retained":true});
+        if let Some(original) = original { save_control_result(&store, original, details.clone())?; }
+        Ok(details)
+    })
+}
+
+/// A gate value or backup alone is never evidence that this operation committed.
+pub fn control_result(root: &std::path::Path, lock: &crate::lock::LibraryLock,
+    original: &respire_protocol::metadata_control::HostMetadataOperation)
+    -> Result<respire_protocol::metadata_control::HostMetadataResult> {
+    use respire_protocol::metadata_control::{HostMetadataOutcome, HostMetadataResult};
+    ensure!(lock.protects(root)?, "metadata result requires the library ownership lock");
+    let path = crate::service::database_path(root)?;
+    if path.try_exists()? {
+        let store = LocalStore::open_read_only(&path)?;
+        if let Some(bytes) = store.meta_get(&format!("memory_metadata_v1_control_{}", original.operation_id))? {
+            let receipt: HostMetadataResult = serde_json::from_str(&bytes)?;
+            ensure!(receipt.original == *original && receipt.outcome == HostMetadataOutcome::Committed,
+                "metadata receipt differs from the original intent");
+            return Ok(receipt);
+        }
+    }
+    Ok(HostMetadataResult { original: original.clone(), outcome: HostMetadataOutcome::Unknown, details: serde_json::Value::Null })
 }
 
 pub fn ensure_write(store: &LocalStore, entry: &MemoryEntry) -> Result<()> {

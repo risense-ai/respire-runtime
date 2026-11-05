@@ -1449,6 +1449,7 @@ dependencies = [
  "respire_app",
  "respire_protocol",
  "respire_spawn",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -1501,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.5"
+version = "2.0.0-dev.6"
 dependencies = [
  "anyhow",
  "serde",
@@ -1510,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "1.0.21-dev.6"
+version = "1.0.21-dev.7"
 dependencies = [
  "anyhow",
  "respire_app",
@@ -1521,6 +1522,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "ureq",
  "uuid",
 ]
 

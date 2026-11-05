@@ -1,0 +1,105 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.config_validate",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/target\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"session_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"source_profile\":\"/isolated/root/source\",\"target_profile\":\"/isolated/root/target\",\"original_config\":\"{\\n  \\\"data_dir\\\": \\\"/isolated/root/source\\\",\\n  \\\"addr\\\": \\\"https://old.invalid\\\",\\n  \\\"autosync\\\": false,\\n  \\\"cure_auto\\\": false,\\n  \\\"rpc_parallelism\\\": 2,\\n  \\\"unrelated\\\": {\\n    \\\"preserve\\\": \\\"fixture-only\\\"\\n  }\\n}\",\"original_revision\":\"4e808185edef8081b9ad3c4e8ebbcb9fc736eec96138f1e53d1d85154de10958\",\"intent\":{\"data_dir\":\"/isolated/root/target\",\"addr\":\"https://new.invalid\",\"autosync\":true,\"cure_auto\":true,\"rpc_parallelism\":4},\"candidate_revision\":\"0fa4d64dd6265ae4dff2197417da3f40f7d58c75c5530bd30520afb6f4f7b0f9\"}"
+      ]
+    },
+    "finish_maintenance": false,
+    "result": {
+      "original_revision": "4e808185edef8081b9ad3c4e8ebbcb9fc736eec96138f1e53d1d85154de10958",
+      "candidate_revision": "a10289b962b4512ace956d31a7ec7b096f44ba7d091bdd808c3021fd3db4305c",
+      "intent": {
+        "data_dir": "/isolated/root/target",
+        "addr": "https://new.invalid",
+        "autosync": true,
+        "cure_auto": true,
+        "rpc_parallelism": 4
+      },
+      "source_profile": "/isolated/root/source",
+      "target_profile": "/isolated/root/target",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "session_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "target_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "off_mode": false
+    },
+    "private_response": {
+      "command": "config-validate",
+      "status": "ok",
+      "summary": {
+        "original_revision": "4e808185edef8081b9ad3c4e8ebbcb9fc736eec96138f1e53d1d85154de10958",
+        "candidate_revision": "a10289b962b4512ace956d31a7ec7b096f44ba7d091bdd808c3021fd3db4305c",
+        "intent": {
+          "data_dir": "/isolated/root/target",
+          "addr": "https://new.invalid",
+          "autosync": true,
+          "cure_auto": true,
+          "rpc_parallelism": 4
+        },
+        "source_profile": "/isolated/root/source",
+        "target_profile": "/isolated/root/target",
+        "source_identity": {
+          "kind": "bound",
+          "account_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "session_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "target_identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "off_mode": false
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "config_context": {
+      "original_config": "{\n  \"data_dir\": \"/isolated/root/source\",\n  \"addr\": \"https://old.invalid\",\n  \"autosync\": false,\n  \"cure_auto\": false,\n  \"rpc_parallelism\": 2,\n  \"unrelated\": {\n    \"preserve\": \"fixture-only\"\n  }\n}",
+      "original_revision": "4e808185edef8081b9ad3c4e8ebbcb9fc736eec96138f1e53d1d85154de10958",
+      "candidate_revision": "0fa4d64dd6265ae4dff2197417da3f40f7d58c75c5530bd30520afb6f4f7b0f9",
+      "source_profile": "/isolated/root/source",
+      "target_profile": "/isolated/root/target",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "session_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "candidate_config": "{\n  \"data_dir\": \"/isolated/root/target\",\n  \"addr\": \"https://new.invalid\",\n  \"autosync\": true,\n  \"cure_auto\": true,\n  \"rpc_parallelism\": 4,\n  \"unrelated\": {\n    \"preserve\": \"changed\"\n  }\n}",
+      "target_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "reviewed_candidate_config": "{\n  \"data_dir\": \"/isolated/root/target\",\n  \"addr\": \"https://new.invalid\",\n  \"autosync\": true,\n  \"cure_auto\": true,\n  \"rpc_parallelism\": 4,\n  \"unrelated\": {\n    \"preserve\": \"changed\"\n  }\n}"
+    }
+  },
+  "error_code": "config_intent_mismatch"
+}

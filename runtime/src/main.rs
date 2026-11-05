@@ -18,6 +18,19 @@
 
 mod startup_identity;
 mod host_control;
+mod maintenance_control;
+mod snapshot_authority;
+mod secret_control;
+mod identity_control;
+mod identity_write_control;
+mod space_control;
+mod profile_maintenance;
+mod config_control;
+mod key_control;
+mod migration_control;
+mod metadata_control;
+mod model_maintenance;
+mod auth_control;
 
 use std::io::Write;
 use std::process::ExitCode;

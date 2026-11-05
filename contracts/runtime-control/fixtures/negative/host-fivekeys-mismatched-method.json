@@ -1,0 +1,136 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "method": "control.key.super_reset",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"fivekeys\",\"addr\":\"\",\"user\":\"fivekeys-fixture\",\"kdf_salt\":\"SYNTHETIC-SALT\",\"wrapped_urk\":\"SYNTHETIC-ENCRYPTED-KIT\",\"urk_nonce\":\"SYNTHETIC-NONCE\",\"use_super\":true},\"input\":{\"password\":\"SYNTHETIC-PASSWORD\",\"super_password\":\"SYNTHETIC-FACTOR\",\"account_secret\":null,\"totp\":null}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "write_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "fivekeys",
+        "addr": "",
+        "user": "fivekeys-fixture",
+        "kdf_salt": "SYNTHETIC-SALT",
+        "wrapped_urk": "SYNTHETIC-ENCRYPTED-KIT",
+        "urk_nonce": "SYNTHETIC-NONCE",
+        "use_super": true
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "fingerprint": "53af0adec88f8dac2c1df8132bb9b7e28edbce85932850f2ebec5d3e0f2ff3f6"
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "53af0adec88f8dac2c1df8132bb9b7e28edbce85932850f2ebec5d3e0f2ff3f6",
+      "operation": {
+        "kind": "fivekeys",
+        "addr": "",
+        "user": "fivekeys-fixture",
+        "kdf_salt": "SYNTHETIC-SALT",
+        "wrapped_urk": "SYNTHETIC-ENCRYPTED-KIT",
+        "urk_nonce": "SYNTHETIC-NONCE",
+        "use_super": true
+      },
+      "outcome": "pending",
+      "source_profile": "/isolated/root/profile",
+      "target_profile": "/isolated/root/accounts/fivekeys-fixture",
+      "account_id": "c47902827984d911a01fbc6bc1a6660dd2bffcaf3344a702855aeae248481466",
+      "session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "identity": {
+        "kind": "bound",
+        "account_id": "c47902827984d911a01fbc6bc1a6660dd2bffcaf3344a702855aeae248481466",
+        "session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "required_inputs": [],
+      "verification_required": true,
+      "super_password": null
+    },
+    "private_response": {
+      "command": "key-control",
+      "status": "pending",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "53af0adec88f8dac2c1df8132bb9b7e28edbce85932850f2ebec5d3e0f2ff3f6",
+        "operation": {
+          "kind": "fivekeys",
+          "addr": "",
+          "user": "fivekeys-fixture",
+          "kdf_salt": "SYNTHETIC-SALT",
+          "wrapped_urk": "SYNTHETIC-ENCRYPTED-KIT",
+          "urk_nonce": "SYNTHETIC-NONCE",
+          "use_super": true
+        },
+        "outcome": "pending",
+        "source_profile": "/isolated/root/profile",
+        "target_profile": "/isolated/root/accounts/fivekeys-fixture",
+        "account_id": "c47902827984d911a01fbc6bc1a6660dd2bffcaf3344a702855aeae248481466",
+        "session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "identity": {
+          "kind": "bound",
+          "account_id": "c47902827984d911a01fbc6bc1a6660dd2bffcaf3344a702855aeae248481466",
+          "session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "required_inputs": [],
+        "verification_required": true,
+        "super_password": null
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "key_context": {
+      "launch_profile": "/isolated/root/profile",
+      "launch_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "selected_profile": "/isolated/root/accounts/fivekeys-fixture",
+      "selected_identity": {
+        "kind": "bound",
+        "account_id": "c47902827984d911a01fbc6bc1a6660dd2bffcaf3344a702855aeae248481466",
+        "session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "target_profile": "/isolated/root/accounts/fivekeys-fixture",
+      "target_identity": {
+        "kind": "bound",
+        "account_id": "c47902827984d911a01fbc6bc1a6660dd2bffcaf3344a702855aeae248481466",
+        "session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "verified": false,
+      "input_state": "initial"
+    },
+    "original_operation_id": "42345678-1234-4234-b234-123456789abc"
+  },
+  "error_code": "host_params_invalid"
+}

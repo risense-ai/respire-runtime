@@ -1,0 +1,3470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://respire.rs/contracts/runtime-control/private-host-control.schema.json",
+  "title": "Inherited auth continuation, model preparation, snapshot maintenance and private secret fixtures; fixed identity writes, super-reset and model maintenance; frozen fivekeys/completion and local profile migration",
+  "description": "Frozen model_control.rs DTOs use HostModelParams and ModelPreparation. x-methods selects decoded args/result validation. Selection SHA-256 is opaque: fixtures bind request to response, never claim authoritative recomputation or native execution.",
+  "type": "object",
+  "required": [
+    "fixture_type",
+    "expected",
+    "payload"
+  ],
+  "properties": {
+    "fixture_type": {
+      "const": "private_host_control"
+    },
+    "expected": {
+      "enum": [
+        "accept",
+        "reject"
+      ]
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "payload": {
+      "$ref": "#/$defs/case"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "required": [
+        "installation_root",
+        "profile",
+        "launch_id"
+      ],
+      "properties": {
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "launch_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "expected_account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "absent"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "operation_id",
+            "session_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unbound"
+            },
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "session_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "account_id",
+            "session_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "bound"
+            },
+            "account_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "session_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "controlParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        }
+      },
+      "additionalProperties": false
+    },
+    "keygenParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "force"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "force": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "registerParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "addr",
+        "user",
+        "password"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "addr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1
+        },
+        "password": {
+          "type": "string"
+        },
+        "super_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "authorization": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "password"
+          ],
+          "properties": {
+            "kind": {
+              "const": "password"
+            },
+            "password": {
+              "type": "string"
+            },
+            "totp": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "token"
+          ],
+          "properties": {
+            "kind": {
+              "const": "browser"
+            },
+            "token": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "loginParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "addr",
+        "user",
+        "authorization"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "addr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authorization": {
+          "$ref": "#/$defs/authorization"
+        },
+        "super_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/loginContinuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "accountParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "additionalProperties": false
+    },
+    "keygenResult": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "outcome",
+        "path"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "outcome": {
+          "enum": [
+            "committed",
+            "rolled_back",
+            "unknown"
+          ]
+        },
+        "session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "super_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "accountResult": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "outcome",
+        "source_profile"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "outcome": {
+          "enum": [
+            "awaiting_input",
+            "awaiting_verification",
+            "committed",
+            "rolled_back",
+            "unknown"
+          ]
+        },
+        "source_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "super_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "login": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/loginStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "snapshotParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "operation_id",
+        "request_fingerprint",
+        "sync_generation",
+        "snapshot_id",
+        "action"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "request_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sync_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "action": {
+          "enum": [
+            "restore",
+            "rollback",
+            "recover",
+            "query",
+            "commit",
+            "release"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "snapshotResult": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "request_fingerprint",
+        "snapshot_id",
+        "state",
+        "cleanup_pending"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "request_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "state": {
+          "enum": [
+            "unknown",
+            "prepared",
+            "installed",
+            "verified",
+            "released",
+            "rolled_back"
+          ]
+        },
+        "before_restore": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sync_quarantined": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
+        "cleanup_warning": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "asset": {
+      "type": "object",
+      "required": [
+        "name",
+        "suggested_source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suggested_source": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "missing",
+            "incomplete",
+            "corrupt",
+            "incompatible",
+            "complete"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "actual_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "version": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "expected_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actual_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelPlan": {
+      "type": "object",
+      "required": [
+        "selection_sha256",
+        "assets"
+      ],
+      "properties": {
+        "selection_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "assets": {
+          "$ref": "#/$defs/modelPlanAssets"
+        }
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "v",
+        "id",
+        "method",
+        "args"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "method": {
+          "enum": [
+            "control.auth.keygen",
+            "control.auth.result",
+            "control.auth.register",
+            "control.auth.login",
+            "control.auth.account_result",
+            "control.auth.account_complete",
+            "control.auth.account_rollback",
+            "control.model_install_plan",
+            "control.snapshot_maintenance",
+            "control.model_install_verify",
+            "control.secret.read",
+            "control.keys_export.read",
+            "control.identity.session_list",
+            "control.config_validate",
+            "control.identity.logout",
+            "control.identity.session_revoke",
+            "control.identity.write_result",
+            "control.key.super_reset",
+            "control.key.result",
+            "control.key.rollback",
+            "control.model_maintenance",
+            "control.key.fivekeys",
+            "control.key.complete",
+            "control.migration.profile",
+            "control.migration.result"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scope": {
+          "type": "null"
+        },
+        "parent_operation_id": {
+          "type": "null"
+        },
+        "queue_wait_ms": {
+          "type": "null"
+        },
+        "lifecycle": {
+          "type": "null"
+        }
+      },
+      "additionalProperties": false
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/snapshotResult"
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "channel",
+        "maintenance_phase",
+        "request",
+        "finish_maintenance"
+      ],
+      "properties": {
+        "channel": {
+          "enum": [
+            "inherited_pipe",
+            "public_http"
+          ]
+        },
+        "maintenance_phase": {
+          "enum": [
+            "Paused",
+            "Verified",
+            "Starting",
+            "Idle"
+          ]
+        },
+        "request": {
+          "$ref": "#/$defs/request"
+        },
+        "result": {
+          "type": "object"
+        },
+        "finish_maintenance": {
+          "type": "boolean"
+        },
+        "original_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "original_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "history": {
+          "$ref": "#/$defs/history"
+        },
+        "public_response": {
+          "type": "object"
+        },
+        "private_response": {
+          "type": "object"
+        },
+        "config_context": {
+          "$ref": "#/$defs/configContext"
+        },
+        "write_context": {
+          "$ref": "#/$defs/writeContext"
+        },
+        "key_context": {
+          "$ref": "#/$defs/keyContext"
+        },
+        "migration_context": {
+          "$ref": "#/$defs/migrationContext"
+        },
+        "progress": {},
+        "ledger": {}
+      },
+      "additionalProperties": false
+    },
+    "backendLoadRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "api_version",
+        "version",
+        "build_info_sha256"
+      ],
+      "properties": {
+        "kind": {
+          "const": "onnxruntime"
+        },
+        "api_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+          "not": {
+            "pattern": "^0[xX][0-9a-fA-F]+$"
+          }
+        },
+        "build_info_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backendLoadSdkPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "sdk_version",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+          "not": {
+            "pattern": "^0[xX][0-9a-fA-F]+$"
+          }
+        },
+        "sdk_version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+          "not": {
+            "pattern": "^0[xX][0-9a-fA-F]+$"
+          }
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backendLoadModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+          "not": {
+            "pattern": "^0[xX][0-9a-fA-F]+$"
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backendLoadEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "status",
+        "ready",
+        "backend",
+        "engine",
+        "selected",
+        "provider",
+        "fresh_session",
+        "inference_completed",
+        "model",
+        "index_identity",
+        "dimensions",
+        "node_assignment",
+        "cpu_node_fallback",
+        "runtime",
+        "sdk_pin",
+        "modules",
+        "module_identity_source"
+      ],
+      "properties": {
+        "contract": {
+          "const": 1
+        },
+        "status": {
+          "const": "loaded"
+        },
+        "ready": {
+          "const": true
+        },
+        "backend": {
+          "const": "onnx"
+        },
+        "engine": {
+          "enum": [
+            "cpu",
+            "gpu",
+            "npu"
+          ]
+        },
+        "selected": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(CPU|Host|Gpu: DmlExecutionProvider|Npu: [A-Za-z][A-Za-z0-9_]*)$"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$"
+        },
+        "fresh_session": {
+          "const": true
+        },
+        "inference_completed": {
+          "const": true
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+          "not": {
+            "pattern": "^0[xX][0-9a-fA-F]+$"
+          }
+        },
+        "index_identity": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(m3|[a-f0-9]{64})$"
+        },
+        "dimensions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "node_assignment": {
+          "const": "not_measured"
+        },
+        "cpu_node_fallback": {
+          "enum": [
+            "allowed",
+            "disabled",
+            "host_managed",
+            "not_applicable"
+          ]
+        },
+        "runtime": {
+          "$ref": "#/$defs/backendLoadRuntime"
+        },
+        "sdk_pin": {
+          "$ref": "#/$defs/backendLoadSdkPin"
+        },
+        "modules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/backendLoadModule"
+          }
+        },
+        "module_identity_source": {
+          "const": "host_verified"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": "CPU"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "cpu"
+              },
+              "provider": {
+                "const": "CPUExecutionProvider"
+              },
+              "cpu_node_fallback": {
+                "const": "not_applicable"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": "Gpu: DmlExecutionProvider"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "gpu"
+              },
+              "provider": {
+                "const": "DmlExecutionProvider"
+              },
+              "cpu_node_fallback": {
+                "const": "allowed"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "pattern": "^Npu: "
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "npu"
+              },
+              "cpu_node_fallback": {
+                "const": "disabled"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": "Host"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "cpu_node_fallback": {
+                "const": "host_managed"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "backendLoadStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_run",
+            "loaded",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "evidence": {
+          "$ref": "#/$defs/backendLoadEvidence"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "loaded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "evidence"
+            ],
+            "not": {
+              "required": [
+                "reason"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "evidence"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "assetsStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "missing"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/asset"
+          }
+        },
+        "assets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/asset"
+          }
+        },
+        "backend_load": {
+          "$ref": "#/$defs/backendLoadStatus"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "backend_load"
+            ],
+            "properties": {
+              "missing": {
+                "maxItems": 0
+              },
+              "backend_load": {
+                "required": [
+                  "state",
+                  "evidence"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "loaded"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "modelVerify": {
+      "type": "object",
+      "required": [
+        "selection_sha256",
+        "assets"
+      ],
+      "properties": {
+        "selection_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "assets": {
+          "$ref": "#/$defs/assetsStatus"
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "enum": [
+            "model-install-plan",
+            "model-install-verify"
+          ]
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "warn",
+            "fail",
+            "skip",
+            "pending"
+          ]
+        },
+        "summary": {
+          "type": "object",
+          "required": [
+            "complete"
+          ],
+          "properties": {
+            "complete": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "details": {
+          "$ref": "#/$defs/modelVerify"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelIntent": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "for_engine": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "cpu",
+                "gpu",
+                "npu"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mirror": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "intent"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "intent": {
+          "$ref": "#/$defs/modelIntent"
+        },
+        "selection_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelPlanAssets": {
+      "type": "object",
+      "required": [
+        "complete",
+        "missing",
+        "assets"
+      ],
+      "properties": {
+        "complete": {
+          "const": false
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/asset"
+          }
+        },
+        "assets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/asset"
+          }
+        },
+        "backend_load": {
+          "type": "null"
+        }
+      },
+      "additionalProperties": false
+    },
+    "loginContinuation": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "legacy_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secret_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_super": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "migrate_local": {
+          "type": "boolean"
+        },
+        "migrate_vault": {
+          "type": "boolean"
+        },
+        "offer_local_merge": {
+          "type": "boolean"
+        },
+        "merge_local": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "loginStatus": {
+      "type": "object",
+      "required": [
+        "required_inputs",
+        "user",
+        "addr"
+      ],
+      "properties": {
+        "required_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "user": {
+          "type": "string"
+        },
+        "addr": {
+          "type": "string"
+        },
+        "dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "super_issued": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "import": {},
+        "sync": {}
+      },
+      "additionalProperties": false
+    },
+    "secretParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "reveal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "reveal": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "keysExportParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "additionalProperties": false
+    },
+    "secretSession": {
+      "type": "object",
+      "required": [
+        "has_session",
+        "user",
+        "addr",
+        "has_token",
+        "secret_masked",
+        "has_local_keys"
+      ],
+      "properties": {
+        "has_session": {
+          "type": "boolean"
+        },
+        "has_token": {
+          "type": "boolean"
+        },
+        "has_local_keys": {
+          "type": "boolean"
+        },
+        "user": {
+          "type": "string"
+        },
+        "addr": {
+          "type": "string"
+        },
+        "secret_masked": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "secretResult": {
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/secretSession"
+        },
+        "secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "five": {}
+      },
+      "additionalProperties": false
+    },
+    "keysExportResult": {
+      "type": "object",
+      "required": [
+        "version",
+        "user",
+        "body",
+        "legacy_warning"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer"
+        },
+        "user": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "legacy_warning": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "configIntent": {
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "addr": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "autosync": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cure_auto": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rpc_parallelism": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "identityParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity"
+      ],
+      "additionalProperties": false
+    },
+    "identityResult": {
+      "type": "object",
+      "properties": {
+        "details": {}
+      },
+      "required": [
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "configParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_profile": {
+          "type": "string"
+        },
+        "target_profile": {
+          "type": "string"
+        },
+        "original_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "original_config": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "intent": {
+          "$ref": "#/$defs/configIntent"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "source_identity",
+        "source_profile",
+        "target_profile",
+        "candidate_revision",
+        "intent"
+      ],
+      "additionalProperties": false
+    },
+    "configReceipt": {
+      "type": "object",
+      "properties": {
+        "original_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "intent": {
+          "$ref": "#/$defs/configIntent"
+        },
+        "source_profile": {
+          "type": "string"
+        },
+        "target_profile": {
+          "type": "string"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "target_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "off_mode": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "candidate_revision",
+        "intent",
+        "source_profile",
+        "target_profile",
+        "source_identity",
+        "target_identity",
+        "off_mode"
+      ],
+      "additionalProperties": false
+    },
+    "configContext": {
+      "type": "object",
+      "properties": {
+        "original_config": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "original_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_config": {
+          "type": "string"
+        },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_profile": {
+          "type": "string"
+        },
+        "target_profile": {
+          "type": "string"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "target_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "reviewed_candidate_config": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "original_config",
+        "original_revision",
+        "candidate_config",
+        "candidate_revision",
+        "source_profile",
+        "target_profile",
+        "source_identity",
+        "target_identity",
+        "reviewed_candidate_config"
+      ],
+      "additionalProperties": false
+    },
+    "identityEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "session"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "$ref": "#/$defs/identityResult"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "configEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "config-validate"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "summary": {
+          "$ref": "#/$defs/configReceipt"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "identityWriteOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "logout"
+            },
+            "full": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "full"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "session_revoke"
+            },
+            "session_id": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "keyOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "super_reset"
+            },
+            "addr": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "fivekeys"
+            },
+            "addr": {
+              "type": "string"
+            },
+            "user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kdf_salt": {
+              "type": "string",
+              "minLength": 1
+            },
+            "wrapped_urk": {
+              "type": "string",
+              "minLength": 1
+            },
+            "urk_nonce": {
+              "type": "string",
+              "minLength": 1
+            },
+            "use_super": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "addr",
+            "user",
+            "kdf_salt",
+            "wrapped_urk",
+            "urk_nonce",
+            "use_super"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "keyInput": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "super_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totp": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "identityWriteParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "operation": {
+          "$ref": "#/$defs/identityWriteOperation"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "source_identity",
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "keyParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "operation": {
+          "$ref": "#/$defs/keyOperation"
+        },
+        "input": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/keyInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "source_identity",
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "sessionRevokeResult": {
+      "type": "object",
+      "properties": {
+        "revoked": {
+          "type": "boolean"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        }
+      },
+      "required": [
+        "revoked",
+        "session_id"
+      ],
+      "additionalProperties": false
+    },
+    "identityWriteResult": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operation": {
+          "$ref": "#/$defs/identityWriteOperation"
+        },
+        "outcome": {
+          "enum": [
+            "pending",
+            "unknown",
+            "committed"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_found": {
+          "type": "boolean"
+        },
+        "session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "revoke": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sessionRevokeResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "fingerprint",
+        "operation",
+        "outcome",
+        "path",
+        "session_found",
+        "identity"
+      ],
+      "additionalProperties": false
+    },
+    "keyResult": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operation": {
+          "$ref": "#/$defs/keyOperation"
+        },
+        "outcome": {
+          "enum": [
+            "pending",
+            "awaiting_input",
+            "unknown",
+            "committed",
+            "rolled_back"
+          ]
+        },
+        "source_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "required_inputs": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "password",
+              "super_password",
+              "account_secret",
+              "totp"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "super_password": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verification_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation_id",
+        "fingerprint",
+        "operation",
+        "outcome",
+        "source_profile",
+        "identity",
+        "required_inputs"
+      ],
+      "additionalProperties": false
+    },
+    "writeContext": {
+      "type": "object",
+      "properties": {
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "operation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/identityWriteOperation"
+            },
+            {
+              "$ref": "#/$defs/keyOperation"
+            }
+          ]
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "installation_root",
+        "profile",
+        "source_identity",
+        "operation",
+        "operation_id",
+        "idempotency_key",
+        "fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "modelMaintenanceReview": {
+      "type": "object",
+      "properties": {
+        "selection_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "revision_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "selection_sha256",
+        "revision_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "modelMaintenanceParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "kind": {
+          "enum": [
+            "install_engines",
+            "uninstall_m3",
+            "reset_cpu"
+          ]
+        },
+        "phase": {
+          "enum": [
+            "plan",
+            "apply",
+            "verify"
+          ]
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/modelMaintenanceReview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "kind",
+        "phase"
+      ],
+      "additionalProperties": false
+    },
+    "modelCatalogPin": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": "2.4.89"
+        },
+        "package_source": {
+          "const": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.4.89/microsoft.windows.ai.machinelearning.2.4.89.nupkg"
+        },
+        "package_sha256": {
+          "const": "5c68ecfb947223267abf159a023f5192ad42725e4e9cc995e7c1470dd54dff63"
+        },
+        "archive_member": {
+          "enum": [
+            "runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll",
+            "runtimes/win-arm64/native/Microsoft.Windows.AI.MachineLearning.dll"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dll_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dll_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version",
+        "package_source",
+        "package_sha256",
+        "archive_member",
+        "destination",
+        "dll_size",
+        "dll_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "modelMaintenancePlan": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "install_engines",
+            "uninstall_m3",
+            "reset_cpu"
+          ]
+        },
+        "review": {
+          "$ref": "#/$defs/modelMaintenanceReview"
+        },
+        "preparation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/modelVerify"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "catalog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/modelCatalogPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uninstall_directory": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cpu_candidate_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "review"
+      ],
+      "additionalProperties": false
+    },
+    "modelMaintenanceReceipt": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/modelMaintenancePlan"
+        },
+        "phase": {
+          "enum": [
+            "plan",
+            "apply",
+            "verify"
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "config_applied": {
+          "type": "boolean"
+        },
+        "npu_ready": {
+          "const": false
+        },
+        "warning": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "plan",
+        "phase",
+        "verified",
+        "config_applied",
+        "npu_ready"
+      ],
+      "additionalProperties": false
+    },
+    "identityWriteEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "identity-write"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "pending",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/identityWriteResult"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "keyEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "key-control"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "pending",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/keyResult"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "modelMaintenanceEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "model-maintenance"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "install_engines",
+                "uninstall_m3",
+                "reset_cpu"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "plan",
+                "apply",
+                "verify"
+              ]
+            },
+            "verified": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "phase",
+            "verified"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "$ref": "#/$defs/modelMaintenanceReceipt"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "keyContext": {
+      "type": "object",
+      "properties": {
+        "launch_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "launch_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "selected_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "target_profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "input_state": {
+          "enum": [
+            "initial",
+            "continuation",
+            "query",
+            "complete"
+          ]
+        }
+      },
+      "required": [
+        "launch_profile",
+        "launch_identity",
+        "selected_profile",
+        "selected_identity",
+        "target_profile",
+        "target_identity",
+        "verified",
+        "input_state"
+      ],
+      "additionalProperties": false
+    },
+    "migrationOperation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "account": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "not": {
+            "const": "main"
+          }
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "key",
+        "installation_root",
+        "profile",
+        "identity",
+        "source_id",
+        "account",
+        "fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "migrationParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "original": {
+          "$ref": "#/$defs/migrationOperation"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "original"
+      ],
+      "additionalProperties": false
+    },
+    "migrationResult": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "already_migrated",
+            "unknown"
+          ]
+        },
+        "details": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "fingerprint",
+        "identity",
+        "outcome",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "migrationContext": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publication": {
+          "enum": [
+            "absent",
+            "bound",
+            "legacy_unbound"
+          ]
+        },
+        "marker": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fingerprint_preimage": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "source_id",
+        "source",
+        "account",
+        "publication",
+        "marker",
+        "fingerprint_preimage"
+      ],
+      "additionalProperties": false
+    },
+    "migrationEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "migration-control"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "pending",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/migrationResult"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-methods": {
+    "control.auth.keygen": {
+      "params": "keygenParams",
+      "result": "keygenResult",
+      "mutable": true
+    },
+    "control.auth.result": {
+      "params": "keygenParams",
+      "result": "keygenResult",
+      "mutable": true
+    },
+    "control.auth.register": {
+      "params": "registerParams",
+      "result": "accountResult",
+      "mutable": true
+    },
+    "control.auth.login": {
+      "params": "loginParams",
+      "result": "accountResult",
+      "mutable": true
+    },
+    "control.auth.account_result": {
+      "params": "accountParams",
+      "result": "accountResult",
+      "mutable": true
+    },
+    "control.auth.account_complete": {
+      "params": "accountParams",
+      "result": "accountResult",
+      "mutable": true
+    },
+    "control.auth.account_rollback": {
+      "params": "accountParams",
+      "result": "accountResult",
+      "mutable": true
+    },
+    "control.model_install_plan": {
+      "params": "modelParams",
+      "result": "modelPlan",
+      "mutable": false
+    },
+    "control.snapshot_maintenance": {
+      "params": "snapshotParams",
+      "result": "snapshotResult",
+      "mutable": true
+    },
+    "control.model_install_verify": {
+      "params": "modelParams",
+      "result": "modelVerify",
+      "mutable": false
+    },
+    "control.secret.read": {
+      "params": "secretParams",
+      "result": "secretResult",
+      "mutable": false
+    },
+    "control.keys_export.read": {
+      "params": "keysExportParams",
+      "result": "keysExportResult",
+      "mutable": false
+    },
+    "control.identity.session_list": {
+      "params": "identityParams",
+      "result": "identityResult",
+      "mutable": false
+    },
+    "control.config_validate": {
+      "params": "configParams",
+      "result": "configReceipt",
+      "mutable": false
+    },
+    "control.identity.logout": {
+      "params": "identityWriteParams",
+      "result": "identityWriteResult",
+      "mutable": true
+    },
+    "control.identity.session_revoke": {
+      "params": "identityWriteParams",
+      "result": "identityWriteResult",
+      "mutable": true
+    },
+    "control.identity.write_result": {
+      "params": "identityWriteParams",
+      "result": "identityWriteResult",
+      "mutable": true
+    },
+    "control.key.super_reset": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.key.result": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.key.rollback": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.model_maintenance": {
+      "params": "modelMaintenanceParams",
+      "result": "modelMaintenanceReceipt",
+      "mutable": false
+    },
+    "control.key.fivekeys": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.key.complete": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.migration.profile": {
+      "params": "migrationParams",
+      "result": "migrationResult",
+      "mutable": true
+    },
+    "control.migration.result": {
+      "params": "migrationParams",
+      "result": "migrationResult",
+      "mutable": true
+    }
+  },
+  "x-model-envelope": "modelEnvelope"
+}
