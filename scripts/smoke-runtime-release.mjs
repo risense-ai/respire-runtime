@@ -6,6 +6,16 @@ import {isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+function normalizedPath(value, platform = process.platform) {
+  if (platform !== 'win32') return value;
+  // Node may retain the extended prefix even after resolving the same file.
+  if (value.startsWith('\\\\?\\UNC\\')) value = '\\\\' + value.slice(8);
+  else if (value.startsWith('\\\\?\\') && /^[A-Za-z]:\\/.test(value.slice(4))) value = value.slice(4);
+  return win32.normalize(value);
+}
+function assertSamePath(actual, expected, platform = process.platform) {
+  assert.equal(normalizedPath(actual, platform), normalizedPath(expected, platform));
+}
 function safePath(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 1024 &&
     !/[\\:\x00-\x1f\x7f]/.test(value) &&
@@ -39,7 +49,7 @@ function assertDrained(receipt, health, operationID) {
     'image_sha256', 'runtime_version', 'account_id', 'generation']) {
     assert.equal(receipt[key], health[key], `final stop identity differs: ${key}`);
   }
-  assert.equal(receipt.image_path, health.image_path);
+  assertSamePath(receipt.image_path, health.image_path);
   assert.equal(receipt.state, 'drained');
   assert.deepEqual(receipt.unfinished, []);
 }
@@ -48,6 +58,17 @@ function assertProtocol(health) {
   assert.deepEqual(health.protocol_range, {minimum: 1, maximum: 1});
 }
 if (process.argv.includes('--self-check')) {
+  const windowsImage = 'D:\\payload\\rsrs-runtime.exe';
+  assertSamePath('\\\\?\\D:\\payload\\rsrs-runtime.exe', windowsImage, 'win32');
+  assertSamePath('D:/payload/rsrs-runtime.exe', windowsImage, 'win32');
+  assertSamePath('\\\\?\\UNC\\server\\share\\rsrs-runtime.exe', '\\\\server\\share\\rsrs-runtime.exe', 'win32');
+  for (const foreign of ['\\\\?\\D:\\foreign\\rsrs-runtime.exe', '\\\\?\\E:\\payload\\rsrs-runtime.exe',
+    '\\\\?\\D:\\payload\\foreign.exe', '\\\\?\\UNC\\server\\foreign\\rsrs-runtime.exe']) {
+    assert.throws(() => assertSamePath(foreign, windowsImage, 'win32'));
+  }
+  assert.throws(() => assertSamePath('\\\\?\\UNC\\foreign\\share\\rsrs-runtime.exe',
+    '\\\\server\\share\\rsrs-runtime.exe', 'win32'));
+  assert.throws(() => assertSamePath('/foreign/runtime', '/fixture/runtime', 'linux'));
   assert.equal(archiveTool('win32', 'C:\\Windows'), 'C:\\Windows\\System32\\tar.exe');
   assert.equal(archiveTool('win32', 'D:/Windows'), 'D:\\Windows\\System32\\tar.exe');
   for (const root of [undefined, null, '', ' ', 'Windows', 'C:Windows']) {
@@ -79,6 +100,7 @@ if (process.argv.includes('--self-check')) {
     account_id: 'a', generation: 1};
   const receipt = {...health, schema_version: 1, protocol_version: 1, operation_id: 'o', state: 'drained', unfinished: []};
   assertDrained(receipt, health, 'o');
+  assert.throws(() => assertDrained({...receipt, image_path: '/foreign/runtime'}, health, 'o'));
   assert.throws(() => assertDrained({...receipt, generation: 2}, health, 'o'));
   assert.throws(() => assertDrained({...receipt, unfinished: [{operation_id: 'x', result: 'unknown'}]}, health, 'o'));
   assert.throws(() => assertDrained({...receipt, protocol_version: 2}, {...health, v: 2}, 'o'));
@@ -118,7 +140,7 @@ assert.ok(safePath(metadata.binary_file) && !metadata.binary_file.includes('/'))
 assert.match(metadata.binary_sha256 ?? '', /^[a-f0-9]{64}$/);
 assert.equal(digest(readFileSync(join(assets, metadata.archive_file))), metadata.archive_sha256);
 const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'respire-runtime-smoke-'));
-const temporaryRelative = relative(realpathSync(process.env.RUNNER_TEMP), realpathSync(root));
+const temporaryRelative = relative(normalizedPath(realpathSync(process.env.RUNNER_TEMP)), normalizedPath(realpathSync(root)));
 assert.ok(temporaryRelative && !isAbsolute(temporaryRelative) && temporaryRelative.split(sep).every(part => part !== '..'));
 const payload = join(root, 'payload'), dataDir = join(root, 'data');
 mkdirSync(payload);
@@ -207,8 +229,8 @@ try {
     assertProtocol(candidate);
     assert.equal(candidate.pid, child.pid);
     assert.equal(candidate.image_sha256, metadata.binary_sha256);
-    assert.equal(realpathSync(candidate.image_path), realpathSync(executable));
-    assert.equal(realpathSync(candidate.installation_root), realpathSync(dataDir));
+    assertSamePath(realpathSync(candidate.image_path), realpathSync(executable));
+    assertSamePath(realpathSync(candidate.installation_root), realpathSync(dataDir));
     assert.equal(candidate.runtime_version, version);
     assert.ok(Array.isArray(candidate.capabilities) &&
       ['business_executor', 'mcp_server'].every(capability => candidate.capabilities.includes(capability)));
