@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://respire.rs/contracts/runtime-control/private-host-control.schema.json",
-  "title": "Inherited auth continuation, model preparation, snapshot maintenance and private secret fixtures; fixed identity writes, super-reset and model maintenance",
+  "title": "Inherited auth continuation, model preparation, snapshot maintenance and private secret fixtures; fixed identity writes, super-reset and model maintenance; frozen fivekeys/completion and local profile migration",
   "description": "Frozen model_control.rs DTOs use HostModelParams and ModelPreparation. x-methods selects decoded args/result validation. Selection SHA-256 is opaque: fixtures bind request to response, never claim authoritative recomputation or native execution.",
   "type": "object",
   "required": [
@@ -713,7 +713,11 @@
             "control.key.super_reset",
             "control.key.result",
             "control.key.rollback",
-            "control.model_maintenance"
+            "control.model_maintenance",
+            "control.key.fivekeys",
+            "control.key.complete",
+            "control.migration.profile",
+            "control.migration.result"
           ]
         },
         "args": {
@@ -800,7 +804,15 @@
         },
         "write_context": {
           "$ref": "#/$defs/writeContext"
-        }
+        },
+        "key_context": {
+          "$ref": "#/$defs/keyContext"
+        },
+        "migration_context": {
+          "$ref": "#/$defs/migrationContext"
+        },
+        "progress": {},
+        "ledger": {}
       },
       "additionalProperties": false
     },
@@ -2122,27 +2134,71 @@
       ]
     },
     "keyOperation": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "const": "super_reset"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "super_reset"
+            },
+            "addr": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
         },
-        "addr": {
-          "anyOf": [
-            {
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "fivekeys"
+            },
+            "addr": {
+              "type": "string"
+            },
+            "user": {
               "type": "string",
               "minLength": 1
             },
-            {
-              "type": "null"
+            "kdf_salt": {
+              "type": "string",
+              "minLength": 1
+            },
+            "wrapped_urk": {
+              "type": "string",
+              "minLength": 1
+            },
+            "urk_nonce": {
+              "type": "string",
+              "minLength": 1
+            },
+            "use_super": {
+              "type": "boolean"
             }
-          ]
+          },
+          "required": [
+            "kind",
+            "addr",
+            "user",
+            "kdf_salt",
+            "wrapped_urk",
+            "urk_nonce",
+            "use_super"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "kind"
-      ],
-      "additionalProperties": false
+      ]
     },
     "keyInput": {
       "type": "object",
@@ -2158,6 +2214,26 @@
           ]
         },
         "super_password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totp": {
           "anyOf": [
             {
               "type": "string"
@@ -2386,7 +2462,9 @@
           "items": {
             "enum": [
               "password",
-              "super_password"
+              "super_password",
+              "account_secret",
+              "totp"
             ]
           },
           "uniqueItems": true
@@ -2401,6 +2479,9 @@
               "type": "null"
             }
           ]
+        },
+        "verification_required": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -2943,6 +3024,319 @@
         }
       },
       "additionalProperties": false
+    },
+    "keyContext": {
+      "type": "object",
+      "properties": {
+        "launch_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "launch_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "selected_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "target_profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "input_state": {
+          "enum": [
+            "initial",
+            "continuation",
+            "query",
+            "complete"
+          ]
+        }
+      },
+      "required": [
+        "launch_profile",
+        "launch_identity",
+        "selected_profile",
+        "selected_identity",
+        "target_profile",
+        "target_identity",
+        "verified",
+        "input_state"
+      ],
+      "additionalProperties": false
+    },
+    "migrationOperation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "account": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "not": {
+            "const": "main"
+          }
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "key",
+        "installation_root",
+        "profile",
+        "identity",
+        "source_id",
+        "account",
+        "fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "migrationParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "original": {
+          "$ref": "#/$defs/migrationOperation"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "original"
+      ],
+      "additionalProperties": false
+    },
+    "migrationResult": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "already_migrated",
+            "unknown"
+          ]
+        },
+        "details": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "fingerprint",
+        "identity",
+        "outcome",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "migrationContext": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publication": {
+          "enum": [
+            "absent",
+            "bound",
+            "legacy_unbound"
+          ]
+        },
+        "marker": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fingerprint_preimage": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "source_id",
+        "source",
+        "account",
+        "publication",
+        "marker",
+        "fingerprint_preimage"
+      ],
+      "additionalProperties": false
+    },
+    "migrationEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "migration-control"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "pending",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/migrationResult"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
     }
   },
   "x-methods": {
@@ -3050,6 +3444,26 @@
       "params": "modelMaintenanceParams",
       "result": "modelMaintenanceReceipt",
       "mutable": false
+    },
+    "control.key.fivekeys": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.key.complete": {
+      "params": "keyParams",
+      "result": "keyResult",
+      "mutable": true
+    },
+    "control.migration.profile": {
+      "params": "migrationParams",
+      "result": "migrationResult",
+      "mutable": true
+    },
+    "control.migration.result": {
+      "params": "migrationParams",
+      "result": "migrationResult",
+      "mutable": true
     }
   },
   "x-model-envelope": "modelEnvelope"

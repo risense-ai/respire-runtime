@@ -524,3 +524,32 @@ alone does not authorize finish_maintenance or prove a restored serving owner.
 The 180s long-control limit budgets four 30s key network calls or the model probe;
 fixtures do not execute or prove those timeouts, keyring durability, CAS, rollback,
 parent revocation, native model loading or full required/G1 acceptance.
+
+## Frozen fivekeys and local-migration fixture extension
+
+The 281-file baseline retains all 277 existing fixture bytes and assertions.
+This extension adds 17 positive and 82 negative cases: 380 digest-bound files,
+89 positive / 287 negative fixtures, including 303 private-host cases.
+Only frozen control.key.fivekeys/complete and control.migration.profile/result
+are added. Metadata-control drafts are not part of this contract.
+
+Fivekeys uses the original O/key and intent fingerprint across private input/TOTP
+continuations. An applied candidate stays Pending with verification_required=true;
+only the exact target identity and a declared verified completion may be Committed.
+Explicit v1 password="" is present; a missing/null password requests input.
+The key_context/write_context fields are synthetic anchors, not grants or proof
+that a live Runtime was verified. Private responses never authorize public progress
+or ledger copies of inputs, TOTP or issued super passwords.
+
+Migration binds its fixed tuple fingerprint, discovered source ID, safe account name,
+final accounts path, namespace conversion and complete O/key marker before publication.
+A legacy unbound marker may return AlreadyMigrated on the first profile request;
+a result query stays Unknown and must not claim that marker for the original O.
+This does not exercise or replace CLI handling of an acknowledged terminal response.
+
+Node and Go recompute frozen fingerprints. Rust uses the real protocol DTOs and
+checks the actual migration fingerprint preimage plus declared digest anchors;
+it adds no hash/native dependency to the serde-only protocol crate. All source
+paths and identities are synthetic anchors, not filesystem discovery evidence.
+No fixture executes keyring, network, TOTP, native launch, CAS, rollback, owner
+restoration or timeout behavior. These checks are not G1/native acceptance.

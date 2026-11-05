@@ -43,8 +43,8 @@ if (manifest.release_metadata_schema_version !== 2) fail("wrong release metadata
 
 const positive = manifest.fixtures?.positive;
 const negative = manifest.fixtures?.negative;
-if (!Array.isArray(positive) || positive.length !== 72) fail("positive fixture count");
-if (!Array.isArray(negative) || negative.length !== 205) fail("negative fixture count");
+if (!Array.isArray(positive) || positive.length !== 89) fail("positive fixture count");
+if (!Array.isArray(negative) || negative.length !== 287) fail("negative fixture count");
 
 const boundPaths = new Set();
 for (const bound of manifest.files ?? []) {
@@ -610,7 +610,7 @@ function fixedWriteModelFailure(payload, params, kind) {
           params.operation.kind === "session_revoke" && (result.revoke != null && result.revoke.session_id.toLowerCase() !== params.operation.session_id.toLowerCase() ||
             result.outcome === "committed" && result.revoke == null)) return "write_identity_mismatch";
     } else {
-      if (result.source_profile !== binding.profile || result.target_profile != null && result.target_profile !== binding.profile ||
+      if (result.verification_required === true || result.source_profile !== binding.profile || result.target_profile != null && result.target_profile !== binding.profile ||
           result.outcome === "committed" && (result.target_profile !== binding.profile || after.kind !== "bound" ||
             result.account_id !== after.account_id || result.session_sha256 !== after.session_sha256 || !result.super_password) ||
           result.outcome !== "committed" && (result.super_password != null || result.account_id != null || result.session_sha256 != null) ||
@@ -639,17 +639,100 @@ function fixedWriteModelFailure(payload, params, kind) {
   return null;
 }
 
+// Fixture contexts are evidence anchors, never capabilities or native execution.
+function keyMigrationFailure(payload, params, kind) {
+  const request = payload.request, result = payload.result, binding = params.binding;
+  const same = isDeepStrictEqual;
+  const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  if (kind === "keyResult" && params.operation.kind === "fivekeys") {
+    const context = payload.key_context, write = payload.write_context;
+    if (!context || !hostSchemaValid(context, hostSchema.$defs.keyContext) ||
+        !write || !hostSchemaValid(write, hostSchema.$defs.writeContext) ||
+        write.installation_root !== binding.installation_root || !same(write.source_identity, params.source_identity) ||
+        !same(write.operation, params.operation) || write.operation_id !== request.operation_id ||
+        write.idempotency_key !== request.idempotency_key || binding.profile !== context.launch_profile ||
+        !same(params.identity, context.launch_identity)) return "write_context_mismatch";
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const fingerprint = hash(canonical({schema_version: 1, method: "control.key", root: write.installation_root,
+      profile: write.profile, source_identity: write.source_identity, operation: write.operation}));
+    if (write.fingerprint !== fingerprint || result.fingerprint !== fingerprint) return "host_fingerprint_mismatch";
+    if (!same(result.operation, params.operation) || result.source_profile !== write.profile ||
+        !same(result.identity, context.selected_identity) ||
+        (binding.expected_account_id ?? null) !== (params.identity.kind === "bound" ? params.identity.account_id : null)) return "write_identity_mismatch";
+    const applied = result.verification_required === true || result.outcome === "committed";
+    if (result.super_password != null || result.required_inputs.some(field => !["password", "super_password", "account_secret", "totp"].includes(field))) return "private_secret_exposure";
+    if (applied) {
+      const account = createHash("sha256").update(params.operation.user).digest("hex");
+      if (result.target_profile !== context.target_profile || context.selected_profile !== context.target_profile ||
+          !same(result.identity, context.target_identity) || result.identity.kind !== "bound" ||
+          result.account_id !== account || result.identity.account_id !== account ||
+          result.session_sha256 !== result.identity.session_sha256 || result.required_inputs.length ||
+          (result.verification_required === true ? result.outcome !== "pending" : result.outcome !== "committed") ||
+          (result.outcome === "committed" && !context.verified) ||
+          ![write.profile, context.target_profile].includes(binding.profile)) return "write_identity_mismatch";
+    } else if (result.account_id != null || result.session_sha256 != null ||
+        !same(result.identity, params.source_identity) || context.selected_profile !== write.profile ||
+        (result.outcome === "awaiting_input") !== (result.required_inputs.length > 0)) return "write_identity_mismatch";
+    if (request.method === "control.key.complete" && (!applied || result.outcome !== "committed" || result.verification_required === true || !context.verified ||
+        binding.profile !== context.target_profile || !same(params.identity, context.target_identity) || params.input != null)) return "key_completion_mismatch";
+    if (context.input_state === "initial" && request.method === "control.key.fivekeys" && params.input?.password == null &&
+        !(result.outcome === "awaiting_input" && result.required_inputs.includes("password"))) return "key_input_mismatch";
+    if (context.input_state === "continuation" && (payload.original_operation_id !== request.operation_id ||
+        !params.input || typeof params.input.totp !== "string")) return "key_input_mismatch";
+  } else if (kind === "migrationResult") {
+    const original = params.original, context = payload.migration_context;
+    if (!context || !hostSchemaValid(context, hostSchema.$defs.migrationContext)) return "migration_context_mismatch";
+    if (original.operation_id !== request.operation_id || original.key !== request.idempotency_key || original.key !== original.operation_id) return "host_operation_mismatch";
+    if (original.installation_root !== binding.installation_root || original.profile !== binding.profile ||
+        !same(original.identity, params.identity) || !same(result.identity, original.identity) ||
+        (binding.expected_account_id ?? null) !== (original.identity.kind === "bound" ? original.identity.account_id : null) ||
+        original.source_id !== context.source_id || original.account !== context.account) return "migration_context_mismatch";
+    const identity = original.identity.kind === "bound" ? {kind: "bound", account_id: original.identity.account_id, session_sha256: original.identity.session_sha256}
+      : original.identity.kind === "unbound" ? {kind: "unbound", operation_id: original.identity.operation_id, session_sha256: original.identity.session_sha256} : {kind: "absent"};
+    const fingerprint = hash([1, "control.migration.profile", original.installation_root, original.profile, identity, original.source_id, original.account]);
+    if (original.fingerprint !== fingerprint || result.fingerprint !== fingerprint || context.fingerprint_preimage !== JSON.stringify([1,
+        "control.migration.profile", original.installation_root, original.profile, identity, original.source_id, original.account])) return "host_fingerprint_mismatch";
+    const destination = original.installation_root + "/accounts/" + original.account, marker = context.marker;
+    if (result.outcome === "completed") {
+      if (context.publication !== "bound" || !marker || !same(marker.control, original) || marker.schema !== 2 ||
+          marker.complete !== true || marker.namespace_migrated !== true || marker.original_preserved !== true ||
+          marker.source_identity !== original.source_id || marker.source !== context.source || marker.destination !== destination ||
+          !same(marker.control_result, result.details) || !same(result.details, {state: "migrated", account: original.account,
+            dir: destination, source: context.source, original_preserved: true})) return "migration_marker_mismatch";
+    } else if (result.outcome === "already_migrated") {
+      if (request.method !== "control.migration.profile" || context.publication !== "legacy_unbound" || !marker ||
+          marker.control != null || marker.complete !== true || marker.source_identity !== original.source_id ||
+          result.details.state !== "already_migrated" || result.details.dir !== marker.destination) return "migration_marker_mismatch";
+    } else if (result.details !== null || context.publication === "bound") return "migration_marker_mismatch";
+  } else return null;
+  const rule = kind === "migrationResult" ? "migrationEnvelope" : "keyEnvelope", envelope = payload.private_response;
+  const status = result.outcome === "unknown" ? "fail" : ["pending", "awaiting_input"].includes(result.outcome) ? "pending" : "ok";
+  if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[rule]) || envelope.status !== status ||
+      !same(envelope.summary, result)) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const items = envelope.items.filter(item => item.name === name);
+    if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "host_result_invalid";
+  }
+  if (payload.progress != null || payload.ledger != null) return "private_secret_exposure";
+  return null;
+}
+
 function privateHostFailure(payload) {
   if (payload.channel !== "inherited_pipe") return "private_channel_required";
   if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
   const request = payload.request, method = hostSchema["x-methods"][request.method];
-  if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult"].includes(method.result) &&
+  if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult", "migrationResult"].includes(method.result) &&
       Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
   if (method.mutable && (!request.operation_id || !request.idempotency_key)) return "host_operation_required";
   if (!method.mutable && (request.operation_id != null || request.idempotency_key != null)) return "host_request_invalid";
   let params;
   try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
   if (!hostSchemaValid(params, hostSchema.$defs[method.params])) return "host_params_invalid";
+  if ((Object.hasOwn(payload, "progress") || Object.hasOwn(payload, "ledger")) &&
+      method.result !== "migrationResult" && !(method.result === "keyResult" && params.operation.kind === "fivekeys")) return "host_request_invalid";
+  if (method.params === "keyParams" && ((request.method === "control.key.super_reset" && params.operation.kind !== "super_reset") ||
+      ["control.key.fivekeys", "control.key.complete"].includes(request.method) && params.operation.kind !== "fivekeys")) return "host_params_invalid";
   if (method.params === "identityWriteParams" && request.method !== "control.identity.write_result" &&
       (request.method === "control.identity.logout") !== (params.operation.kind === "logout")) return "host_params_invalid";
   if (method.params === "modelMaintenanceParams" && ((params.phase === "plan") !== (params.expected == null) ||
@@ -657,7 +740,7 @@ function privateHostFailure(payload) {
   if (method.params === "modelParams" && (request.method === "control.model_install_plan"
       ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
   const snapshot = request.method === "control.snapshot_maintenance";
-  const verified = request.method === "control.auth.account_complete" || snapshot && ["commit", "release"].includes(params.action);
+  const verified = ["control.auth.account_complete", "control.key.complete"].includes(request.method) || snapshot && ["commit", "release"].includes(params.action);
   if (payload.maintenance_phase !== (verified ? "Verified" : "Paused")) return "maintenance_phase_mismatch";
   if (payload.original_operation_id && payload.original_operation_id !== request.operation_id) return "host_operation_mismatch";
   if (snapshot) {
@@ -675,7 +758,8 @@ function privateHostFailure(payload) {
   if (!result) return payload.finish_maintenance ? "maintenance_not_terminal" : null;
   if (!hostSchemaValid(result, hostSchema.$defs[method.result])) return "host_result_invalid";
   if (method.mutable && result.operation_id !== request.operation_id) return "host_operation_mismatch";
-  const fixedFailure = fixedWriteModelFailure(payload, params, method.result);
+  const extension = method.result === "migrationResult" || method.result === "keyResult" && params.operation.kind === "fivekeys";
+  const fixedFailure = extension ? keyMigrationFailure(payload, params, method.result) : fixedWriteModelFailure(payload, params, method.result);
   if (fixedFailure) return fixedFailure;
   if (["identityResult", "configReceipt"].includes(method.result)) {
     const envelope = payload.private_response;
@@ -726,12 +810,14 @@ function privateHostFailure(payload) {
     }
   }
   const terminal = method.result === "accountResult" && ["committed", "rolled_back"].includes(result.outcome) ||
+    extension && (method.result === "migrationResult" ? ["completed", "already_migrated"].includes(result.outcome) :
+      ["committed", "rolled_back"].includes(result.outcome) && !result.verification_required) ||
     snapshot && ["released", "rolled_back"].includes(result.state);
   if (payload.finish_maintenance && !terminal) return "maintenance_not_terminal";
   return null;
 }
 
-for (const [group, legacyCount, newCount] of [[positive, 25, 47], [negative, 48, 157]]) {
+for (const [group, legacyCount, newCount] of [[positive, 25, 64], [negative, 48, 239]]) {
   let checked = 0;
   for (const name of group) {
     const fixture = readJSON(fixturePath(name));
@@ -745,4 +831,4 @@ for (const [group, legacyCount, newCount] of [[positive, 25, 47], [negative, 48,
   if (checked !== newCount || group.length - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
 }
 
-console.log(`runtime control contract verified: ${boundPaths.size} bound files (73 legacy, 204 private host cases, schema and shared Rust consumer)`);
+console.log(`runtime control contract verified: ${boundPaths.size} bound files (73 legacy, 303 private host cases, schema and shared Rust consumer)`);

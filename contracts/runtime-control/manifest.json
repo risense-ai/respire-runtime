@@ -79,7 +79,24 @@
       "fixtures/positive/host-model-maintenance-reset_cpu-plan.json",
       "fixtures/positive/host-model-maintenance-uninstall_m3-plan.json",
       "fixtures/positive/host-model-maintenance-uninstall_m3-verify.json",
-      "fixtures/positive/host-model-maintenance-windows-catalog.json"
+      "fixtures/positive/host-model-maintenance-windows-catalog.json",
+      "fixtures/positive/host-fivekeys-awaiting-totp.json",
+      "fixtures/positive/host-fivekeys-committed-query.json",
+      "fixtures/positive/host-fivekeys-complete.json",
+      "fixtures/positive/host-fivekeys-pending-verification.json",
+      "fixtures/positive/host-fivekeys-rolled-back.json",
+      "fixtures/positive/host-fivekeys-totp-continuation.json",
+      "fixtures/positive/host-fivekeys-unknown-query.json",
+      "fixtures/positive/host-fivekeys-v1-empty-password.json",
+      "fixtures/positive/host-fivekeys-v1-missing-password.json",
+      "fixtures/positive/host-fivekeys-v1-null-password.json",
+      "fixtures/positive/host-migration-absent-identity.json",
+      "fixtures/positive/host-migration-absent-query-unknown.json",
+      "fixtures/positive/host-migration-legacy-first.json",
+      "fixtures/positive/host-migration-legacy-query-unknown.json",
+      "fixtures/positive/host-migration-profile-completed.json",
+      "fixtures/positive/host-migration-result-completed.json",
+      "fixtures/positive/host-migration-unbound-identity.json"
     ],
     "negative": [
       "fixtures/negative/release-metadata-conflicting-hash.json",
@@ -286,7 +303,89 @@
       "fixtures/negative/host-model-maintenance-scope.json",
       "fixtures/negative/host-model-maintenance-secret.json",
       "fixtures/negative/host-model-maintenance-store-ready.json",
-      "fixtures/negative/host-model-maintenance-wrong-phase.json"
+      "fixtures/negative/host-model-maintenance-wrong-phase.json",
+      "fixtures/negative/host-fivekeys-business-scope.json",
+      "fixtures/negative/host-fivekeys-committed-without-verifier.json",
+      "fixtures/negative/host-fivekeys-complete-paused.json",
+      "fixtures/negative/host-fivekeys-complete-still-pending.json",
+      "fixtures/negative/host-fivekeys-complete-with-input.json",
+      "fixtures/negative/host-fivekeys-complete-wrong-launch.json",
+      "fixtures/negative/host-fivekeys-continuation-missing-totp.json",
+      "fixtures/negative/host-fivekeys-duplicate-inputs.json",
+      "fixtures/negative/host-fivekeys-extra-argv.json",
+      "fixtures/negative/host-fivekeys-foreign-launch.json",
+      "fixtures/negative/host-fivekeys-foreign-write-key.json",
+      "fixtures/negative/host-fivekeys-foreign-write-source.json",
+      "fixtures/negative/host-fivekeys-input-secret-type.json",
+      "fixtures/negative/host-fivekeys-input-totp-type.json",
+      "fixtures/negative/host-fivekeys-input-unknown.json",
+      "fixtures/negative/host-fivekeys-mismatched-method.json",
+      "fixtures/negative/host-fivekeys-missing-original-operation.json",
+      "fixtures/negative/host-fivekeys-operation-unknown.json",
+      "fixtures/negative/host-fivekeys-params-unknown.json",
+      "fixtures/negative/host-fivekeys-pending-as-committed.json",
+      "fixtures/negative/host-fivekeys-pending-finished.json",
+      "fixtures/negative/host-fivekeys-private-readiness.json",
+      "fixtures/negative/host-fivekeys-public-http.json",
+      "fixtures/negative/host-fivekeys-public-response.json",
+      "fixtures/negative/host-fivekeys-result-unknown.json",
+      "fixtures/negative/host-fivekeys-secret-ledger.json",
+      "fixtures/negative/host-fivekeys-secret-progress.json",
+      "fixtures/negative/host-fivekeys-secret-result.json",
+      "fixtures/negative/host-fivekeys-totp-foreign-original.json",
+      "fixtures/negative/host-fivekeys-v1-missing-claimed-applied.json",
+      "fixtures/negative/host-fivekeys-v1-null-claimed-applied.json",
+      "fixtures/negative/host-fivekeys-wrong-account.json",
+      "fixtures/negative/host-fivekeys-wrong-fingerprint.json",
+      "fixtures/negative/host-fivekeys-wrong-identity.json",
+      "fixtures/negative/host-fivekeys-wrong-result-operation.json",
+      "fixtures/negative/host-fivekeys-wrong-session.json",
+      "fixtures/negative/host-fivekeys-wrong-source.json",
+      "fixtures/negative/host-fivekeys-wrong-target.json",
+      "fixtures/negative/host-key-write-verification-required.json",
+      "fixtures/negative/host-migration-binding-account.json",
+      "fixtures/negative/host-migration-business-scope.json",
+      "fixtures/negative/host-migration-extra-argv.json",
+      "fixtures/negative/host-migration-invalid-source-id.json",
+      "fixtures/negative/host-migration-legacy-claim-completed.json",
+      "fixtures/negative/host-migration-legacy-first-wrong-dir.json",
+      "fixtures/negative/host-migration-legacy-query-already.json",
+      "fixtures/negative/host-migration-marker-finalpath.json",
+      "fixtures/negative/host-migration-marker-incomplete.json",
+      "fixtures/negative/host-migration-marker-no-namespace.json",
+      "fixtures/negative/host-migration-marker-premature.json",
+      "fixtures/negative/host-migration-marker-result.json",
+      "fixtures/negative/host-migration-marker-schema.json",
+      "fixtures/negative/host-migration-marker-source-id.json",
+      "fixtures/negative/host-migration-marker-source.json",
+      "fixtures/negative/host-migration-marker-without-control.json",
+      "fixtures/negative/host-migration-marker-wrong-fingerprint.json",
+      "fixtures/negative/host-migration-marker-wrong-key.json",
+      "fixtures/negative/host-migration-marker-wrong-operation.json",
+      "fixtures/negative/host-migration-missing-operation.json",
+      "fixtures/negative/host-migration-name-empty.json",
+      "fixtures/negative/host-migration-name-main.json",
+      "fixtures/negative/host-migration-name-parent.json",
+      "fixtures/negative/host-migration-name-slash.json",
+      "fixtures/negative/host-migration-original-not-preserved.json",
+      "fixtures/negative/host-migration-original-unknown.json",
+      "fixtures/negative/host-migration-params-unknown.json",
+      "fixtures/negative/host-migration-public-http.json",
+      "fixtures/negative/host-migration-public-response.json",
+      "fixtures/negative/host-migration-result-account.json",
+      "fixtures/negative/host-migration-result-finalpath.json",
+      "fixtures/negative/host-migration-result-unknown.json",
+      "fixtures/negative/host-migration-unknown-finished.json",
+      "fixtures/negative/host-migration-unknown-with-details.json",
+      "fixtures/negative/host-migration-verified-instead-paused.json",
+      "fixtures/negative/host-migration-wrong-fingerprint.json",
+      "fixtures/negative/host-migration-wrong-identity.json",
+      "fixtures/negative/host-migration-wrong-key.json",
+      "fixtures/negative/host-migration-wrong-original-operation.json",
+      "fixtures/negative/host-migration-wrong-profile.json",
+      "fixtures/negative/host-migration-wrong-result-identity.json",
+      "fixtures/negative/host-migration-wrong-root.json",
+      "fixtures/negative/host-migration-wrong-source-id.json"
     ]
   },
   "files": [
@@ -592,7 +691,7 @@
     },
     {
       "path": "schema/private-host-control.schema.json",
-      "sha256": "e4916eb2e365cfdb1146d045a43bd78d2e972972133cd5b5c131b1e555da8a06"
+      "sha256": "572c51b978b16f71a2ce7ebe467bbb9b5945ad33e66d5c1106636c39cffd4816"
     },
     {
       "path": "fixtures/positive/host-auth-keygen-unbound.json",
@@ -716,7 +815,7 @@
     },
     {
       "path": "consumers/private_host_control.rs",
-      "sha256": "89ac3ac97dd876edba0ca80dc218e9782ebe3c8f504f61e7e5aea6c230a7ccb2"
+      "sha256": "1b5fd06c3c47b7afc5266f14a08c2ea6236230c83f721c774d7153a2f3700ef2"
     },
     {
       "path": "fixtures/positive/host-model-verify-loaded.json",
@@ -1413,6 +1512,402 @@
     {
       "path": "fixtures/negative/host-model-maintenance-wrong-phase.json",
       "sha256": "33a732e91c0f7f0c722dcd1fc00a75f405a86f36d4b06be5022980722353c504"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-awaiting-totp.json",
+      "sha256": "12af4ccb1dd45b01ee48701c4b730b4711fa8f5f96cdb8cb1b8f38e027c0cf53"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-committed-query.json",
+      "sha256": "a654166f158d3bd181ef3b737f890fd026214629a38f3487b495cdb872d8e685"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-complete.json",
+      "sha256": "76bae0099957f6e3d825385fdab5dfccc983d9cfad42acdb59589cd2277d70c5"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-pending-verification.json",
+      "sha256": "aecc3616abc8fc342d44090ca02ef54b8abeef00b503a5087deccee95cd92216"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-rolled-back.json",
+      "sha256": "965c69000b56bf4ce077e2d5677af43a2881c494e90343fc784d28e26e6a892d"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-totp-continuation.json",
+      "sha256": "f0e7bccc77823ef09701d672e697abf4638a3b895afe11e991ee089d8846c999"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-unknown-query.json",
+      "sha256": "0be92feb0ffe324b3a79becb74ea8381ab2d887ed8f7f8afdbe017d28cb14385"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-v1-empty-password.json",
+      "sha256": "c560011c90eef1fd975836a224322d2950c7493a589e7195e5be031691263af4"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-v1-missing-password.json",
+      "sha256": "c7a8c83f305089c67217957cc00ec5a483ba300c93e40a6abd9847c37456e46b"
+    },
+    {
+      "path": "fixtures/positive/host-fivekeys-v1-null-password.json",
+      "sha256": "f0adbc6e680ccf809cad1c98f5161f53fad03c58be4d30e5038c244984ccf5df"
+    },
+    {
+      "path": "fixtures/positive/host-migration-absent-identity.json",
+      "sha256": "1083ef707cf7aa426cec0838611b8fae8a1048e9c06959ae2b817cd25f231fb7"
+    },
+    {
+      "path": "fixtures/positive/host-migration-absent-query-unknown.json",
+      "sha256": "fbc69b8cb254752dfd63fe6c8a8cbe559af2056423544ccad3f0a2cb61e9e8b4"
+    },
+    {
+      "path": "fixtures/positive/host-migration-legacy-first.json",
+      "sha256": "602ef23f05319f42d5133bb6ade81473182a77fac1a5cfa1867bec901fd8cc64"
+    },
+    {
+      "path": "fixtures/positive/host-migration-legacy-query-unknown.json",
+      "sha256": "51a506998735c35dac3fe9972857d1695136092eb3582b23773e2518c9efbf26"
+    },
+    {
+      "path": "fixtures/positive/host-migration-profile-completed.json",
+      "sha256": "582347fca0abf1401be0d1642ed70eb3e338ffd8be2cc152f2275c971dc20bcd"
+    },
+    {
+      "path": "fixtures/positive/host-migration-result-completed.json",
+      "sha256": "a012c5e0bcfd24691f495a42ddbe93d0d9487683417461ebb9fed03c95628960"
+    },
+    {
+      "path": "fixtures/positive/host-migration-unbound-identity.json",
+      "sha256": "473f00d92b92e839b0e70e8517360b0c96005875b821728b89fa49be754fd75f"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-business-scope.json",
+      "sha256": "6731aa64437f78fd559660bb9d7a7c9da2003641c18f890d29947274247b254f"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-committed-without-verifier.json",
+      "sha256": "fbf8cd14a3c3c8ab6ce7f6fdcb7dc73fb13826cadb252a1947497882cd782f9f"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-complete-paused.json",
+      "sha256": "a14e5bade6592c6685d85ff6f014355ea9346c4e143a4c311c99b5053251cf57"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-complete-still-pending.json",
+      "sha256": "8d21dd7e9b7c8f2a657b1765b5ec2eee0ac7f0087e2e695b2032cb2db07ae351"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-complete-with-input.json",
+      "sha256": "fd7e0a1c2092edc52fa2279522ed5a78bc64eb67e89107c8052ec88ddc3ab66d"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-complete-wrong-launch.json",
+      "sha256": "b36366c6cd2bfff20375081d54245fafb3f54f5109d324f0b17625850fde9c7c"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-continuation-missing-totp.json",
+      "sha256": "a3af123a850218dd01eeb0bbeded5766c58bfa0cbafa9d1d782377d2b616bcfb"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-duplicate-inputs.json",
+      "sha256": "bd2526da34e5a273bfe7645b447a01f7c1884be5250bc807e5b2573a97ea8eb8"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-extra-argv.json",
+      "sha256": "4b7fc31518cb73e5ac21c8cd083e03088bdd51134f6e985360d4e422466ac1d8"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-foreign-launch.json",
+      "sha256": "b7a3c809c2111bcfec77064c1088ef5aeddc5fe2741c9124ab02168718cfb81c"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-foreign-write-key.json",
+      "sha256": "973d5a057c32ea160cf1446f430be48b1168c88a6263f6f94362c4d83b88dc86"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-foreign-write-source.json",
+      "sha256": "fc94adf61d1d21738df2f097c96f3575e7a0493bcbb423a66fe914c3d6bd3c02"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-input-secret-type.json",
+      "sha256": "21981d52bd347daab0489075b1dd9874ff015168881db8dc48e899f2064c70ee"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-input-totp-type.json",
+      "sha256": "612d3912fc5aad894cc6093d3d5ac872528e7be5e0aff956276d75a21168bc82"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-input-unknown.json",
+      "sha256": "f501cbd511a576367cadbc717e3766226d18dcd5dac6092b1d234cf7ab52a8a4"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-mismatched-method.json",
+      "sha256": "74fc8fafbd72ba75b524541d3139fca84c56168a94f59237591f2400685eef6d"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-missing-original-operation.json",
+      "sha256": "2ec0697daa81278e96dd44ba4317af36c59481120d97e3635c97552f695791a7"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-operation-unknown.json",
+      "sha256": "bf0a75f54badc06d5fbea7c89a868180e04625dc679bf2988b784c96ab095cd9"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-params-unknown.json",
+      "sha256": "d59b7fb69d20d206992f134e0ec2cae46b3d636185bec2b8de3d7cabbe18744a"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-pending-as-committed.json",
+      "sha256": "f176d7c033dc89df685c27de21521557d9c4bce70f1773c82b9730f86534bfb6"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-pending-finished.json",
+      "sha256": "8ae9e550fa4e0c3418f32c458432e0f22188e73b3e295984df266f02060185fa"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-private-readiness.json",
+      "sha256": "42b2f1e96717a3a146d09a2f6373ea78f138ee56d3839d64c946147647e7dd2a"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-public-http.json",
+      "sha256": "f2dc373ad998d666175daef63857bb1f98b21d615fce276e63b03dde26ee609b"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-public-response.json",
+      "sha256": "56450f7097e68d0f53ddb7b7b129005cf219fb0bcf74913e97fb8f245083430e"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-result-unknown.json",
+      "sha256": "89abe78d5eeb73d5fb241dff94c1b8364ad2faefc81fbba3afe9242a731a3ca5"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-secret-ledger.json",
+      "sha256": "ed60950a0289b0f9369066f0a11ed54fd612772e8920ccd38a839f57deafd067"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-secret-progress.json",
+      "sha256": "07a6981e9030599cfe6080d916e9ad1515228ac3d895ff0bf4a7504a5bfe7742"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-secret-result.json",
+      "sha256": "18094205b2a5f5861627a7a01b740c9688296e851d8250f15abd28123e1f0c96"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-totp-foreign-original.json",
+      "sha256": "2516f3ddc03d2e649bac153e0dee624eda1a4e58357ca5a5b984bc978800b7a7"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-v1-missing-claimed-applied.json",
+      "sha256": "aebb63e53f2b63970dd6ad868c8ea5b71a2ab5928bc0a3ecc5a2279b39d58420"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-v1-null-claimed-applied.json",
+      "sha256": "c9b0f1bae2e48c6e004180e1bc50a8e2c8eb8d587a0cdb1a87626aad5688e15f"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-account.json",
+      "sha256": "7993ab8f5ddc75ff6ce4fe978aabb31a404b02e35d004096ffd94fb5cfe31eaa"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-fingerprint.json",
+      "sha256": "d9d2858871425e3f086bfcf038bb4d1e6bffadb4684bccaa3e9dfd637efe3c19"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-identity.json",
+      "sha256": "415847a4ba86f8aa9d6e2b641bafa785995e66ab814cb31d7e97e9ba5b4e0420"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-result-operation.json",
+      "sha256": "03419d62d78f4c689a31fc04ec69a7084cfcafcfd47585d93e4ca935ddcd61af"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-session.json",
+      "sha256": "c7a0cfbed4cc5a1c41bd57e5ed7e03ae638c59f0d83ba35a574206373a949dd5"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-source.json",
+      "sha256": "2677edb86bb21c498e63a3cc44916668b26aa015036125e86b5f121f429a1b6b"
+    },
+    {
+      "path": "fixtures/negative/host-fivekeys-wrong-target.json",
+      "sha256": "6988aa56109b7c2ad6841ced627dd0f446084732e35bd5b2e120297a3fd6e5b1"
+    },
+    {
+      "path": "fixtures/negative/host-key-write-verification-required.json",
+      "sha256": "844bfad082acc200cbd0d266f6737b0b75b0d5fbc542ce5d23152e34d31c1f41"
+    },
+    {
+      "path": "fixtures/negative/host-migration-binding-account.json",
+      "sha256": "fdf30319c435eb743885f4fa19216dab585f3aead6ebdf156d85f9a442bde9e8"
+    },
+    {
+      "path": "fixtures/negative/host-migration-business-scope.json",
+      "sha256": "a26491a46bb0ec4a837a25b0848b4a0b816710f7243f33e0fddcb351895a82bc"
+    },
+    {
+      "path": "fixtures/negative/host-migration-extra-argv.json",
+      "sha256": "df6ea09236d6996c673293181bf370bb5330883ed3fde88796319b65358bdbeb"
+    },
+    {
+      "path": "fixtures/negative/host-migration-invalid-source-id.json",
+      "sha256": "0d939c79ccba118ac4105194ba921c9ac9ea8b1d349ddf0e0c3d694c35382230"
+    },
+    {
+      "path": "fixtures/negative/host-migration-legacy-claim-completed.json",
+      "sha256": "ecceb125e6719efb32559501cd73b3ffb062a09e149e02e5d668cd08aa6bc5d5"
+    },
+    {
+      "path": "fixtures/negative/host-migration-legacy-first-wrong-dir.json",
+      "sha256": "53388357643c6755a4e532d15290e133d0869ef0eebe0bec84dbba246a123804"
+    },
+    {
+      "path": "fixtures/negative/host-migration-legacy-query-already.json",
+      "sha256": "f15760d87a9c378478f6fbf1562f9ffd0b6ce4af72cfc1d1d8f06fbd668d3b26"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-finalpath.json",
+      "sha256": "aa01438d8a7765d5b5e6cc5e54f9d0bc88fa7b974114f67d011d6cc0346c58fb"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-incomplete.json",
+      "sha256": "8147a37857ea252f1c6c80718f69a9a4bcd25f5f572e17825586c89c7a73a87e"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-no-namespace.json",
+      "sha256": "d3665bb6ceb3748b0c97322dd14c524ce8bf3fcdb74117898894cf1c39f2a602"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-premature.json",
+      "sha256": "6fc9f5da238f673f370a54a39e73b3dfe805770911bf44e84f23ccb59128154a"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-result.json",
+      "sha256": "ada5543c78c13298cf11fd20e4b6695fd963a47bfcbc426711eab2c5d4fa5730"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-schema.json",
+      "sha256": "b0e5b6e55ab31098c04ab474bb139c1e450be0b575b98d512c4f55bb2e185695"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-source-id.json",
+      "sha256": "3eb5ff5f52363c5ebe03e312361c3e07b0c7fae5e4a9fcdd64f130d87b7f6753"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-source.json",
+      "sha256": "7f41ea565a843d55acfff189238de2b4e8fb0ab320a511c1d8c80362b31d868c"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-without-control.json",
+      "sha256": "e6ea65b36f5f2d00a9efc2d874ba46d4f0ba18a77b0197ae78731f4ad6a66285"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-wrong-fingerprint.json",
+      "sha256": "8d6ea853b0800e91ee7fd022e80016533a97d4b5025f5e1ae403ee9c061d1137"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-wrong-key.json",
+      "sha256": "fea9c7483da4d4e666662b262fe6f8e7132a3cd9d33cc26968394cd721054b30"
+    },
+    {
+      "path": "fixtures/negative/host-migration-marker-wrong-operation.json",
+      "sha256": "a05372519a26e76bc259bbbe55483d3a9546a08e2587d25ccea3ab5c6900383d"
+    },
+    {
+      "path": "fixtures/negative/host-migration-missing-operation.json",
+      "sha256": "615d12d93c212c84609b90fa055c206bd430823171f07e8924cc1a4fcc530768"
+    },
+    {
+      "path": "fixtures/negative/host-migration-name-empty.json",
+      "sha256": "5fadfad4980a91f60581b232cefcc6c03fe0aa52e85e5a536d68484077b013dd"
+    },
+    {
+      "path": "fixtures/negative/host-migration-name-main.json",
+      "sha256": "8b661060183e22e706495a71e6e72a2f4080e271918de35033b9926cdaf31398"
+    },
+    {
+      "path": "fixtures/negative/host-migration-name-parent.json",
+      "sha256": "7cd4313d55c514365f34b7b19346a67a961bd347a8134082139ec3249ecc35e4"
+    },
+    {
+      "path": "fixtures/negative/host-migration-name-slash.json",
+      "sha256": "12381c658c927367e6928c2db6eb287def9d9b9f7f1098afdd500fee8b93da4b"
+    },
+    {
+      "path": "fixtures/negative/host-migration-original-not-preserved.json",
+      "sha256": "b0c60b8d3f67e3d7522a055677ba53e6276abcd6c91dbdd680164b32c3c0b3e8"
+    },
+    {
+      "path": "fixtures/negative/host-migration-original-unknown.json",
+      "sha256": "0a848d1af6c79f298246acba2616cfd66ab769b1f8d0332ab845d9b0ae05d89d"
+    },
+    {
+      "path": "fixtures/negative/host-migration-params-unknown.json",
+      "sha256": "f4262ed4d392405bf46fc030de1fdaa071e3b6f48295df88d67b8e2badcad7e7"
+    },
+    {
+      "path": "fixtures/negative/host-migration-public-http.json",
+      "sha256": "d3d936f2eacef968e713c9ccc1819c942f8d747e32d90939e05c96f797dde70a"
+    },
+    {
+      "path": "fixtures/negative/host-migration-public-response.json",
+      "sha256": "0b4ae65788ef4df33e1160b5075e6694a327fb3a241b5d9fc0179f167d69d81a"
+    },
+    {
+      "path": "fixtures/negative/host-migration-result-account.json",
+      "sha256": "85fbd3e077c279d2e98a72bb128b9452b8f64fb226daa4e306a015f439800257"
+    },
+    {
+      "path": "fixtures/negative/host-migration-result-finalpath.json",
+      "sha256": "aacdf43eea9672b82bf381614a18ef15dd3153a129475307fc2d43c561662002"
+    },
+    {
+      "path": "fixtures/negative/host-migration-result-unknown.json",
+      "sha256": "65cf937ffddf1d0ae15658f0046f644d167103e3b57c74c2b4f52032a513e414"
+    },
+    {
+      "path": "fixtures/negative/host-migration-unknown-finished.json",
+      "sha256": "75a96a2e673ddbcfd9e15c356175da8d88fe94a79c2b097b5aa7a4da8e5333df"
+    },
+    {
+      "path": "fixtures/negative/host-migration-unknown-with-details.json",
+      "sha256": "fae6b4dedb930ca72e4e4efe2e727de8983c829defc4b954563faf3cd2342ae5"
+    },
+    {
+      "path": "fixtures/negative/host-migration-verified-instead-paused.json",
+      "sha256": "957d1a3eabd53677a7ce65dec8e047ee3300e1202a8908aeba6c90e7adf36b30"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-fingerprint.json",
+      "sha256": "a7a3a8307750014a29b66f8395ef7038616de0a8c78afdeaaad702a42920b9b0"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-identity.json",
+      "sha256": "2777592c13dffb1f21f85c57c783f6b86934d8424fcad03fdfb2af2d06de489c"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-key.json",
+      "sha256": "d5a3655ac18381ce1179af01ab57476eab216652c37e234963f4f6daf6e0e2be"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-original-operation.json",
+      "sha256": "341efe2f0a2d1b163eb74f8c837b6ba052581b7ddf647847a9936f63a6dda114"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-profile.json",
+      "sha256": "6b97971479ebe563c33e5a668f9c91df810a2aeb15b3897075263d46173299c6"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-result-identity.json",
+      "sha256": "6f4c82e332c2389925430b11bcf607eebe70e78096dec6504d6cd781e7a8144e"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-root.json",
+      "sha256": "f456a25cc72b3c35589e114d3bf37c726ea688d1a41e1320b5a6528ecf124cf4"
+    },
+    {
+      "path": "fixtures/negative/host-migration-wrong-source-id.json",
+      "sha256": "59f6011986bf3ea732fc46a063a4483854bc309b3f331ee5020ea54f7b096f0e"
     }
   ]
 }

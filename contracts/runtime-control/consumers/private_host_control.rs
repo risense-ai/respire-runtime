@@ -21,6 +21,7 @@ fn pattern_matches(value: &str, pattern: &str) -> bool {
         "^(m3|[a-f0-9]{64})$" => value == "m3" || value.len() == 64 && lower_hex(value),
         "^[0-9a-f]{32}$" => value.len() == 32 && lower_hex(value),
         "^[A-Za-z0-9_.-]+$" => !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+        "^[A-Za-z0-9_-]+$" => !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
         "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" => {
             let parts: Vec<_> = value.split('-').collect();
             parts.len() == 5 && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| p.len() == n && lower_hex(p))
@@ -153,7 +154,7 @@ fn fixed_write_model_failure(payload: &Value, params: &Value, kind: &str, schema
                     || result["outcome"] == "committed" && revoke.is_null()) { return Some("write_identity_mismatch"); }
         } else {
             let committed = result["outcome"] == "committed";
-            if result["source_profile"] != binding["profile"] || !result["target_profile"].is_null() && result["target_profile"] != binding["profile"]
+            if result["verification_required"] == true || result["source_profile"] != binding["profile"] || !result["target_profile"].is_null() && result["target_profile"] != binding["profile"]
                 || committed && (result["target_profile"] != binding["profile"] || after["kind"] != "bound"
                     || result["account_id"] != after["account_id"] || result["session_sha256"] != after["session_sha256"]
                     || result["super_password"].as_str().is_none_or(str::is_empty))
@@ -195,6 +196,96 @@ fn fixed_write_model_failure(payload: &Value, params: &Value, kind: &str, schema
     None
 }
 
+fn key_migration_failure(payload: &Value, params: &Value, kind: &str, schema: &Value) -> Option<&'static str> {
+    let definitions = &schema["$defs"];
+    let (request, result, binding) = (&payload["request"], &payload["result"], &params["binding"]);
+    if kind == "keyResult" && params["operation"]["kind"] == "fivekeys" {
+        let (context, write) = (&payload["key_context"], &payload["write_context"]);
+        if !schema_valid(context, &definitions["keyContext"], definitions)
+            || !schema_valid(write, &definitions["writeContext"], definitions)
+            || write["installation_root"] != binding["installation_root"] || write["source_identity"] != params["source_identity"]
+            || write["operation"] != params["operation"] || write["operation_id"] != request["operation_id"]
+            || write["idempotency_key"] != request["idempotency_key"] || binding["profile"] != context["launch_profile"]
+            || params["identity"] != context["launch_identity"] { return Some("write_context_mismatch"); }
+        // Node/Go hash the producer preimage; this serde-only consumer binds its frozen anchor.
+        if write["fingerprint"] != result["fingerprint"] { return Some("host_fingerprint_mismatch"); }
+        let account = if params["identity"]["kind"] == "bound" { &params["identity"]["account_id"] } else { &Value::Null };
+        if result["operation"] != params["operation"] || result["source_profile"] != write["profile"]
+            || result["identity"] != context["selected_identity"] || binding["expected_account_id"] != *account {
+            return Some("write_identity_mismatch");
+        }
+        let inputs = result["required_inputs"].as_array()?;
+        if !result["super_password"].is_null() || inputs.iter().any(|field|
+            !matches!(field.as_str(), Some("password" | "super_password" | "account_secret" | "totp"))) {
+            return Some("private_secret_exposure");
+        }
+        let applied = result["verification_required"] == true || result["outcome"] == "committed";
+        if applied {
+            if result["target_profile"] != context["target_profile"] || context["selected_profile"] != context["target_profile"]
+                || result["identity"] != context["target_identity"] || result["identity"]["kind"] != "bound"
+                || result["account_id"] != context["target_identity"]["account_id"]
+                || result["session_sha256"] != result["identity"]["session_sha256"] || !inputs.is_empty()
+                || if result["verification_required"] == true { result["outcome"] != "pending" } else { result["outcome"] != "committed" }
+                || result["outcome"] == "committed" && context["verified"] != true
+                || binding["profile"] != write["profile"] && binding["profile"] != context["target_profile"] {
+                return Some("write_identity_mismatch");
+            }
+        } else if !result["account_id"].is_null() || !result["session_sha256"].is_null()
+            || result["identity"] != params["source_identity"] || context["selected_profile"] != write["profile"]
+            || (result["outcome"] == "awaiting_input") != !inputs.is_empty() { return Some("write_identity_mismatch"); }
+        if request["method"] == "control.key.complete" && (!applied || result["outcome"] != "committed" || result["verification_required"] == true || context["verified"] != true
+            || binding["profile"] != context["target_profile"] || params["identity"] != context["target_identity"]
+            || !params["input"].is_null()) { return Some("key_completion_mismatch"); }
+        if context["input_state"] == "initial" && request["method"] == "control.key.fivekeys" && params["input"]["password"].is_null()
+            && !(result["outcome"] == "awaiting_input" && inputs.iter().any(|field| field == "password")) { return Some("key_input_mismatch"); }
+        if context["input_state"] == "continuation" && (payload["original_operation_id"] != request["operation_id"]
+            || !params["input"]["totp"].is_string()) { return Some("key_input_mismatch"); }
+    } else if kind == "migrationResult" {
+        let (original, context) = (&params["original"], &payload["migration_context"]);
+        if !schema_valid(context, &definitions["migrationContext"], definitions) { return Some("migration_context_mismatch"); }
+        if original["operation_id"] != request["operation_id"] || original["key"] != request["idempotency_key"]
+            || original["key"] != original["operation_id"] { return Some("host_operation_mismatch"); }
+        if original["installation_root"] != binding["installation_root"] || original["profile"] != binding["profile"]
+            || original["identity"] != params["identity"] || result["identity"] != original["identity"]
+            || binding["expected_account_id"] != if original["identity"]["kind"] == "bound" { original["identity"]["account_id"].clone() } else { Value::Null }
+            || original["source_id"] != context["source_id"] || original["account"] != context["account"] {
+            return Some("migration_context_mismatch");
+        }
+        let operation: respire_protocol::migration_control::HostMigrationOperation = match serde_json::from_value(original.clone()) {
+            Ok(value) => value, Err(_) => return Some("host_params_invalid"),
+        };
+        if original["fingerprint"] != result["fingerprint"] || operation.fingerprint_bytes().ok().as_deref()
+            != context["fingerprint_preimage"].as_str().map(str::as_bytes) { return Some("host_fingerprint_mismatch"); }
+        let destination = format!("{}/accounts/{}", original["installation_root"].as_str()?, original["account"].as_str()?);
+        let marker = &context["marker"];
+        if result["outcome"] == "completed" {
+            if context["publication"] != "bound" || marker["control"] != *original || marker["schema"] != 2
+                || marker["complete"] != true || marker["namespace_migrated"] != true || marker["original_preserved"] != true
+                || marker["source_identity"] != original["source_id"] || marker["source"] != context["source"]
+                || marker["destination"] != destination || marker["control_result"] != result["details"]
+                || result["details"] != serde_json::json!({"state":"migrated","account":original["account"],"dir":destination,
+                    "source":context["source"],"original_preserved":true}) { return Some("migration_marker_mismatch"); }
+        } else if result["outcome"] == "already_migrated" {
+            if request["method"] != "control.migration.profile" || context["publication"] != "legacy_unbound"
+                || !marker["control"].is_null() || marker["complete"] != true || marker["source_identity"] != original["source_id"]
+                || result["details"]["state"] != "already_migrated" || result["details"]["dir"] != marker["destination"] {
+                return Some("migration_marker_mismatch");
+            }
+        } else if !result["details"].is_null() || context["publication"] == "bound" { return Some("migration_marker_mismatch"); }
+    } else { return None; }
+    let envelope = &payload["private_response"];
+    let rule = if kind == "migrationResult" { "migrationEnvelope" } else { "keyEnvelope" };
+    let status = match result["outcome"].as_str() { Some("unknown") => "fail", Some("pending" | "awaiting_input") => "pending", _ => "ok" };
+    if !schema_valid(envelope, &definitions[rule], definitions) || envelope["status"] != status
+        || envelope["summary"] != *result { return Some("host_result_invalid"); }
+    for (name, status, value) in [("control_ready", "ok", "true"), ("store_ready", "skip", "false")] {
+        let items: Vec<_> = envelope["items"].as_array()?.iter().filter(|item| item["name"] == name).collect();
+        if items.len() != 1 || items[0]["status"] != status || items[0]["value"] != value { return Some("host_result_invalid"); }
+    }
+    if !payload["progress"].is_null() || !payload["ledger"].is_null() { return Some("private_secret_exposure"); }
+    None
+}
+
 fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     if payload["channel"] != "inherited_pipe" { return Some("private_channel_required"); }
     let definitions = &schema["$defs"];
@@ -202,7 +293,7 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let request = &payload["request"];
     let method = request["method"].as_str()?;
     let spec = &schema["x-methods"][method];
-    if matches!(spec["result"].as_str(), Some("secretResult" | "keysExportResult" | "identityWriteResult" | "keyResult"))
+    if matches!(spec["result"].as_str(), Some("secretResult" | "keysExportResult" | "identityWriteResult" | "keyResult" | "migrationResult"))
         && payload.get("public_response").is_some() { return Some("private_secret_exposure"); }
     let mutable = spec["mutable"] == true;
     if mutable && (request["operation_id"].is_null() || request["idempotency_key"].is_null()) { return Some("host_operation_required"); }
@@ -211,6 +302,10 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         Some(params) => params, None => return Some("host_params_invalid"),
     };
     if !schema_valid(&params, &definitions[spec["params"].as_str()?], definitions) { return Some("host_params_invalid"); }
+    if (payload.get("progress").is_some() || payload.get("ledger").is_some()) && spec["result"] != "migrationResult"
+        && !(spec["result"] == "keyResult" && params["operation"]["kind"] == "fivekeys") { return Some("host_request_invalid"); }
+    if spec["params"] == "keyParams" && (method == "control.key.super_reset" && params["operation"]["kind"] != "super_reset"
+        || matches!(method, "control.key.fivekeys" | "control.key.complete") && params["operation"]["kind"] != "fivekeys") { return Some("host_params_invalid"); }
     if spec["params"] == "identityWriteParams" && method != "control.identity.write_result"
         && (method == "control.identity.logout") != (params["operation"]["kind"] == "logout") { return Some("host_params_invalid"); }
     if spec["params"] == "modelMaintenanceParams" && ((params["phase"] == "plan") != params["expected"].is_null()
@@ -220,7 +315,7 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         !params["selection_sha256"].is_null()
     } else { params["selection_sha256"].is_null() } { return Some("host_params_invalid"); }
     let snapshot = method == "control.snapshot_maintenance";
-    let verified = method == "control.auth.account_complete" || snapshot && matches!(params["action"].as_str(), Some("commit" | "release"));
+    let verified = matches!(method, "control.auth.account_complete" | "control.key.complete") || snapshot && matches!(params["action"].as_str(), Some("commit" | "release"));
     if payload["maintenance_phase"] != if verified { "Verified" } else { "Paused" } { return Some("maintenance_phase_mismatch"); }
     if !payload["original_operation_id"].is_null() && payload["original_operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
     if snapshot {
@@ -237,7 +332,9 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let kind = spec["result"].as_str()?;
     if !schema_valid(result, &definitions[kind], definitions) { return Some("host_result_invalid"); }
     if mutable && result["operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
-    if let Some(error) = fixed_write_model_failure(payload, &params, kind, schema) { return Some(error); }
+    let extension = kind == "migrationResult" || kind == "keyResult" && params["operation"]["kind"] == "fivekeys";
+    if let Some(error) = if extension { key_migration_failure(payload, &params, kind, schema) }
+        else { fixed_write_model_failure(payload, &params, kind, schema) } { return Some(error); }
     if matches!(kind, "identityResult" | "configReceipt") {
         let envelope = &payload["private_response"];
         let envelope_kind = if kind == "identityResult" { "identityEnvelope" } else { "configEnvelope" };
@@ -305,6 +402,8 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         }
     }
     let terminal = kind == "accountResult" && matches!(outcome, Some("committed" | "rolled_back"))
+        || extension && if kind == "migrationResult" { matches!(outcome, Some("completed" | "already_migrated")) }
+            else { matches!(outcome, Some("committed" | "rolled_back")) && result["verification_required"] != true }
         || snapshot && matches!(result["state"].as_str(), Some("released" | "rolled_back"));
     if payload["finish_maintenance"] == true && !terminal { return Some("maintenance_not_terminal"); }
     None
@@ -344,8 +443,15 @@ fn producer_types(payload: &Value) -> Result<()> {
         "control.identity.logout" | "control.identity.session_revoke" | "control.identity.write_result" => {
             serde_json::from_value::<respire_protocol::identity_write_control::HostIdentityWriteParams>(params)?;
         }
-        "control.key.super_reset" | "control.key.result" | "control.key.rollback" => {
-            serde_json::from_value::<respire_protocol::key_control::HostKeyParams>(params)?;
+        "control.key.super_reset" | "control.key.fivekeys" | "control.key.complete" | "control.key.result" | "control.key.rollback" => {
+            let parsed: respire_protocol::key_control::HostKeyParams = serde_json::from_value(params.clone())?;
+            if let Some(input) = params.get("input").filter(|value| !value.is_null()) {
+                let input = &input["password"];
+                assert_eq!(parsed.input.as_ref().and_then(|value| value.password.as_deref()), input.as_str());
+            }
+        }
+        "control.migration.profile" | "control.migration.result" => {
+            serde_json::from_value::<respire_protocol::migration_control::HostMigrationParams>(params)?;
         }
         "control.model_maintenance" => {
             serde_json::from_value::<respire_protocol::model_maintenance::ModelMaintenanceParams>(params)?;
@@ -368,8 +474,11 @@ fn producer_types(payload: &Value) -> Result<()> {
             "control.identity.logout" | "control.identity.session_revoke" | "control.identity.write_result" => {
                 serde_json::from_value::<respire_protocol::identity_write_control::HostIdentityWriteResult>(result.clone())?;
             }
-            "control.key.super_reset" | "control.key.result" | "control.key.rollback" => {
+            "control.key.super_reset" | "control.key.fivekeys" | "control.key.complete" | "control.key.result" | "control.key.rollback" => {
                 serde_json::from_value::<respire_protocol::key_control::HostKeyResult>(result.clone())?;
+            }
+            "control.migration.profile" | "control.migration.result" => {
+                serde_json::from_value::<respire_protocol::migration_control::HostMigrationResult>(result.clone())?;
             }
             "control.model_maintenance" => {
                 serde_json::from_value::<respire_protocol::model_maintenance::ModelMaintenanceReceipt>(result.clone())?;
@@ -410,6 +519,10 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
                 | "host-identity-write-argv.json" | "host-identity-write-params-unknown.json" | "host-identity-write-result-unknown.json"
                 | "host-key-write-argv.json" | "host-key-write-params-unknown.json" | "host-key-write-result-unknown.json"
                 | "host-key-write-input-type.json" | "host-key-write-input-unknown.json"
+                | "host-fivekeys-input-unknown.json" | "host-fivekeys-input-totp-type.json"
+                | "host-fivekeys-input-secret-type.json" | "host-fivekeys-operation-unknown.json"
+                | "host-fivekeys-result-unknown.json" | "host-fivekeys-params-unknown.json"
+                | "host-migration-params-unknown.json" | "host-migration-original-unknown.json" | "host-migration-result-unknown.json"
                 | "host-model-maintenance-argv.json" | "host-model-maintenance-params-unknown.json"
                 | "host-model-maintenance-result-unknown.json" | "host-model-maintenance-secret.json")) {
                 assert!(producer_types(&fixture["payload"]).is_err(), "{path}: DTO must reject invalid fields");
@@ -417,6 +530,6 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
             count += 1;
         }
     }
-    assert_eq!(count, 204);
+    assert_eq!(count, 303);
     Ok(())
 }

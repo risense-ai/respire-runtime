@@ -1,0 +1,112 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "42345678-1234-4234-b234-123456789abc",
+      "method": "control.migration.profile",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"original\":{\"schema_version\":1,\"operation_id\":\"42345678-1234-4234-b234-123456789abc\",\"key\":\"42345678-1234-4234-b234-123456789abc\",\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_id\":\"07ad390c2fce17bb3d94da15a37c243a8119e7476c89505203561723f8486d9c\",\"account\":\"imported-fixture\",\"fingerprint\":\"c16291c6a0e0a08585021d0097fd4bc289a3706b54868d045b301bf64b523904\"}}"
+      ]
+    },
+    "finish_maintenance": true,
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "c16291c6a0e0a08585021d0097fd4bc289a3706b54868d045b301bf64b523904",
+      "identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "outcome": "completed",
+      "details": {
+        "state": "migrated",
+        "account": "imported-fixture",
+        "dir": "/isolated/root/accounts/imported-fixture",
+        "source": "/isolated/home/.respire/accounts/legacy",
+        "original_preserved": true
+      }
+    },
+    "private_response": {
+      "command": "migration-control",
+      "status": "ok",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "c16291c6a0e0a08585021d0097fd4bc289a3706b54868d045b301bf64b523904",
+        "identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outcome": "completed",
+        "details": {
+          "state": "migrated",
+          "account": "imported-fixture",
+          "dir": "/isolated/root/accounts/imported-fixture",
+          "source": "/isolated/home/.respire/accounts/legacy",
+          "original_preserved": true
+        }
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "migration_context": {
+      "source_id": "07ad390c2fce17bb3d94da15a37c243a8119e7476c89505203561723f8486d9c",
+      "source": "/isolated/home/.respire/accounts/legacy",
+      "account": "imported-fixture",
+      "publication": "bound",
+      "marker": {
+        "schema": 2,
+        "complete": true,
+        "source_identity": "07ad390c2fce17bb3d94da15a37c243a8119e7476c89505203561723f8486d9c",
+        "source": "/isolated/home/.respire/accounts/legacy",
+        "destination": "/isolated/root/accounts/imported-fixture",
+        "namespace_migrated": true,
+        "original_preserved": true,
+        "control": {
+          "schema_version": 1,
+          "operation_id": "42345678-1234-4234-b234-123456789abc",
+          "key": "42345678-1234-4234-b234-123456789abc",
+          "installation_root": "/isolated/root",
+          "profile": "/isolated/root/profile",
+          "identity": {
+            "kind": "bound",
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "source_id": "07ad390c2fce17bb3d94da15a37c243a8119e7476c89505203561723f8486d9c",
+          "account": "imported-fixture",
+          "fingerprint": "c16291c6a0e0a08585021d0097fd4bc289a3706b54868d045b301bf64b523904"
+        },
+        "control_result": {
+          "state": "migrated",
+          "account": "imported-fixture",
+          "dir": "/isolated/root/accounts/imported-fixture",
+          "source": "/isolated/home/.respire/accounts/legacy",
+          "original_preserved": true
+        }
+      },
+      "fingerprint_preimage": "[1,\"control.migration.profile\",\"/isolated/root\",\"/isolated/root/profile\",{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"07ad390c2fce17bb3d94da15a37c243a8119e7476c89505203561723f8486d9c\",\"imported-fixture\"]"
+    }
+  },
+  "error_code": "migration_context_mismatch"
+}
