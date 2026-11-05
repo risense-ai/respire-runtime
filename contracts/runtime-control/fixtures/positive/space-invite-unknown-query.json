@@ -1,0 +1,121 @@
+{
+  "fixture_type": "private_space_control",
+  "expected": "accept",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "method": "control.space.result",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"invite\",\"note\":\"fixture\",\"readonly\":true},\"invite_code\":null}"
+      ]
+    },
+    "finish_maintenance": false,
+    "space_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "invite",
+        "note": "fixture",
+        "readonly": true
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+      "fingerprint_preimage": "{\"method\":\"control.space\",\"operation\":{\"kind\":\"invite\",\"note\":\"fixture\",\"readonly\":true},\"profile\":\"/isolated/root/profile\",\"root\":\"/isolated/root\",\"schema_version\":1,\"source_identity\":{\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"kind\":\"bound\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}",
+      "selected_profile": "/isolated/root/profile",
+      "journal_phase": "remote_unknown",
+      "target_profile": null,
+      "target_account_id": null,
+      "target_session_sha256": null,
+      "readonly_team": null,
+      "kick_targets": [],
+      "previous_kick": [],
+      "remote_posts": []
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+      "profile": "/isolated/root/profile",
+      "identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "invite",
+        "note": "fixture",
+        "readonly": true
+      },
+      "outcome": "unknown",
+      "invite_code": null,
+      "session_id": null,
+      "target_profile": null,
+      "target_account_id": null,
+      "target_session_sha256": null,
+      "kick": [],
+      "remaining": null
+    },
+    "private_response": {
+      "command": "space-control",
+      "status": "fail",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+        "profile": "/isolated/root/profile",
+        "identity": {
+          "kind": "bound",
+          "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "operation": {
+          "kind": "invite",
+          "note": "fixture",
+          "readonly": true
+        },
+        "outcome": "unknown",
+        "invite_code": null,
+        "session_id": null,
+        "target_profile": null,
+        "target_account_id": null,
+        "target_session_sha256": null,
+        "kick": [],
+        "remaining": null
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "ledger": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+      "outcome": "unknown"
+    },
+    "progress": {
+      "outcome": "unknown"
+    }
+  }
+}

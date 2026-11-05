@@ -25,6 +25,65 @@ fn isolated_command(models: Option<&std::path::Path>) -> std::io::Result<Command
 }
 
 #[test]
+fn space_create_list_use_remove() -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::Value;
+
+    let home = tempfile::tempdir()?;
+    let root = home.path().join(".rsrs");
+    std::fs::create_dir(&root)?;
+    support::install_runtime_fixture(&root)?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let invoke = |args: &[&str]| -> std::io::Result<Output> {
+        isolated_command(None)?
+            .arg("--json")
+            .args(args)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("RSRS_DATA_DIR", &root)
+            .env("RSRS_BIN_DIR", root.join("bin"))
+            .env("RSRS_M3_DIR", root.join("absent-model"))
+            .env("RSRS_RPC_PORT", port.to_string())
+            .env("RSRS_NO_AUTOSYNC", "1")
+            .env("RSRS_UPDATE_CHECK", "0")
+            .env("RSRS_CORE_TEST_MODE", "1")
+            .env_remove("RSRS_RUNTIME_BIN")
+            .output()
+    };
+    let success = |args: &[&str]| -> Result<Value, Box<dyn std::error::Error>> {
+        let output = invoke(args)?;
+        assert!(
+            output.status.success(),
+            "space command {args:?} failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+
+    assert!(!invoke(&["space", "create", "main"])?.status.success());
+    let created = success(&["space", "create", "team_a"])?;
+    assert_eq!(created["summary"]["name"], "team_a");
+    let listed = success(&["space", "list"])?;
+    let spaces = listed["details"]["spaces"]
+        .as_array()
+        .ok_or("space listing must contain its profile array")?;
+    assert!(spaces.iter().any(|space| space["name"] == "team_a"));
+    assert!(!invoke(&["space", "use", "missing"])?.status.success());
+    let used = success(&["space", "use", "main"])?;
+    assert_eq!(used["summary"]["name"], "main");
+    success(&["space", "use", "team_a"])?;
+    assert!(
+        !invoke(&["space", "remove", "team_a", "--yes"])?.status.success(),
+        "cannot remove current space"
+    );
+    success(&["space", "use", "main"])?;
+    success(&["space", "remove", "team_a", "--yes"])?;
+    Ok(())
+}
+
+#[test]
 fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::Error>> {
     use serde_json::{json, Value};
     let home = tempfile::tempdir()?;

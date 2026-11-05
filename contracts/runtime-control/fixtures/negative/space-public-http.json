@@ -1,0 +1,113 @@
+{
+  "fixture_type": "private_space_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "public_http",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "method": "control.space.invite",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"invite\",\"note\":\"fixture\",\"readonly\":true},\"invite_code\":null}"
+      ]
+    },
+    "finish_maintenance": false,
+    "space_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "invite",
+        "note": "fixture",
+        "readonly": true
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+      "fingerprint_preimage": "{\"method\":\"control.space\",\"operation\":{\"kind\":\"invite\",\"note\":\"fixture\",\"readonly\":true},\"profile\":\"/isolated/root/profile\",\"root\":\"/isolated/root\",\"schema_version\":1,\"source_identity\":{\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"kind\":\"bound\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}",
+      "selected_profile": "/isolated/root/profile",
+      "journal_phase": "committed",
+      "target_profile": null,
+      "target_account_id": null,
+      "target_session_sha256": null,
+      "readonly_team": null,
+      "kick_targets": [],
+      "previous_kick": [],
+      "remote_posts": []
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+      "profile": "/isolated/root/profile",
+      "identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "invite",
+        "note": "fixture",
+        "readonly": true
+      },
+      "outcome": "committed",
+      "invite_code": "1mem-invite:7b227370616365223a2270726f66696c65222c2261646472223a2268747470733a2f2f6e657665722d636f6e746163742e696e76616c6964222c2275736572223a2273706163652d6f776e65722d66697874757265222c22746f6b656e223a2273796e7468657469632d756e757365642d6d656d6265722d746f6b656e222c2273657373696f6e5f6964223a2231313131313131312d323232322d343333332d383434342d353535353535353535353535222c227375706572223a2273796e7468657469632d756e757365642d73706163652d666163746f72222c22726561646f6e6c79223a747275652c22636f6e74726f6c5f6f7065726174696f6e5f6964223a2234323334353637382d313233342d343233342d623233342d313233343536373839616263222c22636f6e74726f6c5f66696e6765727072696e74223a2238666637363933363664623765613230363236653366633232346163616263383239373866313565356235303961356265623566373566613538376234656435227d",
+      "session_id": "11111111-2222-4333-8444-555555555555",
+      "target_profile": null,
+      "target_account_id": null,
+      "target_session_sha256": null,
+      "kick": [],
+      "remaining": 1
+    },
+    "private_response": {
+      "command": "space-control",
+      "status": "ok",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "8ff769366db7ea20626e3fc224acabc82978f15e5b509a5beb5f75fa587b4ed5",
+        "profile": "/isolated/root/profile",
+        "identity": {
+          "kind": "bound",
+          "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "operation": {
+          "kind": "invite",
+          "note": "fixture",
+          "readonly": true
+        },
+        "outcome": "committed",
+        "invite_code": "1mem-invite:7b227370616365223a2270726f66696c65222c2261646472223a2268747470733a2f2f6e657665722d636f6e746163742e696e76616c6964222c2275736572223a2273706163652d6f776e65722d66697874757265222c22746f6b656e223a2273796e7468657469632d756e757365642d6d656d6265722d746f6b656e222c2273657373696f6e5f6964223a2231313131313131312d323232322d343333332d383434342d353535353535353535353535222c227375706572223a2273796e7468657469632d756e757365642d73706163652d666163746f72222c22726561646f6e6c79223a747275652c22636f6e74726f6c5f6f7065726174696f6e5f6964223a2234323334353637382d313233342d343233342d623233342d313233343536373839616263222c22636f6e74726f6c5f66696e6765727072696e74223a2238666637363933363664623765613230363236653366633232346163616263383239373866313565356235303961356265623566373566613538376234656435227d",
+        "session_id": "11111111-2222-4333-8444-555555555555",
+        "target_profile": null,
+        "target_account_id": null,
+        "target_session_sha256": null,
+        "kick": [],
+        "remaining": 1
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    }
+  },
+  "error_code": "private_channel_required"
+}

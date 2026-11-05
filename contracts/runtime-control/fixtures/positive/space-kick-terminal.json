@@ -1,0 +1,146 @@
+{
+  "fixture_type": "private_space_control",
+  "expected": "accept",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "method": "control.space.kick",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"kick\",\"session_id\":null,\"all\":true},\"invite_code\":null}"
+      ]
+    },
+    "finish_maintenance": false,
+    "space_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "kick",
+        "session_id": null,
+        "all": true
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "fingerprint": "e349bf9e60eb69187ae361787b632e71f0b8e4f230e1d0c0d2dc3bfdb32364bf",
+      "fingerprint_preimage": "{\"method\":\"control.space\",\"operation\":{\"all\":true,\"kind\":\"kick\",\"session_id\":null},\"profile\":\"/isolated/root/profile\",\"root\":\"/isolated/root\",\"schema_version\":1,\"source_identity\":{\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"kind\":\"bound\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}",
+      "selected_profile": "/isolated/root/profile",
+      "journal_phase": "committed",
+      "target_profile": null,
+      "target_account_id": null,
+      "target_session_sha256": null,
+      "readonly_team": null,
+      "kick_targets": [
+        "11111111-2222-4333-8444-555555555555",
+        "21111111-2222-4333-8444-555555555555",
+        "31111111-2222-4333-8444-555555555555"
+      ],
+      "previous_kick": [],
+      "remote_posts": [
+        "11111111-2222-4333-8444-555555555555",
+        "21111111-2222-4333-8444-555555555555",
+        "31111111-2222-4333-8444-555555555555"
+      ]
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "e349bf9e60eb69187ae361787b632e71f0b8e4f230e1d0c0d2dc3bfdb32364bf",
+      "profile": "/isolated/root/profile",
+      "identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "kick",
+        "session_id": null,
+        "all": true
+      },
+      "outcome": "committed",
+      "invite_code": null,
+      "session_id": null,
+      "target_profile": null,
+      "target_account_id": null,
+      "target_session_sha256": null,
+      "kick": [
+        {
+          "session_id": "11111111-2222-4333-8444-555555555555",
+          "state": "revoked"
+        },
+        {
+          "session_id": "21111111-2222-4333-8444-555555555555",
+          "state": "absent"
+        },
+        {
+          "session_id": "31111111-2222-4333-8444-555555555555",
+          "state": "rejected"
+        }
+      ],
+      "remaining": 2
+    },
+    "private_response": {
+      "command": "space-control",
+      "status": "ok",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "e349bf9e60eb69187ae361787b632e71f0b8e4f230e1d0c0d2dc3bfdb32364bf",
+        "profile": "/isolated/root/profile",
+        "identity": {
+          "kind": "bound",
+          "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "operation": {
+          "kind": "kick",
+          "session_id": null,
+          "all": true
+        },
+        "outcome": "committed",
+        "invite_code": null,
+        "session_id": null,
+        "target_profile": null,
+        "target_account_id": null,
+        "target_session_sha256": null,
+        "kick": [
+          {
+            "session_id": "11111111-2222-4333-8444-555555555555",
+            "state": "revoked"
+          },
+          {
+            "session_id": "21111111-2222-4333-8444-555555555555",
+            "state": "absent"
+          },
+          {
+            "session_id": "31111111-2222-4333-8444-555555555555",
+            "state": "rejected"
+          }
+        ],
+        "remaining": 2
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    }
+  }
+}

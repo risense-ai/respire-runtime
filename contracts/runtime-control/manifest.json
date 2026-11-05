@@ -1908,6 +1908,181 @@
     {
       "path": "fixtures/negative/host-migration-wrong-source-id.json",
       "sha256": "59f6011986bf3ea732fc46a063a4483854bc309b3f331ee5020ea54f7b096f0e"
+    },
+    {
+      "path": "schema/space-control.schema.json",
+      "sha256": "e71a2a3eaa439433f140418b206b2c2f035d9a5015aaeffd2b18d2a68b0ad725"
+    },
+    {
+      "path": "fixtures/positive/space-invite-private.json",
+      "sha256": "e62d7d240b696125d598f09eba733422e1b6136c3835f9ff525418672dd50fbe"
+    },
+    {
+      "path": "fixtures/positive/space-invite-unknown-query.json",
+      "sha256": "35ca094c3750d3644d99c33251b69ac37936f11ade116c872a0468cffb1991c7"
+    },
+    {
+      "path": "fixtures/positive/space-join-readonly.json",
+      "sha256": "932cb112a54493d63ed761f65b418e5ef9f512224b829f3177623facd48554fc"
+    },
+    {
+      "path": "fixtures/positive/space-join-pending.json",
+      "sha256": "60c0cb0d9621632c105ecd8845784f5b18812b76c23735c7b05fbca0716087b6"
+    },
+    {
+      "path": "fixtures/positive/space-kick-partial-query.json",
+      "sha256": "b20c32fe159201e5ca37cf99445122e4290423e4b2db75547cea3d34b8e9b01c"
+    },
+    {
+      "path": "fixtures/positive/space-kick-terminal.json",
+      "sha256": "14f545821f21d5bdf30c3b707eb95ea86c22cb53ced227f4eafb5b0a6bb08c29"
+    },
+    {
+      "path": "fixtures/positive/space-rejected-query.json",
+      "sha256": "be923f3e5d0900b13c344fbf0b34db9f8848f39c6dd0c0b40721eaa815530591"
+    },
+    {
+      "path": "fixtures/negative/space-public-http.json",
+      "sha256": "d84b4c0aee759099353dd3f938aae6730ed21ad3977fa71089dafc8ae99aae3b"
+    },
+    {
+      "path": "fixtures/negative/space-public-result.json",
+      "sha256": "476d2b5e5b95e42b77d4b2f966b8ff069d9dab3562509a3d29923a54a11377e7"
+    },
+    {
+      "path": "fixtures/negative/space-secret-ledger.json",
+      "sha256": "67f2e7943ec748ec088129eda3fff7bac340c4a50f030aafead8a0c19c504914"
+    },
+    {
+      "path": "fixtures/negative/space-secret-progress.json",
+      "sha256": "b6be18738fe8a62d27e66b47e070af0ff94c111f9c4a72c76281e4163767102a"
+    },
+    {
+      "path": "fixtures/negative/space-params-unknown.json",
+      "sha256": "cf3596b1d7a1db98572ac20da03c754a05a862344e0a6169626e87307f58454f"
+    },
+    {
+      "path": "fixtures/negative/space-result-unknown.json",
+      "sha256": "358fd5838618f51cfe86ca5eab897d89f43cedeaf768e9779dfdff0126d13729"
+    },
+    {
+      "path": "fixtures/negative/space-operation-unknown.json",
+      "sha256": "5b0b1d82a26af4e557ae3e61aef4eccec6a920eedbc5af65c5c383a09bdc1694"
+    },
+    {
+      "path": "fixtures/negative/space-bad-operation-id.json",
+      "sha256": "ac54e8047416cbb11e307e699be103ea43c82dc6c7d0b209e27381951e55594e"
+    },
+    {
+      "path": "fixtures/negative/space-missing-key.json",
+      "sha256": "161a0581ba783caf3cf6dccf98f103e04c41ac61b8c1f68f2598146d207ee480"
+    },
+    {
+      "path": "fixtures/negative/space-business-scope.json",
+      "sha256": "d49876ec1c1badf9180df2931a2a397ef65b2e2244fefe4db85ff8d99bb886ba"
+    },
+    {
+      "path": "fixtures/negative/space-method-intent.json",
+      "sha256": "92c962ab21cd0a7b73e8d1006419d24cac2c669f655a2505fec2893a6aa10f06"
+    },
+    {
+      "path": "fixtures/negative/space-wrong-key-recovery.json",
+      "sha256": "f9f31a0dc824339ef7ba49bf42ba3cea2b5de58cfac6fe41a6f34b38e86905a9"
+    },
+    {
+      "path": "fixtures/negative/space-wrong-result-operation.json",
+      "sha256": "21ba51c0b904a054f94ae262b508fd1a623540394271c03d06ac6f73a106b12b"
+    },
+    {
+      "path": "fixtures/negative/space-fingerprint.json",
+      "sha256": "febfa3241da913baab60d02aebb1fc205baac9353984d7471d82356854eea3d8"
+    },
+    {
+      "path": "fixtures/negative/space-join-code-intent.json",
+      "sha256": "3db2dacbf547c73b249a1e2fe3b34a88d336518c00732b8415fe501398e47bc5"
+    },
+    {
+      "path": "fixtures/negative/space-join-switch.json",
+      "sha256": "312b244ceefdcc3e002545667e72eaaa2d27f0c246b857bb45a02b2108620096"
+    },
+    {
+      "path": "fixtures/negative/space-join-readonly-gate.json",
+      "sha256": "6412c8a06e856407a2a5c2296f7ec68d880db25d62c86649efee58da6475e6da"
+    },
+    {
+      "path": "fixtures/negative/space-join-session-digest.json",
+      "sha256": "706019a49e0b1f864078fe4acbd42c7043db37d5130c321400e395bfcbd8e6a8"
+    },
+    {
+      "path": "fixtures/negative/space-kick-dropped-partial.json",
+      "sha256": "2d13a17b5964510fd533969831f530186bca8621d61cbbf4b75dca7d99b9aa46"
+    },
+    {
+      "path": "fixtures/negative/space-unknown-as-committed.json",
+      "sha256": "1577f21fc9b8de29847d9a4ca3ce31707def6c4aa59676bfd14477e9cea67d26"
+    },
+    {
+      "path": "fixtures/negative/space-kick-query-reposts.json",
+      "sha256": "a195d52f8b77eba02bf0890ee82bc196c8a792d870efcf8896d3d66804761a9b"
+    },
+    {
+      "path": "fixtures/negative/space-kick-history-rewrite.json",
+      "sha256": "26c556ba01e05a480ed1a01b305b22583efebfbc2876128b348e426c07b0ff7c"
+    },
+    {
+      "path": "fixtures/negative/space-unknown-finishes.json",
+      "sha256": "eb83311722ae139d13806df9831648d9d5738949758fd3abb190e7480cde233f"
+    },
+    {
+      "path": "fixtures/negative/space-pending-private-secret.json",
+      "sha256": "922e0301152f32abbdeede5ad3ea112afe165132eadf7e4c17a5311efc7e2557"
+    },
+    {
+      "path": "consumers/space_control.rs",
+      "sha256": "471cebc05256235dceb0402affe757af2b9501a0344eb686e617b0266e95c2ba"
     }
-  ]
+  ],
+  "extensions": {
+    "space": {
+      "schema": "schema/space-control.schema.json",
+      "consumer": "consumers/space_control.rs",
+      "fixtures": {
+        "positive": [
+          "fixtures/positive/space-invite-private.json",
+          "fixtures/positive/space-invite-unknown-query.json",
+          "fixtures/positive/space-join-readonly.json",
+          "fixtures/positive/space-join-pending.json",
+          "fixtures/positive/space-kick-partial-query.json",
+          "fixtures/positive/space-kick-terminal.json",
+          "fixtures/positive/space-rejected-query.json"
+        ],
+        "negative": [
+          "fixtures/negative/space-public-http.json",
+          "fixtures/negative/space-public-result.json",
+          "fixtures/negative/space-secret-ledger.json",
+          "fixtures/negative/space-secret-progress.json",
+          "fixtures/negative/space-params-unknown.json",
+          "fixtures/negative/space-result-unknown.json",
+          "fixtures/negative/space-operation-unknown.json",
+          "fixtures/negative/space-bad-operation-id.json",
+          "fixtures/negative/space-missing-key.json",
+          "fixtures/negative/space-business-scope.json",
+          "fixtures/negative/space-method-intent.json",
+          "fixtures/negative/space-wrong-key-recovery.json",
+          "fixtures/negative/space-wrong-result-operation.json",
+          "fixtures/negative/space-fingerprint.json",
+          "fixtures/negative/space-join-code-intent.json",
+          "fixtures/negative/space-join-switch.json",
+          "fixtures/negative/space-join-readonly-gate.json",
+          "fixtures/negative/space-join-session-digest.json",
+          "fixtures/negative/space-kick-dropped-partial.json",
+          "fixtures/negative/space-unknown-as-committed.json",
+          "fixtures/negative/space-kick-query-reposts.json",
+          "fixtures/negative/space-kick-history-rewrite.json",
+          "fixtures/negative/space-unknown-finishes.json",
+          "fixtures/negative/space-pending-private-secret.json"
+        ]
+      }
+    }
+  }
 }

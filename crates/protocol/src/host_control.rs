@@ -98,6 +98,33 @@ pub struct HostAuthKeygenParams {
     pub force: bool,
 }
 
+/// Fixed private recovery only; no business operation or credential is accepted.
+pub const HOST_LOGIN_RECOVERY_STATUS_METHOD: &str = "control.auth.recovery_status";
+pub const HOST_LOGIN_RECOVERY_METHOD: &str = "control.auth.recover_legacy";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLoginRecoveryParams {
+    pub schema_version: u32,
+    pub binding: ControlBinding,
+    pub identity: HostAuthIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostLoginRecoveryState {
+    Clear,
+    LegacyPending,
+    OperationPending,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLoginRecoveryResult {
+    pub state: HostLoginRecoveryState,
+    pub recovered: bool,
+}
+
 pub const HOST_AUTH_SCHEMA_V: u32 = 1;
 pub const HOST_AUTH_KEYGEN_METHOD: &str = "control.auth.keygen";
 pub const HOST_AUTH_RESULT_METHOD: &str = "control.auth.result";

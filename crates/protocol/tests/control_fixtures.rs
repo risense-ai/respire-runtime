@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 mod private_host_control {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/runtime-control/consumers/private_host_control.rs"));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/runtime-control/consumers/space_control.rs"));
 }
 
 #[test]
@@ -299,6 +300,7 @@ fn manifest_lists_the_frozen_fixture_sets() -> Result<()> {
     assert_eq!(negative.len(), 287);
     assert_eq!(manifest["contract"], "runtime-control");
     assert_eq!(manifest["release_metadata_schema_version"], 2);
+    private_host_control::space_contract_fixtures()?;
     Ok(())
 }
 

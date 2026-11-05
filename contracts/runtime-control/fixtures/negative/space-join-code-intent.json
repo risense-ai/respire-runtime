@@ -1,0 +1,122 @@
+{
+  "fixture_type": "private_space_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "method": "control.space.join",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"join\",\"invite_sha256\":\"31bbbad7e8a019147c1edc52e7d42bb238a28fbcdf867fe4a97a96f371842124\",\"space\":\"joined-space\",\"addr\":\"https://never-contact.invalid\",\"user\":\"space-member-fixture\",\"readonly\":true},\"invite_code\":\"1mem-invite:00\"}"
+      ]
+    },
+    "finish_maintenance": false,
+    "space_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "join",
+        "invite_sha256": "31bbbad7e8a019147c1edc52e7d42bb238a28fbcdf867fe4a97a96f371842124",
+        "space": "joined-space",
+        "addr": "https://never-contact.invalid",
+        "user": "space-member-fixture",
+        "readonly": true
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "space-original-key",
+      "fingerprint": "0afd49298d898cdac44491125c79e4cde9dc21f2dd24078ea03e15bca09f95ac",
+      "fingerprint_preimage": "{\"method\":\"control.space\",\"operation\":{\"addr\":\"https://never-contact.invalid\",\"invite_sha256\":\"31bbbad7e8a019147c1edc52e7d42bb238a28fbcdf867fe4a97a96f371842124\",\"kind\":\"join\",\"readonly\":true,\"space\":\"joined-space\",\"user\":\"space-member-fixture\"},\"profile\":\"/isolated/root/profile\",\"root\":\"/isolated/root\",\"schema_version\":1,\"source_identity\":{\"account_id\":\"61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed\",\"kind\":\"bound\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}",
+      "selected_profile": "/isolated/root/profile",
+      "journal_phase": "committed",
+      "target_profile": "/isolated/root/accounts/joined-space",
+      "target_account_id": "06a62b173d70ee4e8974d6468f36243da64eccc72edc834a4dc0d4497f3116d9",
+      "target_session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "readonly_team": true,
+      "kick_targets": [],
+      "previous_kick": [],
+      "remote_posts": []
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "0afd49298d898cdac44491125c79e4cde9dc21f2dd24078ea03e15bca09f95ac",
+      "profile": "/isolated/root/profile",
+      "identity": {
+        "kind": "bound",
+        "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "join",
+        "invite_sha256": "31bbbad7e8a019147c1edc52e7d42bb238a28fbcdf867fe4a97a96f371842124",
+        "space": "joined-space",
+        "addr": "https://never-contact.invalid",
+        "user": "space-member-fixture",
+        "readonly": true
+      },
+      "outcome": "committed",
+      "invite_code": null,
+      "session_id": null,
+      "target_profile": "/isolated/root/accounts/joined-space",
+      "target_account_id": "06a62b173d70ee4e8974d6468f36243da64eccc72edc834a4dc0d4497f3116d9",
+      "target_session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "kick": [],
+      "remaining": null
+    },
+    "private_response": {
+      "command": "space-control",
+      "status": "ok",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "0afd49298d898cdac44491125c79e4cde9dc21f2dd24078ea03e15bca09f95ac",
+        "profile": "/isolated/root/profile",
+        "identity": {
+          "kind": "bound",
+          "account_id": "61090a3e4186a01352e258f291eae730b211e084e579c467ccf6611cb01fefed",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "operation": {
+          "kind": "join",
+          "invite_sha256": "31bbbad7e8a019147c1edc52e7d42bb238a28fbcdf867fe4a97a96f371842124",
+          "space": "joined-space",
+          "addr": "https://never-contact.invalid",
+          "user": "space-member-fixture",
+          "readonly": true
+        },
+        "outcome": "committed",
+        "invite_code": null,
+        "session_id": null,
+        "target_profile": "/isolated/root/accounts/joined-space",
+        "target_account_id": "06a62b173d70ee4e8974d6468f36243da64eccc72edc834a4dc0d4497f3116d9",
+        "target_session_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "kick": [],
+        "remaining": null
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    }
+  },
+  "error_code": "space_join_mismatch"
+}

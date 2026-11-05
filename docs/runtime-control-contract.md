@@ -553,3 +553,37 @@ it adds no hash/native dependency to the serde-only protocol crate. All source
 paths and identities are synthetic anchors, not filesystem discovery evidence.
 No fixture executes keyring, network, TOTP, native launch, CAS, rollback, owner
 restoration or timeout behavior. These checks are not G1/native acceptance.
+
+## Frozen private space-control extension
+
+All original 380 bound files, fixture bytes and assertions remain unchanged.
+The additive space extension binds 31 fixtures (7 positive / 24 negative), one
+schema and one shared Rust consumer: 413 bound files in total. The original
+89/287 fixture lists are retained; new lists live under extensions.space.
+
+The closed methods are control.space.invite, control.space.join,
+control.space.kick and control.space.result. Strict DTOs reject extra fields,
+invalid UUID/O/key, business scope and mismatched method/intent. Private input
+and result material must stay on the inherited channel. Invite codes must not
+appear in public responses, ledger or progress; all fixture secrets are synthetic.
+Unknown remains Unknown (a Fail envelope), never Committed. Pending uses Pending.
+Only a terminal receipt may finish the declared maintenance phase; control_ready
+is true and store_ready is false throughout this private operation.
+
+The original O/key, source identity, installation root, source profile, intent
+and fingerprint remain fixed on result queries. Join preserves the selected
+source profile, binds the exact target account/session digest, and retains the
+readonly invitation intent in readonly_team. Kick keeps every ordered partial
+result. A result query declares no remote POST; confirmed revocations cannot be
+rewritten and remote-pending/unknown rows cannot become success on recovery.
+The all-members kick fixture accounts for remaining members, including unknown,
+queued, absent and rejected rows; it does not generalize that count to single kick.
+
+Node and Go recompute SHA-256 fingerprints, invitation digests and account IDs.
+Rust deserializes the real protocol DTOs, checks the fingerprint preimage and
+digest anchors, and rejects unknown fields without adding a hashing dependency.
+Context, previous_kick and remote_posts are synthetic assertions, not runtime
+observations. Schema/consumer success does not prove a consumed grant, parent
+revocation, credential durability, remote idempotency, filesystem publication,
+no network replay or native execution. Those still need exact-source CI and
+private-control integration evidence. No localaccount/profile draft is included.
