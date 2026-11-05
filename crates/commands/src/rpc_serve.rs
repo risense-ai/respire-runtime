@@ -308,6 +308,19 @@ impl Drop for AdmissionGuard {
     }
 }
 
+fn background_paused_at(root: &std::path::Path) -> bool {
+    // The standalone host has no CLI hook; persisted maintenance still fences it.
+    crate::host_hooks::background_paused()
+        || !matches!(
+            std::fs::symlink_metadata(root.join("runtime/autostart/maintenance.json")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+}
+
+fn background_paused() -> bool {
+    background_paused_at(&respire_app::service::main_data_dir())
+}
+
 pub(crate) fn begin_admission(operation_id: String, kind: &'static str) -> Option<AdmissionGuard> {
     let mut admitted = ADMISSIONS.lock().ok()?;
     if STOPPING.load(Ordering::Acquire) {
@@ -478,7 +491,7 @@ fn start_profile_switch(
     identity: &OperationIdentity,
 ) -> Result<RpcResponse> {
     anyhow::ensure!(
-        !respire_app::service::service_paused() && !crate::host_hooks::background_paused(),
+        !respire_app::service::service_paused() && !background_paused(),
         "model switching is paused by service mode"
     );
     start_profile_switch_target(respire_app::embedding::select(choice)?, request, identity)
@@ -489,7 +502,7 @@ fn start_profile_switch_target(
     identity: &OperationIdentity,
 ) -> Result<RpcResponse> {
     anyhow::ensure!(
-        !respire_app::service::service_paused() && !crate::host_hooks::background_paused(),
+        !respire_app::service::service_paused() && !background_paused(),
         "model switching is paused by service mode"
     );
     target.validate()?;
@@ -707,7 +720,7 @@ fn flight_loop() {
                     FLIGHT_ON.store(false, Ordering::Release);
                     return;
                 }
-                if crate::host_hooks::background_paused() {
+                if background_paused() {
                     state = SYNC_CV
                         .wait_timeout(state, Duration::from_millis(250))
                         .unwrap_or_else(|e| e.into_inner())
@@ -1048,7 +1061,7 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         return error_response(&request, &code, &error);
     }
     if matches!(request.method.as_str(), "model.prepare" | "index.prepare")
-        && crate::host_hooks::background_paused()
+        && background_paused()
     {
         return error_response(
             &request,
@@ -1697,7 +1710,7 @@ fn run_prepare(prepare: PrepareJob) {
         validate_job_scope(&job.scope).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!STOPPING.load(Ordering::Acquire), "runtime is stopping");
         anyhow::ensure!(
-            !respire_app::service::service_paused() && !crate::host_hooks::background_paused(),
+            !respire_app::service::service_paused() && !background_paused(),
             "model preparation is paused by service mode"
         );
         let _task = crate::model_progress::TaskScope::new(Some(operation_id.clone()));
