@@ -601,7 +601,7 @@ pub mod onnx {
         Ok(())
     }
 
-    fn inference_config_lock() -> Result<std::fs::File> {
+    pub(crate) fn inference_config_lock() -> Result<std::fs::File> {
         let directory = settings_dir();
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("inference.json.lock");
@@ -623,7 +623,6 @@ pub mod onnx {
     pub fn load_selection(engine: Engine, variant: &str) -> Result<Value> {
         anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
-        let _config_lock = inference_config_lock()?;
         let variant = parse_variant(variant)?;
         crate::model_selection::check_overrides(engine, variant)?;
         execute("host_load_selection", json!({"engine":engine,"variant":variant.name}))
@@ -640,7 +639,7 @@ pub mod onnx {
         let revision_path = settings_dir().join("inference.json");
         if let Some(expected) = expected_revision { ensure_engine_revision(&revision_path, expected)?; }
         let (path, value) = engine_settings(engine, false, model)?;
-        commit_engine_settings(&path, &value, reset_sessions)?;
+        commit_engine_settings(&path, &value, reset_sessions_locked)?;
         Ok(bytes_revision(&serde_json::to_vec_pretty(&value)?))
     }
     /// Persist an explicit model variant selection without touching the engine.
@@ -657,6 +656,10 @@ pub mod onnx {
     pub fn reset_sessions() -> Result<()> {
         let _gate = crate::model_selection::gate(true)?;
         let _config_lock = inference_config_lock()?;
+        reset_sessions_locked()
+    }
+    // The caller holds the model gate and inference configuration lock through reset.
+    pub(crate) fn reset_sessions_locked() -> Result<()> {
         execute::<()>("engine_control", json!({"action":"reset"}))?;
         crate::host::reset_model_cache()
     }

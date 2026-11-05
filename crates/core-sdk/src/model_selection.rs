@@ -192,6 +192,8 @@ pub(crate) fn check_overrides(engine: Engine, variant: ModelVariant) -> Result<(
 }
 pub(crate) fn load(engine: Engine, variant: ModelVariant) -> Result<Value> {
     let _gate = gate(true)?;
+    // The executor (possibly the isolated worker) owns the lock through recovery.
+    let _config_lock = onnx::inference_config_lock()?;
     check_overrides(engine, variant)?;
     let (path, settings) = onnx::engine_settings(engine, false, Some(variant.name))?;
     let previous = match std::fs::read(&path) {
@@ -203,7 +205,7 @@ pub(crate) fn load(engine: Engine, variant: ModelVariant) -> Result<Value> {
     scoped(engine, variant, || validate(engine, variant))?;
     let mut commit_attempted = false;
     let result = scoped(engine, variant, || {
-        onnx::reset_sessions()?;
+        onnx::reset_sessions_locked()?;
         let receipt = probe()?;
         commit_attempted = true;
         persist(&path, &serde_json::to_vec_pretty(&settings)?)?;
@@ -235,7 +237,7 @@ pub(crate) fn load(engine: Engine, variant: ModelVariant) -> Result<Value> {
                 Ok(())
             };
             let restored = restore_settings.and_then(|_| {
-                onnx::reset_sessions()?;
+                onnx::reset_sessions_locked()?;
                 probe().map(|_| ())
             });
             match restored {
