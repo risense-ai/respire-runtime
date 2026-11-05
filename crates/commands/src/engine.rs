@@ -3008,7 +3008,79 @@ pub fn run_defrag(min: f32, top: usize) -> Result<()> {
     Ok(())
 }
 
+fn run_runtime_doctor(check_remote: bool) -> Result<()> {
+    let mut rows = Vec::new();
+    let roots = respire_app::service::resolved_roots()?;
+    progress::phase("Checking local data and files", "Checking local data and files");
+    let store = build_local();
+    match &store {
+        Ok(store) => match store.all(true) {
+            Ok(entries) => rows.push(OutputItem::new("store", OutputStatus::Ok, format!("{} entries", entries.len()))),
+            Err(error) => rows.push(OutputItem::new("store", OutputStatus::Fail, format!("read failed: {error:#}"))),
+        },
+        Err(error) => rows.push(OutputItem::new("store", OutputStatus::Fail, format!("open failed: {error:#}"))),
+    }
+    rows.push(OutputItem::new("data dir", OutputStatus::Ok, roots.account_data_root.display().to_string()));
+    let model_task = crate::model_progress::status()?;
+    let index_state = rpc::index_status();
+    progress::phase("Checking model and index", "Checking model and index");
+    if model_task["active"] == true {
+        rows.push(OutputItem::new("embedder", OutputStatus::Warn, "Model operation in progress; inference check deferred"));
+    } else {
+        match crate::model_install::assets_status() {
+            Ok(status) if status.complete => rows.push(OutputItem::new("embedder", OutputStatus::Ok, format!("fresh inference verified: {}", serde_json::to_string(&status.backend_load)?))),
+            Ok(status) => rows.push(OutputItem::new("embedder", OutputStatus::Fail, format!("Assets or backend unavailable: {}; install or repair assets through the host CLI", serde_json::to_string(&status.backend_load)?))),
+            Err(error) => rows.push(OutputItem::new("embedder", OutputStatus::Fail, format!("inference unavailable: {error:#}; install or repair assets through the host CLI"))),
+        }
+    }
+    if let Ok(store) = &store {
+        match store.retrieval_model().and_then(|model| store.index_pending(&model)) {
+            Ok(false) => rows.push(OutputItem::new("model index", OutputStatus::Ok, "Index ready")),
+            Ok(true) => rows.push(OutputItem::new("model index", OutputStatus::Warn, format!("Index pending: {index_state}"))),
+            Err(error) => rows.push(OutputItem::new("model index", OutputStatus::Fail, format!("Index check failed: {error:#}"))),
+        }
+    }
+    match remote_config_from_session_or_env() {
+        Ok(Some((address, _))) if check_remote => {
+            progress::phase("Checking server connection; waiting for response", "Checking server connection; waiting for response");
+            match ureq::get(&format!("{}/health", address.trim().trim_end_matches('/')))
+                .timeout(std::time::Duration::from_secs(5)).call()
+            {
+                Ok(response) => rows.push(OutputItem::new("remote", OutputStatus::Ok, format!("Configured remote /health -> {}", response.status()))),
+                Err(ureq::Error::Status(code, _)) => rows.push(OutputItem::new("remote", OutputStatus::Fail, format!("Remote health returned HTTP {code}"))),
+                Err(ureq::Error::Transport(error)) => rows.push(OutputItem::new("remote", OutputStatus::Fail, format!("Remote health transport failed: {:?}", error.kind()))),
+            }
+        }
+        Ok(Some(_)) => rows.push(OutputItem::new("remote", OutputStatus::Ok, "Configured (--remote probes reachability)")),
+        Ok(None) => rows.push(OutputItem::new("remote", OutputStatus::Skip, "Not configured (local-only)")),
+        Err(_) => rows.push(OutputItem::new("remote", OutputStatus::Fail, "Remote configuration is incomplete or invalid; repair it through the host CLI")),
+    }
+    let mode = respire_app::service::workspace_mode();
+    rows.push(OutputItem::new("memory status", if mode == "normal" || mode == "readonly" {
+        OutputStatus::Ok
+    } else {
+        OutputStatus::Fail
+    }, mode));
+    let (count, threshold) = respire_app::service::counter_peek(&respire_app::service::maintenance_path());
+    rows.push(OutputItem::new("tidy counter", if count < threshold { OutputStatus::Ok } else { OutputStatus::Warn }, format!("{count}/{threshold}")));
+    rows.push(OutputItem::new("lock", OutputStatus::Skip, "Ownership is verified by the Runtime lifecycle; this diagnostic does not reacquire the process lock"));
+    rows.push(OutputItem::new("Runtime version", OutputStatus::Ok, crate::app_version::embedded()));
+    let count = |status: OutputStatus| rows.iter().filter(|row| row.status.as_str() == status.as_str()).count();
+    let mut result = ResultEnvelope::new("doctor", output::status_from_items(&rows), serde_json::json!({
+        "runtime_version": crate::app_version::embedded(), "scope": "runtime",
+        "pass": count(OutputStatus::Ok), "warn": count(OutputStatus::Warn),
+        "fail": count(OutputStatus::Fail), "skip": count(OutputStatus::Skip), "total": rows.len(),
+        "host_checks": "Run host CLI diagnostics for credentials, injection, installation and CLI updates"
+    }), rows);
+    result.details = serde_json::json!({"model_operation": model_task, "retrieval_index": index_state});
+    emit_result(result)
+}
+
 pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
+    if rpc::worker_active() {
+        anyhow::ensure!(!check_update && !fix, "doctor repair and CLI update checks require the host CLI");
+        return run_runtime_doctor(check_remote);
+    }
     progress::phase("\u{68c0}\u{67e5}\u{672c}\u{5730}\u{6570}\u{636e}\u{548c}\u{6587}\u{4ef6}", "Checking local data and files");
     let mut items: Vec<(String, bool, String)> = Vec::new();
     let mut model_warnings = Vec::new();

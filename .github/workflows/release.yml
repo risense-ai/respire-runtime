@@ -1,7 +1,7 @@
 name: Runtime release
 
-# Builds rsrs-runtime for all eight platform targets, runs the full native
-# regression matrix and publishes the release assets:
+# Builds rsrs-runtime for the seven current targets, runs their full native
+# regression matrix (Intel macOS is deferred) and publishes the release assets:
 #   rsrs-runtime-<triple>(.exe)      raw binary
 #   rsrs-runtime-<triple>.tar.gz     binary + core-runtime.json + native Core
 #                                    runtime libraries and notices
@@ -91,6 +91,7 @@ jobs:
             channel = 'dev';
             if (process.env.RELEASE_PUBLISH === 'true') cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
           }
+          if (channel === 'latest') throw new Error('Stable publication is disabled until complete G1 evidence is verified and promotion is authorized');
           const sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);
           console.log(`Planned runtime release ${version} (${channel}) from ${sha}, publish=${process.env.RELEASE_PUBLISH}`);
@@ -117,8 +118,6 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-15
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rustflags: -C target-feature=-crt-static
@@ -143,26 +142,6 @@ jobs:
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
-      - name: Configure Intel macOS cross compilation on Apple silicon
-        if: matrix.target == 'x86_64-apple-darwin'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ARCH" = 'ARM64'
-          test "$(uname -s)" = 'Darwin'
-          test "$(sysctl -n hw.optional.arm64)" = '1'
-          sdk="$(xcrun --sdk macosx --show-sdk-path)"
-          cc="$(xcrun --find clang)"
-          cxx="$(xcrun --find clang++)"
-          ar="$(xcrun --find ar)"
-          {
-            echo "SDKROOT=$sdk"
-            echo "CC_x86_64_apple_darwin=$cc"
-            echo "CXX_x86_64_apple_darwin=$cxx"
-            echo "AR_x86_64_apple_darwin=$ar"
-            echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=$cc"
-            echo 'MACOSX_DEPLOYMENT_TARGET=13.4'
-          } >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -431,8 +410,6 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
@@ -559,7 +536,7 @@ jobs:
           pattern: runtime-release-*
           path: release-assets
           merge-multiple: true
-      - name: Verify the complete eight-platform asset inventory and digests
+      - name: Verify the complete seven-platform asset inventory and digests
         env:
           RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
           RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
@@ -567,7 +544,7 @@ jobs:
           node - <<'NODE'
           const fs = require('fs'), cp = require('child_process');
           const targets = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl',
-            'aarch64-unknown-linux-musl', 'aarch64-apple-darwin', 'x86_64-apple-darwin',
+            'aarch64-unknown-linux-musl', 'aarch64-apple-darwin',
             'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
           const expected = [];
           for (const target of targets) {
@@ -626,6 +603,6 @@ jobs:
         run: |
           set -euo pipefail
           count="$(gh release view "$RUNTIME_TAG" --json assets --jq '.assets | length')"
-          test "$count" -eq 24 || { echo "::error::Draft release holds $count assets, expected 24"; exit 1; }
+          test "$count" -eq 21 || { echo "::error::Draft release holds $count assets, expected 21"; exit 1; }
           gh release edit "$RUNTIME_TAG" --draft=false
-          echo "Published $RUNTIME_TAG with 24 assets"
+          echo "Published $RUNTIME_TAG with 21 assets"

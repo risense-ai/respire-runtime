@@ -33,6 +33,11 @@ fn is_allowed(command: Option<&Command>) -> bool {
                 | Command::Classify { .. }
                 | Command::Reembed
                 | Command::Status
+                | Command::Doctor {
+                    check_update: false,
+                    fix: false,
+                    ..
+                }
                 | Command::MemoryRevision
                 | Command::Capabilities
                 | Command::List { .. }
@@ -124,6 +129,7 @@ fn execute(args: Vec<String>) -> anyhow::Result<Captured> {
     }
 
     let args_for_retry = args.clone();
+    let _progress = crate::progress::Scope::start(cli.progress_id.clone(), false, false);
     let _model_task = crate::model_progress::TaskScope::new(cli.model_task_id.clone());
     let run_result = run_local(cli);
     let run_result = if run_result.as_ref().is_err_and(|error| {
@@ -182,6 +188,8 @@ mod tests {
         };
         for args in [
             vec!["status"],
+            vec!["doctor"],
+            vec!["doctor", "--remote"],
             vec!["model", "engine"],
             vec!["model", "engine", "--model=quantized", "--", "cpu"],
             vec!["model", "load", "cpu", "--model=quantized"],
@@ -224,6 +232,8 @@ mod tests {
             vec!["model", "install-engines"],
             vec!["model", "uninstall"],
             vec!["model", "reset-cpu"],
+            vec!["doctor", "--fix"],
+            vec!["doctor", "--check-update"],
             vec!["runtime", "stop"],
             vec!["login"],
             vec!["logout"],
