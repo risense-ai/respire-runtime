@@ -43,7 +43,8 @@ host-side registration/maintenance fence) remains host-managed through
 
 ## Status
 
-`assets.status` RPC reports a stub (`complete: true`, nothing missing) because
-the host guarantees asset placement in this train; real inventory lands with
-P4. Boot-token/registration verification, the supervisor and the CI release
-wiring are P2 work.
+`assets.status` RPC inspects the required model files with their pinned sizes
+and SHA-256 digests. Each asset reports `missing`, `incomplete`, `corrupt`,
+`incompatible`, or `complete`; the aggregate `complete` field is true only when
+every required asset is complete. Boot-token/registration verification and the
+supervisor remain P2 work.

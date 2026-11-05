@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "owner": "runtime",
+  "areas": [
+    "runtime-business-mcp",
+    "stop-drain-modes",
+    "idempotency-bad-config"
+  ],
+  "tests": [
+    {
+      "id": "runtime.business-memory-write-read",
+      "area": "runtime-business-mcp",
+      "status": "missing",
+      "reason": "A1 independent Runtime business write/read test has no complete real-process/asset implementation and execution report",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2"
+    },
+    {
+      "id": "runtime.mcp-initialize-tools-list",
+      "area": "runtime-business-mcp",
+      "status": "missing",
+      "reason": "Handler-only initialize/error assertions; independent Runtime process and real tools/list/business context remain uncovered.",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "partial_source_suite": [
+        {
+          "file": "crates/commands/src/runtime_mcp.rs",
+          "test": "mcp_initialization_and_invalid_requests_have_json_rpc_envelopes",
+          "command": "cargo test -p respire_commands mcp_initialization_and_invalid_requests_have_json_rpc_envelopes --locked",
+          "coverage": "source-test",
+          "workflow": ".github/workflows/ci.yml",
+          "job": "workspace-tests",
+          "command_fragment": "cargo test --workspace --locked",
+          "scope": "Handler-only initialize/error assertions; independent Runtime process and real tools/list/business context remain uncovered."
+        }
+      ]
+    },
+    {
+      "id": "runtime.stop-clean-drained",
+      "area": "stop-drain-modes",
+      "status": "missing",
+      "reason": "Synthetic busy callback only; real three-mode process identity, admission and drain result remain uncovered.",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "partial_source_suite": [
+        {
+          "file": "crates/commands/src/rpc_serve.rs",
+          "test": "normal_drain_waits_past_the_legacy_four_second_budget",
+          "command": "cargo test -p respire_commands normal_drain_waits_past_the_legacy_four_second_budget --locked",
+          "coverage": "source-test",
+          "workflow": ".github/workflows/ci.yml",
+          "job": "workspace-tests",
+          "command_fragment": "cargo test --workspace --locked",
+          "scope": "Synthetic busy callback only; real three-mode process identity, admission and drain result remain uncovered."
+        }
+      ]
+    },
+    {
+      "id": "runtime.stop-forced-timeout",
+      "area": "stop-drain-modes",
+      "status": "missing",
+      "reason": "A2 forced-timeout drain test has no complete real-process/asset implementation and execution report",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2"
+    },
+    {
+      "id": "runtime.stop-compatibility-timeout",
+      "area": "stop-drain-modes",
+      "status": "missing",
+      "reason": "A2 compatibility-timeout drain test has no complete real-process/asset implementation and execution report",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2"
+    },
+    {
+      "id": "runtime.idempotency-same-fingerprint-once",
+      "area": "idempotency-bad-config",
+      "status": "missing",
+      "reason": "Ledger admission/replay unit coverage; concurrent real business effects executing at most once remain uncovered.",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "partial_source_suite": [
+        {
+          "file": "crates/commands/src/rpc_serve.rs",
+          "test": "idempotent_admission_replays_or_reports_unknown",
+          "command": "cargo test -p respire_commands idempotent_admission_replays_or_reports_unknown --locked",
+          "coverage": "source-test",
+          "workflow": ".github/workflows/ci.yml",
+          "job": "workspace-tests",
+          "command_fragment": "cargo test --workspace --locked",
+          "scope": "Ledger admission/replay unit coverage; concurrent real business effects executing at most once remain uncovered."
+        }
+      ]
+    },
+    {
+      "id": "runtime.idempotency-conflict",
+      "area": "idempotency-bad-config",
+      "status": "missing",
+      "reason": "Changed arguments/scopes have unit coverage; actual Runtime process and full fingerprint matrix remain uncovered.",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "partial_source_suite": [
+        {
+          "file": "crates/commands/src/rpc_serve.rs",
+          "test": "idempotent_admission_replays_or_reports_unknown",
+          "command": "cargo test -p respire_commands idempotent_admission_replays_or_reports_unknown --locked",
+          "coverage": "source-test",
+          "workflow": ".github/workflows/ci.yml",
+          "job": "workspace-tests",
+          "command_fragment": "cargo test --workspace --locked",
+          "scope": "Changed arguments/scopes have unit coverage; actual Runtime process and full fingerprint matrix remain uncovered."
+        }
+      ]
+    },
+    {
+      "id": "runtime.client-json-bad-config",
+      "area": "idempotency-bad-config",
+      "status": "missing",
+      "reason": "A5 malformed client.json structured-error test has no complete real-process/asset implementation and execution report",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2"
+    }
+  ]
+}

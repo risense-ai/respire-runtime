@@ -1,0 +1,19 @@
+{
+  "fixture_type": "business_rpc_request",
+  "expected": "accept",
+  "payload": {
+    "v": 1,
+    "id": "request-result-2",
+    "method": "runtime.result",
+    "args": [
+      "operation-memory-1"
+    ],
+    "scope": {
+      "account_id": "account-1",
+      "instance_id": "instance-1",
+      "generation": 7
+    },
+    "operation_id": "operation-memory-1",
+    "idempotency_key": "key-memory-1"
+  }
+}

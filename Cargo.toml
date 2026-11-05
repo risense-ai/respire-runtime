@@ -5,7 +5,7 @@ resolver = "2"
 members = [
     "runtime",            # P2 import: bin rsrs-runtime (lands after WP-3 merges in respire-cli)
     "spawn",              # P2 import: durable spawn / boot token / job object (respire_spawn)
-    "crates/protocol",    # P2 import: respire_protocol — RPC contract, crates.io source of truth (2.0.0-dev.3 published)
+    "crates/protocol",    # P2 import: respire_protocol — RPC contract, crates.io source of truth
     "crates/crypto",      # P2 import: respire_crypto
     "crates/storage",     # P2 import: respire_storage
     "crates/core-sdk",    # P2 import: respire_core_sdk — closed-source Core binding (+ core-sdk.lock.json)
@@ -27,7 +27,7 @@ repository = "https://github.com/risense-ai/respire-runtime"
 # Internal crates — path-based for the P2 transition. The version field on
 # respire_protocol keeps the registry pin so switching to registry-only
 # consumption later is a one-line change per entry.
-respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.3" }
+respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.4" }
 respire_core_sdk = { path = "crates/core-sdk" }
 respire_app_domain = { path = "crates/app-domain" }
 respire_app = { path = "crates/app" }

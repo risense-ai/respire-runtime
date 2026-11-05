@@ -1,0 +1,27 @@
+{
+  "fixture_type": "root_layout",
+  "expected": "reject",
+  "error_code": "legacy_root_semantic_conflict",
+  "payload": {
+    "schema_version": 1,
+    "layout": "phase1",
+    "installation_root": "C:/real-home/.rsrs",
+    "device_config_root": "C:/real-home/.rsrs",
+    "client_config_path": "C:/real-home/.rsrs/client.json",
+    "account_data_root": "C:/isolated/.rsrs/accounts/account-1",
+    "accounts_root": "C:/real-home/.rsrs/accounts",
+    "asset_root": "C:/real-home/.rsrs/models/bge-m3",
+    "runtime_state_root": "C:/real-home/.rsrs/runtime",
+    "legacy_whole_isolation": true,
+    "sources": {
+      "installation_root": "RSRS_DATA_DIR",
+      "device_config_root": "RSRS_DATA_DIR",
+      "client_config_path": "RSRS_DATA_DIR",
+      "account_data_root": "client.json:data_dir",
+      "accounts_root": "RSRS_DATA_DIR",
+      "asset_root": "RSRS_DATA_DIR",
+      "runtime_state_root": "RSRS_DATA_DIR"
+    },
+    "log_root": "C:/real-home/.rsrs/client2"
+  }
+}

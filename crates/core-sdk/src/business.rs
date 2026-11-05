@@ -402,37 +402,78 @@ pub mod bge {
     }
     pub use crate::cpu_model::{CPU_ORT_REVISION, CPU_ORT_NAME, CPU_ORT_SHA256, CPU_ORT_SIZE, CPU_ORT_URL, cpu_owned_mode, cpu_ort_cache_path, cpu_ort_path, cpu_ort_present, invalidate_cpu_ort_validation};
     // Installation paths are public infrastructure and use the Respire profile.
-    pub fn default_user_model_dir() -> PathBuf {
-        crate::env::var("RSRS_DATA_DIR").ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| expand_home(value.trim()).join("models/bge-m3"))
-            .unwrap_or_else(|| expand_home("~/.rsrs/models/bge-m3"))
+    fn model_dir_setting(name: &str) -> Result<Option<PathBuf>> {
+        match crate::env::var(name) {
+            Ok(value) => {
+                anyhow::ensure!(!value.trim().is_empty(), "{name} must not be empty or whitespace");
+                Ok(Some(expand_home(value.trim())))
+            }
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must contain valid Unicode"),
+        }
     }
-    pub fn m3_model_dir() -> PathBuf { crate::env::var("RSRS_M3_DIR").ok().filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim())).unwrap_or_else(default_user_model_dir) }
-    pub fn model_files_present(dir: &Path) -> bool { dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file() }
+
+    pub fn default_user_model_dir() -> Result<PathBuf> {
+        let root = model_dir_setting("RSRS_DATA_DIR")?;
+        // CPU cache callers must reject an invalid model override too.
+        model_dir_setting("RSRS_M3_DIR")?;
+        Ok(root.map(|root| root.join("models/bge-m3"))
+            .unwrap_or_else(|| expand_home("~/.rsrs/models/bge-m3")))
+    }
+
+    pub fn m3_model_dir() -> Result<PathBuf> {
+        // Validate the isolation root even when a model override is present.
+        let default = default_user_model_dir()?;
+        Ok(model_dir_setting("RSRS_M3_DIR")?.unwrap_or(default))
+    }
+
+    pub fn model_files_present(dir: &Path) -> bool {
+        dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file()
+    }
+
     pub fn resolve_model_dir() -> Result<PathBuf> {
-        let directory = discovered_model_dir();
+        let directory = discovered_model_dir()?;
         anyhow::ensure!(model_files_present(&directory), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR",directory.display());
         Ok(directory)
     }
 
-    pub(crate) fn discovered_model_dir() -> PathBuf {
-        let user = m3_model_dir();
-        if crate::env::var("RSRS_M3_DIR").is_ok_and(|value| !value.trim().is_empty()) { return user; }
-        let mut legacy = Vec::new();
-        if crate::env::var_os("RSRS_DATA_DIR").is_none() {
-            if let Some(home) = dirs::home_dir() { legacy.extend([home.join(".respire/models/bge-m3"),home.join(".onememory/models/bge-m3")]); }
+    /// Find a model without requiring baseline files, so inventories can report missing assets.
+    pub fn discovered_model_dir() -> Result<PathBuf> {
+        let user = m3_model_dir()?;
+        if crate::env::var_os("RSRS_M3_DIR").is_some() {
+            return Ok(user);
         }
-        let packaged = std::env::current_exe().ok().and_then(|exe|exe.parent().map(|parent|parent.join("models/bge-m3")));
-        model_directory_candidates(user.clone(),legacy,packaged).into_iter().find(|directory|model_files_present(directory)).unwrap_or(user)
+        let isolated = crate::env::var_os("RSRS_DATA_DIR").is_some();
+        let mut legacy = Vec::new();
+        if !isolated {
+            if let Some(home) = dirs::home_dir() {
+                legacy.extend([
+                    home.join(".respire/models/bge-m3"),
+                    home.join(".onememory/models/bge-m3"),
+                ]);
+            }
+        }
+        let packaged = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|parent| parent.join("models/bge-m3")));
+        Ok(model_directory_candidates(user.clone(), legacy, packaged, isolated)
+            .into_iter()
+            .find(|directory| model_files_present(directory))
+            .unwrap_or(user))
     }
-    pub(crate) fn model_directory_candidates(user: PathBuf, legacy: Vec<PathBuf>, packaged: Option<PathBuf>) -> Vec<PathBuf> {
-        // Installers write the user model first. Packaged/system models remain
-        // fallbacks, so an installed variant cannot be shadowed by a baseline.
+
+    pub(crate) fn model_directory_candidates(
+        user: PathBuf,
+        legacy: Vec<PathBuf>,
+        packaged: Option<PathBuf>,
+        isolated: bool,
+    ) -> Vec<PathBuf> {
         let mut candidates = vec![user];
-        candidates.extend(legacy);
-        candidates.extend(packaged);
-        candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        if !isolated {
+            candidates.extend(legacy);
+            candidates.extend(packaged);
+            candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        }
         candidates
     }
     pub fn expand_home(value: &str) -> PathBuf {
@@ -540,17 +581,33 @@ pub mod onnx {
             Some(model) => Some(parse_variant(model)?),
             None => stored_variant(&existing)?,
         };
-        let mut value = json!({"engine":engine,"force_cpu":force_cpu});
+        let mut value = existing;
+        value["engine"] = json!(engine);
+        value["force_cpu"] = json!(force_cpu);
         if let Some(model) = selected { value["model"] = json!(model.name); }
         Ok((directory.join("inference.json"), value))
     }
     fn commit_engine_settings(path: &std::path::Path, value: &Value, reset: impl FnOnce() -> Result<()>) -> Result<()> {
-        // Never persist half of an engine/variant selection when retiring the
-        // previous native session fails. The runtime serializes these requests.
+        use std::io::Write;
         reset()?;
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-        std::fs::write(path, serde_json::to_vec_pretty(value)?)?;
+        let parent = path.parent().context("inference settings have no parent directory")?;
+        std::fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(&serde_json::to_vec_pretty(value)?)?;
+        temp.as_file().sync_all()?;
+        temp.persist(path).map_err(|error| error.error)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
         Ok(())
+    }
+
+    fn inference_config_lock() -> Result<std::fs::File> {
+        let directory = settings_dir();
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("inference.json.lock");
+        let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+        lock.lock()?;
+        Ok(lock)
     }
     /// Thread-local draft for host preparation; does not change settings or sessions.
     pub fn with_selection<T>(engine: Engine, variant: &str, action: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -566,47 +623,77 @@ pub mod onnx {
     pub fn load_selection(engine: Engine, variant: &str) -> Result<Value> {
         anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
+        let _config_lock = inference_config_lock()?;
         let variant = parse_variant(variant)?;
         crate::model_selection::check_overrides(engine, variant)?;
         execute("host_load_selection", json!({"engine":engine,"variant":variant.name}))
     }
     pub fn save_engine(engine: Engine) -> Result<()> { save_engine_with_variant(engine, None) }
     pub fn save_engine_with_variant(engine: Engine, model: Option<&str>) -> Result<()> {
+        save_engine_with_variant_revision(engine, model, None)?;
+        Ok(())
+    }
+    pub fn save_engine_with_variant_revision(engine: Engine, model: Option<&str>, expected_revision: Option<&str>) -> Result<String> {
         anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
+        let _config_lock = inference_config_lock()?;
+        let revision_path = settings_dir().join("inference.json");
+        if let Some(expected) = expected_revision { ensure_engine_revision(&revision_path, expected)?; }
         let (path, value) = engine_settings(engine, false, model)?;
-        commit_engine_settings(&path, &value, reset_sessions)
+        commit_engine_settings(&path, &value, reset_sessions)?;
+        Ok(bytes_revision(&serde_json::to_vec_pretty(&value)?))
     }
     /// Persist an explicit model variant selection without touching the engine.
     pub fn save_model_variant(model: &str) -> Result<()> {
         anyhow::ensure!(crate::profiles::current()?.is_none(),"library has an active model profile; use model switch to change it");
         let _gate = crate::model_selection::gate(true)?;
+        let _config_lock = inference_config_lock()?;
         let (path, mut value) = read_inference_json()?;
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         value["model"] = json!(parse_variant(model)?.name);
         if value.get("engine").is_none() { value["engine"] = json!("cpu"); }
-        std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
-        Ok(())
+        commit_engine_settings(&path, &value, || Ok(()))
     }
     pub fn reset_sessions() -> Result<()> {
         let _gate = crate::model_selection::gate(true)?;
+        let _config_lock = inference_config_lock()?;
         execute::<()>("engine_control", json!({"action":"reset"}))?;
         crate::host::reset_model_cache()
     }
     pub fn reset_cpu_config() -> Result<()> {
         let _gate = crate::model_selection::gate(true)?;
+        let _config_lock = inference_config_lock()?;
         let (path, value) = engine_settings(Engine::Cpu, true, None)?;
         commit_engine_settings(&path, &value, || Ok(()))
     }
+    fn bytes_revision(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+    fn ensure_engine_revision(path: &std::path::Path, expected: &str) -> Result<()> {
+        anyhow::ensure!(expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()),
+            "engine revision must be a lowercase SHA-256 digest");
+        let actual = if path.exists() { std::fs::read(path)? } else { Vec::new() };
+        anyhow::ensure!(bytes_revision(&actual) == expected,
+            "engine revision conflict: inference settings changed since this operation started");
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub fn accelerator_catalog_metadata() -> (std::path::PathBuf, u64, String) {
+        use sha2::{Digest, Sha256};
+        // Embedded bytes come from the pinned, SHA-256-verified official NuGet payload.
+        let expected = crate::host_winml::DLL;
+        (
+            settings_dir().join("engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll"),
+            expected.len() as u64,
+            format!("{:x}", Sha256::digest(expected)),
+        )
+    }
     pub fn accelerator_catalog_path() -> Result<Option<std::path::PathBuf>> {
         #[cfg(windows)] {
-            let directory = settings_dir().join("engines/winml-2.4.89");
-            let dll = directory.join("Microsoft.Windows.AI.MachineLearning.dll");
-            if !dll.exists() {
-                std::fs::create_dir_all(&directory)?;
-                std::fs::write(&dll, crate::host_winml::DLL)?;
-                std::fs::write(directory.join("license.txt"), crate::host_winml::LICENSE)?;
-            }
+            let (dll, size, sha256) = accelerator_catalog_metadata();
+            crate::model_selection::verify(&dll, size, &sha256)
+                .context("assets_missing: Windows ML catalog is missing or invalid; install or repair it with the host CLI")?;
             Ok(Some(dll))
         }
         #[cfg(not(windows))] { Ok(None) }
@@ -649,6 +736,17 @@ pub mod onnx {
                 assert!(stored_variant(&json!({"model":value})).is_err());
             }
             assert!(stored_variant(&json!({"model":"unknown"})).is_err());
+            Ok(())
+        }
+        #[test]
+        fn engine_revision_fence_rejects_changed_settings() -> Result<()> {
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+            let path = std::env::temp_dir().join(format!("respire-engine-revision-{}-{nonce}",std::process::id()));
+            let previous = br#"{"engine":"cpu","model":"quantized"}"#;
+            std::fs::write(&path, previous)?;
+            ensure_engine_revision(&path, &bytes_revision(previous))?;
+            assert!(ensure_engine_revision(&path, &bytes_revision(b"changed")).is_err());
+            std::fs::remove_file(&path)?;
             Ok(())
         }
     }

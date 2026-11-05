@@ -15,7 +15,15 @@ pub use metadata::{
 };
 
 pub mod runtime;
-pub use runtime::{AssetRequirement, AssetsStatus, RuntimeBuildMeta, RuntimeCompat, RuntimeIdentity};
+pub use runtime::{
+    BackendLoadBackend, BackendLoadCpuNodeFallback, BackendLoadEngine, BackendLoadEvidence,
+    BackendLoadModule, BackendLoadModuleIdentitySource, BackendLoadNodeAssignment,
+    BackendLoadRuntime, BackendLoadRuntimeKind, BackendLoadSdkPin, BackendLoadState, BackendLoadStatus,
+    AssetRequirement, AssetState, AssetsStatus, ProtocolRange, RpcRequest, RpcResponse, RuntimeBuildFile,
+    RuntimeBuildMeta,
+    RuntimeBuildMetaError, RuntimeCompat, RuntimeIdentity, RuntimeRequestScope, RuntimeStopOutcome, RuntimeStopReceipt,
+    RuntimeUnfinishedOperation, RuntimeUnfinishedOutcome,
+};
 
 pub const VERSION_TAG: &str = env!("CARGO_PKG_VERSION");
 
@@ -92,8 +100,12 @@ fn de_see_also<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<
         Links(Vec<String>),
     }
     match HistoricalLinks::deserialize(deserializer)? {
-        HistoricalLinks::Text(text) => Ok(text.split(',').map(str::trim)
-            .filter(|id| !id.is_empty()).map(str::to_owned).collect()),
+        HistoricalLinks::Text(text) => Ok(text
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect()),
         HistoricalLinks::Links(links) => Ok(links),
     }
 }
@@ -151,12 +163,18 @@ impl Kind {
     /// Strict parsing for metadata-aware payloads; legacy callers retain from_str.
     pub fn try_from_str(value: &str) -> Option<Self> {
         match value {
-            "context" => Some(Self::Context), "decision" => Some(Self::Decision),
-            "preference" => Some(Self::Preference), "task" => Some(Self::Task),
-            "emotion" => Some(Self::Emotion), "time" => Some(Self::Time),
-            "skill" => Some(Self::Skill), "knowledge" => Some(Self::Knowledge),
-            "hypothesis" => Some(Self::Hypothesis), "reflection" => Some(Self::Reflection),
-            "self" => Some(Self::SelfNote), _ => None,
+            "context" => Some(Self::Context),
+            "decision" => Some(Self::Decision),
+            "preference" => Some(Self::Preference),
+            "task" => Some(Self::Task),
+            "emotion" => Some(Self::Emotion),
+            "time" => Some(Self::Time),
+            "skill" => Some(Self::Skill),
+            "knowledge" => Some(Self::Knowledge),
+            "hypothesis" => Some(Self::Hypothesis),
+            "reflection" => Some(Self::Reflection),
+            "self" => Some(Self::SelfNote),
+            _ => None,
         }
     }
 
@@ -185,7 +203,11 @@ pub struct MemoryEntry {
     pub supersedes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub superseded_by: String,
-    #[serde(default, deserialize_with = "de_see_also", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de_see_also",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub see_also: Vec<String>,
     pub id: String,
     pub kind: Kind,
@@ -223,7 +245,11 @@ pub struct PayloadV2 {
     pub supersedes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub superseded_by: String,
-    #[serde(default, deserialize_with = "de_see_also", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de_see_also",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub see_also: Vec<String>,
     pub kind: String,
     pub tags: String, // comma-separated
@@ -470,7 +496,13 @@ pub struct RelatedMemory {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RelationKind { NewVersion, OldVersion, SeeAlso, CoRecall, Neighbor }
+pub enum RelationKind {
+    NewVersion,
+    OldVersion,
+    SeeAlso,
+    CoRecall,
+    Neighbor,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallPair {

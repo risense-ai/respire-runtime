@@ -1,0 +1,90 @@
+{
+  "fixture_type": "business_rpc_response",
+  "expected": "reject",
+  "error_code": "response_operation_mismatch",
+  "payload": {
+    "request": {
+      "v": 1,
+      "id": "request-result-2",
+      "method": "runtime.result",
+      "args": [
+        "operation-memory-1"
+      ],
+      "scope": {
+        "account_id": "account-1",
+        "instance_id": "instance-1",
+        "generation": 7
+      },
+      "operation_id": "operation-memory-1",
+      "idempotency_key": "key-memory-1"
+    },
+    "response": {
+      "v": 1,
+      "id": "request-result-2",
+      "operation_id": "operation-memory-1",
+      "scope": {
+        "account_id": "account-1",
+        "instance_id": "instance-1",
+        "generation": 7
+      },
+      "idempotency_key": "key-memory-1",
+      "ok": true,
+      "exit": 0,
+      "bin": "fixture-only",
+      "envelope": {
+        "command": "runtime.result",
+        "status": "ok",
+        "summary": {
+          "request_id": "request-result-2",
+          "operation_id": "operation-foreign",
+          "scope": {
+            "account_id": "account-1",
+            "instance_id": "instance-1",
+            "generation": 7
+          },
+          "idempotency_key": "key-memory-1",
+          "state": "completed",
+          "response": {
+            "v": 1,
+            "id": "request-submit-1",
+            "operation_id": "operation-memory-1",
+            "scope": {
+              "account_id": "account-1",
+              "instance_id": "instance-1",
+              "generation": 7
+            },
+            "idempotency_key": "key-memory-1",
+            "ok": true,
+            "exit": 0,
+            "bin": "fixture-only",
+            "envelope": {
+              "command": "remember",
+              "status": "ok",
+              "summary": {},
+              "items": [],
+              "actions": [],
+              "errors": [],
+              "details": null,
+              "related": []
+            },
+            "error": null,
+            "code": null,
+            "web_url": null,
+            "pid": null,
+            "data_dir": null
+          }
+        },
+        "items": [],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": null,
+      "data_dir": null
+    }
+  }
+}

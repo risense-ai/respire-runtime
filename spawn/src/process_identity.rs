@@ -2,17 +2,18 @@
 //! No WMI, VM_READ handles, privilege adjustment or argument logging.
 use std::io;
 use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use windows_sys::Wdk::System::Threading::{
     NtQueryInformationProcess, ProcessCommandLineInformation,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, LocalFree, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, STATUS_BUFFER_OVERFLOW,
-    STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
+    STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
@@ -30,8 +31,9 @@ impl Drop for Process {
 
 fn open_with_rights(pid: u32, terminate: bool) -> io::Result<Option<Process>> {
     // SAFETY: inspection is query-limited. Only explicit recovery requests
-    // the termination right; no inheritance or privilege adjustment is used.
-    let rights = PROCESS_QUERY_LIMITED_INFORMATION | if terminate { PROCESS_TERMINATE } else { 0 };
+    // termination and exit-wait rights; no inheritance or privilege adjustment is used.
+    let rights = PROCESS_QUERY_LIMITED_INFORMATION
+        | if terminate { PROCESS_TERMINATE | PROCESS_SYNCHRONIZE } else { 0 };
     let handle = unsafe { OpenProcess(rights, 0, pid) };
     if handle.is_null() {
         let error = io::Error::last_os_error();
@@ -241,7 +243,7 @@ impl Arguments {
     }
 }
 
-fn runtime_role(command: &[u16]) -> io::Result<bool> {
+fn runtime_role(command: &[u16], executable: &Path) -> io::Result<bool> {
     if command.last() != Some(&0) || command[..command.len() - 1].contains(&0) {
         return Err(invalid_arguments());
     }
@@ -263,6 +265,35 @@ fn runtime_role(command: &[u16]) -> io::Result<bool> {
     while arguments.is(first, "--json") || arguments.is(first, "--direct") {
         first += 1;
     }
+    let name = executable.file_name().and_then(|name| name.to_str());
+    if name.is_some_and(|name| name.eq_ignore_ascii_case("rsrs-runtime.exe")) {
+        let mut index = 1;
+        while index < arguments.count {
+            if arguments.is(index, "--json")
+                || arguments.is(index, "--supervised")
+                || arguments.is(index, "serve")
+            {
+                index += 1;
+            } else if arguments.is(index, "runtime") && arguments.is(index + 1, "start") {
+                index += 2;
+            } else if arguments.is(index, "--host")
+                || arguments.is(index, "--port")
+                || arguments.is(index, "--data-dir")
+            {
+                if index + 1 >= arguments.count {
+                    return Ok(false);
+                }
+                index += 2;
+            } else {
+                return Ok(false);
+            }
+        }
+        // Bare invocation also serves; option values must not be parsed as modes.
+        return Ok(true);
+    }
+    if !name.is_some_and(|name| name.eq_ignore_ascii_case("rsrs.exe")) {
+        return Ok(false);
+    }
     Ok(has("--runtime-internal")
         || (has("web") && has("--internal"))
         || (arguments.is(first, "runtime") && arguments.is(first + 1, "run")))
@@ -276,7 +307,7 @@ fn inspect(pid: u32, require_runtime: bool) -> io::Result<Option<ProcessIdentity
         return Ok(None);
     };
     let executable = image(&process)?;
-    if require_runtime && !runtime_role(&command_line(&process)?)? {
+    if require_runtime && !runtime_role(&command_line(&process)?, &executable)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "process arguments do not identify a runtime",
@@ -300,6 +331,19 @@ pub fn runtime_process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>>
     inspect(pid, true)
 }
 
+fn wait_for_exit(process: &Process, timeout_ms: u32) -> io::Result<()> {
+    // SAFETY: the same owned process handle has SYNCHRONIZE access and stays live.
+    match unsafe { WaitForSingleObject(process.0, timeout_ms) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "runtime termination was requested but exit is not confirmed",
+        )),
+        WAIT_FAILED => Err(io::Error::last_os_error()),
+        status => Err(io::Error::other(format!("unexpected process wait status: {status}"))),
+    }
+}
+
 /// Bind the destructive operation to the same kernel process handle that was
 /// checked. A PID reused after inspection can never redirect termination.
 pub fn terminate_runtime(pid: u32, expected: &ProcessIdentity) -> io::Result<()> {
@@ -315,18 +359,18 @@ pub fn terminate_runtime(pid: u32, expected: &ProcessIdentity) -> io::Result<()>
             "runtime process identity changed",
         ));
     }
-    if !runtime_role(&command_line(&process)?)? || birth(&process)? != Some(expected.birth) {
+    if !runtime_role(&command_line(&process)?, &current.executable)? || birth(&process)? != Some(expected.birth) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "runtime process role or lifetime changed",
         ));
     }
     // SAFETY: the handle belongs to the exact checked instance and has only
-    // query plus the termination right already required for explicit recovery.
+    // query, termination and exit-wait rights required for explicit recovery.
     if unsafe { TerminateProcess(process.0, 1) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(())
+    wait_for_exit(&process, 5_000)
 }
 
 #[cfg(test)]
@@ -383,7 +427,14 @@ mod tests {
             child.try_wait()?.is_none(),
             "a matching PID/image alone cannot establish runtime role"
         );
+        let process = open_with_rights(child.id(), true)?
+            .ok_or_else(|| io::Error::other("fixture exited before wait check"))?;
+        assert_eq!(
+            wait_for_exit(&process, 0).err().map(|error| error.kind()),
+            Some(io::ErrorKind::TimedOut)
+        );
         child.kill()?;
+        wait_for_exit(&process, 5_000)?;
         child.wait()?;
         Ok(())
     }
@@ -403,7 +454,26 @@ mod tests {
             (r#""C:\rsrs.exe" remember "runtime run""#, false),
         ] {
             let words: Vec<_> = command.encode_utf16().chain(Some(0)).collect();
-            assert_eq!(runtime_role(&words)?, expected);
+            assert_eq!(runtime_role(&words, Path::new("rsrs.exe"))?, expected);
+        }
+        for (command, executable, expected) in [
+            (r#""C:\space path\rsrs-runtime.exe" serve --port 12345"#, "rsrs-runtime.exe", true),
+            (r#"rsrs-runtime --json runtime start"#, "RSRS-RUNTIME.EXE", true),
+            (r#"rsrs-runtime"#, "rsrs-runtime.exe", true),
+            (r#"rsrs-runtime --port 12345 serve"#, "rsrs-runtime.exe", true),
+            (r#"rsrs-runtime serve --data-dir --status"#, "rsrs-runtime.exe", true),
+            (r#"rsrs-runtime serve --status"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime runtime start --stop"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime serve --data-dir"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --core-worker-internal"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime runtime status"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --status --data-dir serve"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime serve"#, "rsrs.exe", false),
+            (r#"rsrs.exe --runtime-internal"#, "foreign.exe", false),
+            (r#"rsrs.exe --runtime-internal"#, "rsrs-runtime.exe", false),
+        ] {
+            let words: Vec<_> = command.encode_utf16().chain(Some(0)).collect();
+            assert_eq!(runtime_role(&words, Path::new(executable))?, expected);
         }
         Ok(())
     }
@@ -427,7 +497,7 @@ mod tests {
                 Buffer: base.add(header).cast(),
             });
         }
-        assert!(runtime_role(&decode_arguments(&storage, bytes)?)?);
+        assert!(runtime_role(&decode_arguments(&storage, bytes)?, Path::new("rsrs.exe"))?);
         assert!(decode_arguments(&storage, header - 1).is_err());
         assert!(decode_arguments(&storage, MAX_ARGUMENT_BYTES + 1).is_err());
         // SAFETY: mutations address only the same valid synthetic header.

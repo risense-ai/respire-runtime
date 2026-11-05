@@ -1,5 +1,5 @@
 import {createHash, randomUUID} from 'node:crypto';
-import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 // Compact Mach-O/PE/ELF header verifier (adapted from the CLI release tooling,
@@ -57,6 +57,12 @@ for (const file of manifest.files) {
   else continue;
   if (path.includes('\\') || path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe runtime path');
   const source = join(sdk,file.path);
+  let component = sdk;
+  for (const part of file.path.split('/')) {
+    component = join(component, part);
+    if (lstatSync(component).isSymbolicLink()) throw new Error(`Linked SDK payload: ${file.path}`);
+  }
+  if (!lstatSync(source).isFile()) throw new Error(`Non-file SDK payload: ${file.path}`);
   const bytes = readFileSync(source);
   if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error(`SDK checksum mismatch: ${file.path}`);
   // mlx.metallib is a data resource, not a Mach-O/PE/ELF image.
@@ -64,7 +70,7 @@ for (const file of manifest.files) {
   mkdirSync(dirname(join(output,path)),{recursive:true});
   stage(join(output,path),bytes,
     path.startsWith('core-notices/') ? 0o644 : statSync(source).mode & 0o777);
-  files.push({path,sha256:file.sha256});
+  files.push({path,size:bytes.length,sha256:file.sha256});
 }
 if (manifest.redistribution === 'permitted-under-included-license' && !files.some(file => file.path === 'core-notices/CORE-SDK-LICENSE.txt')) {
   throw new Error('Released Core SDK is missing its redistribution license');
@@ -76,7 +82,7 @@ for (const entry of readdirSync(modelNotices, {withFileTypes:true})) {
   const path = `core-notices/models/${entry.name}`;
   mkdirSync(dirname(join(output,path)), {recursive:true});
   stage(join(output,path), bytes, 0o644);
-  files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+  files.push({path,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 const dependencyNotices = join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'dependency-notices');
 for (const entry of readdirSync(dependencyNotices, {withFileTypes:true})) {
@@ -85,7 +91,7 @@ for (const entry of readdirSync(dependencyNotices, {withFileTypes:true})) {
   const path = `core-notices/consumer/${entry.name}`;
   mkdirSync(dirname(join(output,path)), {recursive:true});
   stage(join(output,path), bytes, 0o644);
-  files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+  files.push({path,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 if (manifest.target.includes('windows')) {
   // The public host embeds this pinned catalog; Core no longer distributes it.
@@ -94,7 +100,7 @@ if (manifest.target.includes('windows')) {
   const path = 'core-notices/consumer/WinML-2.4.89-license.txt';
   mkdirSync(dirname(join(output,path)), {recursive:true});
   stage(join(output,path), bytes, 0o644);
-  files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+  files.push({path,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 stage(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
   sdk_version:manifest.sdk_version,redistribution:manifest.redistribution,files},null,2)+'\n');

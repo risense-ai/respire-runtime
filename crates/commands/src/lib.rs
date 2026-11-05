@@ -17,16 +17,16 @@
 //!
 //! Modules land with the individual extraction commits of the runtime split.
 
+pub mod admission;
 pub mod app_version;
 pub mod autostart;
-pub mod admission;
 pub mod bench;
 pub mod classify;
 pub mod cli_def;
 pub mod engine;
 pub mod gates;
-pub mod host_hooks;
 pub mod hooks;
+pub mod host_hooks;
 pub mod i18n;
 pub mod metadata;
 pub mod model_install;
@@ -37,15 +37,17 @@ pub mod output;
 pub mod output_emit;
 pub mod output_state;
 pub mod progress;
-pub mod runtime_http;
-pub mod rpc_serve;
-pub mod sync_flow;
-pub mod review;
 pub mod recall_select;
+pub mod review;
+pub mod rpc_serve;
 pub mod rpc_worker;
-pub mod skill;
 pub mod runtime_error;
+pub mod runtime_executor;
+pub mod runtime_http;
+pub mod runtime_mcp;
 pub mod runtime_policy;
+pub mod skill;
+pub mod sync_flow;
 pub mod util;
 
 #[cfg(test)]

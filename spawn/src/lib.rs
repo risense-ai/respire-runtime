@@ -8,19 +8,28 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub mod durable;
 mod confinement;
+pub mod durable;
 pub use confinement::is_restricted;
+mod probe;
+pub use probe::{spawn_probe_helper, watch_probe_parent, ProbeChild};
 
 #[cfg(windows)]
 mod supervisor_job;
 #[cfg(windows)]
 pub use supervisor_job::confine_supervisor_tree;
 
+#[cfg(target_os = "linux")]
+mod linux_process_identity;
+#[cfg(target_os = "linux")]
+pub use linux_process_identity::{terminate_runtime, ProcessIdentity};
+
 #[cfg(windows)]
 mod process_identity;
 #[cfg(windows)]
-pub use process_identity::{process_birth, process_identity, runtime_process_identity, terminate_runtime, ProcessIdentity};
+pub use process_identity::{
+    process_birth, process_identity, runtime_process_identity, terminate_runtime, ProcessIdentity,
+};
 
 #[cfg(windows)]
 mod winml;
@@ -30,12 +39,16 @@ pub use winml::{install_accelerators, replace_provider_manifest};
 /// Short-lived host service-manager clients must not retain the calling CLI's
 /// unrelated inheritable output handles on Windows or open a console window.
 pub fn spawn_host_control(command: &mut Command) -> io::Result<std::process::Child> {
-    #[cfg(windows)] {
+    #[cfg(windows)]
+    {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, same user/token.
         return without_inherited_stdio(|| command.spawn());
     }
-    #[cfg(not(windows))] { command.spawn() }
+    #[cfg(not(windows))]
+    {
+        command.spawn()
+    }
 }
 
 pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
@@ -44,8 +57,15 @@ pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
 
 /// A non-secret maintenance operation identifier lets the replacement child
 /// prove it belongs to the host's still-fenced startup, before accepting work.
-pub fn spawn_runtime_with_boot_token(exe: &Path, token: Option<&str>) -> io::Result<std::process::Child> {
-    spawn_binary_with_boot_token(exe, &[std::ffi::OsString::from("--runtime-internal")], token)
+pub fn spawn_runtime_with_boot_token(
+    exe: &Path,
+    token: Option<&str>,
+) -> io::Result<std::process::Child> {
+    spawn_binary_with_boot_token(
+        exe,
+        &[std::ffi::OsString::from("--runtime-internal")],
+        token,
+    )
 }
 
 /// Spawn an external binary (typically the managed `rsrs-runtime`) detached from
@@ -60,7 +80,9 @@ pub fn spawn_binary_with_boot_token(
 ) -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
     command.env_remove("RSRS_RUNTIME_BOOT_TOKEN");
-    if let Some(token) = token { command.env("RSRS_RUNTIME_BOOT_TOKEN", token); }
+    if let Some(token) = token {
+        command.env("RSRS_RUNTIME_BOOT_TOKEN", token);
+    }
     command
         .args(args)
         .stdin(Stdio::null())

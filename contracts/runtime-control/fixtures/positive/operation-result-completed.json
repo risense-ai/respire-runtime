@@ -1,0 +1,18 @@
+{
+  "fixture_type": "operation_result",
+  "expected": "accept",
+  "payload": {
+    "request_id": "request-result-2",
+    "operation_id": "operation-model-1",
+    "idempotency_key": "model-set-account-1-generation-7",
+    "parent_operation_id": "operation-model-parent-1",
+    "method": "model.configure",
+    "normalized_args_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "result": "completed",
+    "scope": {
+      "account_id": "account-1",
+      "instance_id": "instance-1",
+      "generation": 7
+    }
+  }
+}

@@ -5,9 +5,7 @@ import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {prepareSdk} from '../crates/core-sdk/prepare-sdk.mjs';
 
-// Seven release targets of this repository. The Intel macOS target used by the
-// legacy combined binary is intentionally absent.
-export const TARGETS=['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch64-apple-darwin','x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-musl'];
+export const TARGETS=['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch64-apple-darwin','x86_64-apple-darwin','x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-musl'];
 const required=(ok,message)=>{if(!ok)throw Error(message);};
 export function canonicalEntry(target,input){
  required(TARGETS.includes(target)&&input&&input.private_repository==='risense-ai/respire-core','Only approved private Core SDK targets are accepted');
@@ -21,7 +19,7 @@ export function cacheKey(target,entry){return `core-sdk-native-v1-${target}-${cr
 export function planCaches(lock,crateLock){
  required(lock.schema_version===1&&crateLock.schema_version===1&&lock.targets&&crateLock.targets,'Invalid SDK lock schema');
  const targets=TARGETS.filter(t=>Object.hasOwn(lock.targets,t));
- required(targets.length===TARGETS.length&&Object.keys(lock.targets).length===targets.length&&Object.keys(crateLock.targets).length===targets.length&&targets.every(t=>Object.hasOwn(crateLock.targets,t)),'Require exact current SDK locks for all seven release targets');
+ required(targets.length===TARGETS.length&&Object.keys(lock.targets).length===targets.length&&Object.keys(crateLock.targets).length===targets.length&&targets.every(t=>Object.hasOwn(crateLock.targets,t)),'Require exact current SDK locks for all eight release targets');
  const include=targets.map(target=>{const entry=canonicalEntry(target,lock.targets[target]);required(JSON.stringify(entry)===JSON.stringify(canonicalEntry(target,crateLock.targets[target])),'SDK lock copies differ');return {target,entry,key:cacheKey(target,entry)};});
  required(new Set(include.map(x=>x.entry.sdk_version)).size===1,'Mixed private SDK versions');return {include};
 }

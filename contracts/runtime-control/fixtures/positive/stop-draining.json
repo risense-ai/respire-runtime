@@ -1,0 +1,13 @@
+{
+  "fixture_type": "stop_state",
+  "expected": "accept",
+  "payload": {
+    "request_id": "request-stop-2",
+    "operation_id": "operation-stop-1",
+    "state": "draining",
+    "admitted": [
+      { "operation_id": "operation-write-1", "kind": "write" },
+      { "operation_id": "operation-mcp-1", "kind": "mcp_call" }
+    ]
+  }
+}

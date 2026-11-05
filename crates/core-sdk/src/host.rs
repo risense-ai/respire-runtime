@@ -142,16 +142,21 @@ fn explicit_setting<T: std::str::FromStr + serde::Serialize>(
 }
 
 pub(crate) fn request_settings(payload: &mut Value) -> Result<()> {
-    crate::feedback_contract::validate(payload,Some(crate::FEEDBACK_CONTRACT))?;
+    crate::feedback_contract::validate(payload, Some(crate::FEEDBACK_CONTRACT))?;
     if let Some(fields) = payload.as_object_mut() {
         if !fields.contains_key("query_settings") {
-            let settings=query_settings_from_env()?;
+            let settings = query_settings_from_env()?;
             fields.insert("query_settings".to_owned(), Value::Object(settings));
         }
-        let settings = fields.get_mut("query_settings").and_then(Value::as_object_mut)
+        let settings = fields
+            .get_mut("query_settings")
+            .and_then(Value::as_object_mut)
             .context("query_settings must be an object")?;
         if !settings.contains_key("now") {
-            settings.insert("now".into(), json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+            settings.insert(
+                "now".into(),
+                json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            );
         }
         if !fields.contains_key("related_settings") {
             let mut settings = serde_json::Map::new();
@@ -220,39 +225,99 @@ pub(crate) fn reset_model_cache() -> Result<()> {
     Ok(())
 }
 
-fn model_file_metadata(path: &std::path::Path, custom_cpu_file: bool, variant: &str) -> Result<(u64, std::time::SystemTime)> {
+fn model_file_metadata(
+    path: &std::path::Path,
+    custom_cpu_file: bool,
+    variant: &str,
+) -> Result<(u64, std::time::SystemTime)> {
     let recovery = if custom_cpu_file {
         "correct or unset RSRS_CPU_OWNED_ORT_FILE; installing the default model does not repair this custom path".to_owned()
     } else {
-        format!("run rsrs model install-m3 --model {variant} in this profile before direct inference")
+        format!(
+            "run rsrs model install-m3 --model {variant} in this profile before direct inference"
+        )
     };
-    let metadata = std::fs::metadata(path).with_context(|| format!(
-        "model file unavailable at {}; {recovery}", path.display()))?;
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("model file unavailable at {}; {recovery}", path.display()))?;
     Ok((metadata.len(), metadata.modified()?))
 }
 
 fn read_model_bytes(path: &std::path::Path, expected_size: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
-    anyhow::ensure!(file.metadata()?.len() == expected_size, "model size mismatch; reinstall the selected variant");
+    anyhow::ensure!(
+        file.metadata()?.len() == expected_size,
+        "model size mismatch; reinstall the selected variant"
+    );
     let mut bytes = Vec::new();
     file.take(expected_size + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() as u64 == expected_size, "model size changed while reading");
+    anyhow::ensure!(
+        bytes.len() as u64 == expected_size,
+        "model size changed while reading"
+    );
     Ok(bytes)
+}
+
+pub(crate) struct ProbeAssets {
+    pub config: Value,
+    pub model: Vec<u8>,
+    pub tokenizer: Vec<u8>,
+    pub native: Option<crate::profiles::NativeProfile>,
+}
+
+pub(crate) fn probe_assets() -> Result<ProbeAssets> {
+    let (config, model_path, model_size, tokenizer_path, tokenizer_size, native) = if let Some(selection) = crate::profiles::current()? {
+        selection.validate()?;
+        anyhow::ensure!(selection.backend_profile.backend == "onnx", "backend load probe host wrapper currently supports ONNX only");
+        let weights = selection.profile.weights.as_ref().context("probe model resource missing")?;
+        let tokenizer = selection.profile.tokenizer.as_ref().context("probe tokenizer resource missing")?;
+        (selection.config()?, weights.path.clone(), weights.size, tokenizer.path.clone(), tokenizer.size, selection.backend_profile.native.clone())
+    } else {
+        let engine = crate::onnx::configured_engine()?;
+        let variant = crate::onnx::configured_variant(engine)?;
+        let owned = crate::bge::cpu_owned_mode(engine)?;
+        let directory = crate::bge::discovered_model_dir()?;
+        let model_path = if owned {
+            match crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE") {
+                Some(path) => PathBuf::from(path),
+                None => crate::bge::cpu_ort_path(&directory)?,
+            }
+        } else { directory.join(crate::onnx::variant_file_name(variant.name)) };
+        let model_hash = if owned { crate::bge::CPU_ORT_SHA256 } else { variant.sha256 };
+        let tokenizer_hash = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790";
+        let config = json!({"model":"m3","backend":"onnx","engine":engine,"execution_timeout_secs":120,
+            "asset_id":format!("{model_hash}:{tokenizer_hash}"),"model_sha256":model_hash,
+            "tokenizer_sha256":tokenizer_hash,"cpu_owned_ort_experiment":owned});
+        (config, model_path, if owned { crate::bge::CPU_ORT_SIZE } else { variant.size }, directory.join("tokenizer.json"), 17_082_821, None)
+    };
+    let model = read_model_bytes(&model_path, model_size).context("read pinned probe model")?;
+    let tokenizer = read_model_bytes(&tokenizer_path, tokenizer_size).context("read pinned probe tokenizer")?;
+    for (bytes, field) in [(&model, "model_sha256"), (&tokenizer, "tokenizer_sha256")] {
+        anyhow::ensure!(config[field].as_str().is_some_and(|expected| digest(bytes).eq_ignore_ascii_case(expected)), "probe asset checksum differs from its trusted selection pin");
+    }
+    Ok(ProbeAssets { config, model, tokenizer, native })
 }
 
 fn model_diagnostics(fallback: &str, registration_errors: &[String]) -> Vec<String> {
     let mut diagnostics = registration_errors.to_vec();
-    if !fallback.is_empty() { diagnostics.push(fallback.to_owned()); }
+    if !fallback.is_empty() {
+        diagnostics.push(fallback.to_owned());
+    }
     diagnostics
 }
 
 #[cfg(any(windows, test))]
-pub(crate) fn register_selected_catalog(engine: crate::onnx::Engine,
-    register: impl FnOnce() -> Result<Vec<String>>) -> Result<Vec<String>> {
+pub(crate) fn register_selected_catalog(
+    engine: crate::onnx::Engine,
+    register: impl FnOnce() -> Result<Vec<String>>,
+) -> Result<Vec<String>> {
     // DirectML GPU sessions register their provider in Core. Only NPU discovery
     // needs the Windows ML catalog; a missing catalog must not block GPU/CPU.
-    if engine == crate::onnx::Engine::Npu { register() } else { Ok(Vec::new()) }
+    if engine == crate::onnx::Engine::Npu {
+        register()
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 struct LegacyModel {
@@ -266,25 +331,43 @@ fn legacy_model(directory: &std::path::Path) -> Result<LegacyModel> {
     let mut variant = crate::onnx::configured_variant(engine)?;
     let cpu_owned = crate::bge::cpu_owned_mode(engine)?;
     let mut fallback_note = String::new();
-    if !cpu_owned && engine != crate::onnx::Engine::Cpu && !crate::onnx::explicit_model_selection()?
-        && !directory.join(crate::onnx::variant_file_name(variant.name)).exists() {
+    if !cpu_owned
+        && engine != crate::onnx::Engine::Cpu
+        && !crate::onnx::explicit_model_selection()?
+        && !directory
+            .join(crate::onnx::variant_file_name(variant.name))
+            .exists()
+    {
         fallback_note = format!("accelerator default {} is not installed; using quantized until rsrs model install --model {} completes",variant.name,variant.name);
         variant = crate::onnx::parse_variant("quantized")?;
     }
-    Ok(LegacyModel {engine,variant,cpu_owned,fallback_note})
+    Ok(LegacyModel {
+        engine,
+        variant,
+        cpu_owned,
+        fallback_note,
+    })
 }
 pub fn legacy_effective_model_config() -> Result<Value> {
-    let selected = legacy_model(&crate::bge::discovered_model_dir())?;
-    let weights = if selected.cpu_owned { crate::bge::CPU_ORT_SHA256 } else { selected.variant.sha256 };
+    let selected = legacy_model(&crate::bge::discovered_model_dir()?)?;
+    let weights = if selected.cpu_owned {
+        crate::bge::CPU_ORT_SHA256
+    } else {
+        selected.variant.sha256
+    };
     let tokenizer = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790";
-    Ok(json!({"model":"m3","backend":"onnx","engine":selected.engine,
+    Ok(
+        json!({"model":"m3","backend":"onnx","engine":selected.engine,
         "asset_id":format!("{weights}:{tokenizer}"),"execution_timeout_secs":120,
         "model_sha256":weights,"tokenizer_sha256":tokenizer,
-        "cpu_owned_ort_experiment":selected.cpu_owned}))
+        "cpu_owned_ort_experiment":selected.cpu_owned}),
+    )
 }
 
 pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
-    if let Some(selection) = crate::profiles::current()? { return crate::profiles::initialize(core, &selection); }
+    if let Some(selection) = crate::profiles::current()? {
+        return crate::profiles::initialize(core, &selection);
+    }
     let background_intra_threads = crate::inference_policy::background_threads(
         crate::env::var("RSRS_INTRA_THREADS").ok().as_deref(),
         std::thread::available_parallelism().map_or(2, |cores| cores.get()),
@@ -296,12 +379,17 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let cpu_owned_experiment = selected.cpu_owned;
     let fallback_note = selected.fallback_note;
     let model_path = if cpu_owned_experiment {
-        crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").map(std::path::PathBuf::from)
-            .unwrap_or_else(|| crate::bge::cpu_ort_path(&directory))
-    } else { directory.join(crate::onnx::variant_file_name(variant.name)) };
+        match crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => crate::bge::cpu_ort_path(&directory)?,
+        }
+    } else {
+        directory.join(crate::onnx::variant_file_name(variant.name))
+    };
     let tokenizer_path = directory.join("tokenizer.json");
     let metadata = |path: &std::path::Path| -> Result<_> {
-        let custom_cpu_file = cpu_owned_experiment && path == model_path.as_path()
+        let custom_cpu_file = cpu_owned_experiment
+            && path == model_path.as_path()
             && crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE").is_some();
         model_file_metadata(path, custom_cpu_file, variant.name)
     };
@@ -318,12 +406,22 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         .as_bytes(),
     );
     let session_options_id = if cpu_owned_experiment {
-        digest(format!("cpu-owned-ort-v1:{legacy_options_id}:{}", model_path.display()).as_bytes())
-    } else { legacy_options_id };
+        digest(
+            format!(
+                "cpu-owned-ort-v1:{legacy_options_id}:{}",
+                model_path.display()
+            )
+            .as_bytes(),
+        )
+    } else {
+        legacy_options_id
+    };
     #[cfg(test)]
     let session_options_id = if crate::ffi::test_option_failure_armed() {
         format!("test-failing-options:{session_options_id}")
-    } else { session_options_id };
+    } else {
+        session_options_id
+    };
     let stamp = ModelStamp {
         directory,
         engine,
@@ -336,10 +434,14 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     if let Some(existing) = loaded.as_ref().filter(|existing| existing.stamp == stamp) {
         let mut request = json!({"model":"m3", "asset_id":existing.asset_id,"engine":engine,
             "execution_timeout_secs":120,"background_intra_threads":background_intra_threads,"session_options_id":session_options_id,"reuse_current":true});
-        if cpu_owned_experiment { request["cpu_owned_ort_experiment"] = json!(true); }
+        if cpu_owned_experiment {
+            request["cpu_owned_ort_experiment"] = json!(true);
+        }
         let reused = core.load_model(request, &[], &[]);
         if reused.is_ok() {
-            *PROVIDER_DIAGNOSTICS.lock().map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? =
+            *PROVIDER_DIAGNOSTICS
+                .lock()
+                .map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? =
                 model_diagnostics(&fallback_note, &existing.registration_errors);
             return Ok(());
         }
@@ -353,20 +455,35 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
         const MODEL_BYTES: usize = 569654128;
         let tokenizer = std::fs::read(&tokenizer_path).context("read host BGE-M3 tokenizer")?;
         let tokenizer_hash = digest(&tokenizer);
-        anyhow::ensure!(tokenizer_hash == "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790", "BGE-M3 tokenizer checksum mismatch; reinstall the model");
+        anyhow::ensure!(
+            tokenizer_hash == "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
+            "BGE-M3 tokenizer checksum mismatch; reinstall the model"
+        );
         let mut file = std::fs::File::open(&model_path).context("open host BGE-M3 model")?;
-        anyhow::ensure!(file.metadata()?.len() == MODEL_BYTES as u64, "BGE-M3 model length mismatch");
+        anyhow::ensure!(
+            file.metadata()?.len() == MODEL_BYTES as u64,
+            "BGE-M3 model length mismatch"
+        );
         let mut input = core.begin_model_input(MODEL_BYTES)?;
         let model_hash = stream_model(&mut file, MODEL_BYTES, |bytes| input.append(bytes))?;
-        anyhow::ensure!(model_hash == MODEL_HASH, "BGE-M3 model checksum mismatch; reinstall the model");
+        anyhow::ensure!(
+            model_hash == MODEL_HASH,
+            "BGE-M3 model checksum mismatch; reinstall the model"
+        );
         drop(file);
         let asset_id = format!("{MODEL_HASH}:{tokenizer_hash}");
         let request = json!({"model":"m3", "asset_id":asset_id,"engine":engine,
             "execution_timeout_secs":120,"background_intra_threads":background_intra_threads,"session_options_id":session_options_id,"reuse_current":false,"cpu_owned_ort_experiment":true});
         *loaded = None;
-        *PROVIDER_DIAGNOSTICS.lock().map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? = Vec::new();
+        *PROVIDER_DIAGNOSTICS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("host provider diagnostics poisoned"))? = Vec::new();
         input.commit(request, &tokenizer)?;
-        *loaded = Some(LoadedModel { stamp, asset_id, registration_errors: Vec::new() });
+        *loaded = Some(LoadedModel {
+            stamp,
+            asset_id,
+            registration_errors: Vec::new(),
+        });
         return Ok(());
     }
     let model = read_model_bytes(&model_path, if cpu_owned_experiment { crate::bge::CPU_ORT_SIZE } else { variant.size }).context("read host BGE-M3 model (CPU upgrades are prepared by the runtime model task; run rsrs model install-m3 if unavailable)")?;
@@ -376,9 +493,12 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     anyhow::ensure!(
         model_hash.eq_ignore_ascii_case(if cpu_owned_experiment {
             "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff"
-        } else { variant.sha256 }),
+        } else {
+            variant.sha256
+        }),
         "BGE-M3 {} model checksum mismatch; run rsrs model install-m3 --model {}",
-        variant.name, variant.name
+        variant.name,
+        variant.name
     );
     anyhow::ensure!(
         tokenizer_hash == "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
@@ -404,7 +524,9 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     *loaded = None;
     let mut request = json!({"model":"m3", "asset_id":asset_id,"engine":engine,
         "execution_timeout_secs":120,"background_intra_threads":background_intra_threads,"session_options_id":session_options_id,"reuse_current":false});
-    if cpu_owned_experiment { request["cpu_owned_ort_experiment"] = json!(true); }
+    if cpu_owned_experiment {
+        request["cpu_owned_ort_experiment"] = json!(true);
+    }
     let loaded_model = core.load_model(request, &model, &tokenizer);
     if registration_errors.is_empty() {
         loaded_model?;
@@ -416,12 +538,20 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
             )
         })?;
     }
-    *loaded = Some(LoadedModel { stamp, asset_id, registration_errors });
+    *loaded = Some(LoadedModel {
+        stamp,
+        asset_id,
+        registration_errors,
+    });
     Ok(())
 }
 
 #[cfg(model_input_stream_contract)]
-fn stream_model(reader: &mut impl std::io::Read, expected: usize, mut append: impl FnMut(&[u8]) -> Result<()>) -> Result<String> {
+fn stream_model(
+    reader: &mut impl std::io::Read,
+    expected: usize,
+    mut append: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<String> {
     let mut chunk = vec![0u8; 1 << 20];
     let mut hasher = Sha256::new();
     let mut received = 0usize;
@@ -430,8 +560,12 @@ fn stream_model(reader: &mut impl std::io::Read, expected: usize, mut append: im
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             result => result.context("stream host BGE-M3 model")?,
         };
-        if count == 0 { break; }
-        received = received.checked_add(count).context("model length overflow")?;
+        if count == 0 {
+            break;
+        }
+        received = received
+            .checked_add(count)
+            .context("model length overflow")?;
         anyhow::ensure!(received <= expected, "BGE-M3 model grew during read");
         hasher.update(&chunk[..count]);
         append(&chunk[..count])?;
@@ -447,30 +581,49 @@ mod stream_tests {
     fn bounded_stream_short_long_failure_and_digest() -> Result<()> {
         let source = b"synthetic model bytes";
         let mut received = Vec::new();
-        let hash = stream_model(&mut &source[..], source.len(), |bytes| { received.extend_from_slice(bytes); Ok(()) })?;
+        let hash = stream_model(&mut &source[..], source.len(), |bytes| {
+            received.extend_from_slice(bytes);
+            Ok(())
+        })?;
         assert_eq!(received, source);
         assert_eq!(hash, digest(source));
-        assert!(stream_model(&mut &source[..], source.len()+1, |_| Ok(())).is_err());
-        assert!(stream_model(&mut &source[..], source.len()-1, |_| Ok(())).is_err());
-        assert!(stream_model(&mut &source[..], source.len(), |_| anyhow::bail!("injected append failure")).is_err());
+        assert!(stream_model(&mut &source[..], source.len() + 1, |_| Ok(())).is_err());
+        assert!(stream_model(&mut &source[..], source.len() - 1, |_| Ok(())).is_err());
+        assert!(
+            stream_model(&mut &source[..], source.len(), |_| anyhow::bail!(
+                "injected append failure"
+            ))
+            .is_err()
+        );
         struct Broken;
-        impl std::io::Read for Broken { fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("injected read failure")) } }
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected read failure"))
+            }
+        }
         assert!(stream_model(&mut Broken, source.len(), |_| Ok(())).is_err());
         Ok(())
     }
 }
 
 /// Strict host opt-in; compatibility environment aliases are handled by env::var.
-pub fn feedback_enabled()->Result<bool> { feedback_switch("RSRS_FEEDBACK",false) }
-fn feedback_switch(name:&str,default:bool)->Result<bool> {
+pub fn feedback_enabled() -> Result<bool> {
+    feedback_switch("RSRS_FEEDBACK", false)
+}
+fn feedback_switch(name: &str, default: bool) -> Result<bool> {
     match crate::env::var(name) {
-        Ok(value)=>match value.trim(){"1"=>Ok(true),"0"=>Ok(false),_=>anyhow::bail!("{name} must be 0 or 1")},
-        Err(std::env::VarError::NotPresent)=>Ok(default),Err(error)=>Err(error.into()),
+        Ok(value) => match value.trim() {
+            "1" => Ok(true),
+            "0" => Ok(false),
+            _ => anyhow::bail!("{name} must be 0 or 1"),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
     }
 }
 
 /// Host environment defaults, copied into each immutable request.
-pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
+pub fn query_settings_from_env() -> Result<serde_json::Map<String, Value>> {
     let mut settings = serde_json::Map::new();
     match crate::env::var("RSRS_RECALL_PROFILE") {
         Ok(value) if value == "legacy" => {
@@ -491,35 +644,73 @@ pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
         settings.insert("feedback".into(),json!({"enabled":true,"good":{},"bad":{},"bad_penalty":feedback_switch("RSRS_BAD_PENALTY",true)?}));
     }
     match crate::env::var("RSRS_ROUTE") {
-        Ok(value) => { settings.insert("route_on".to_owned(), json!(value != "0")); }
+        Ok(value) => {
+            settings.insert("route_on".to_owned(), json!(value != "0"));
+        }
         Err(std::env::VarError::NotPresent) => {}
         Err(error) => return Err(error.into()),
     }
     match crate::env::var("RSRS_ABLATE") {
-        Ok(value) => { settings.insert("ablate".to_owned(), json!(value)); }
+        Ok(value) => {
+            settings.insert("ablate".to_owned(), json!(value));
+        }
         Err(std::env::VarError::NotPresent) => {}
         Err(error) => return Err(error.into()),
     }
     for (key, name) in [
-        ("cos_min", "RSRS_RECALL_COS_MIN"), ("sim_min", "RSRS_RECALL_SIM_MIN"),
-        ("cos_relative_ratio", "RSRS_RECALL_COS_RELATIVE_RATIO"), ("cos_margin", "RSRS_RECALL_COS_MARGIN"),
-        ("lexical_weight", "RSRS_RECALL_LEXICAL_WEIGHT"), ("semantic_power", "RSRS_RECALL_SEMANTIC_POWER"),
-        ("aux_cap_ratio", "RSRS_RECALL_AUX_CAP_RATIO"), ("rrf_cap", "RSRS_RECALL_RRF_CAP"),
-    ] { explicit_setting::<f32>(&mut settings, key, name)?; }
+        ("cos_min", "RSRS_RECALL_COS_MIN"),
+        ("sim_min", "RSRS_RECALL_SIM_MIN"),
+        ("cos_relative_ratio", "RSRS_RECALL_COS_RELATIVE_RATIO"),
+        ("cos_margin", "RSRS_RECALL_COS_MARGIN"),
+        ("lexical_weight", "RSRS_RECALL_LEXICAL_WEIGHT"),
+        ("semantic_power", "RSRS_RECALL_SEMANTIC_POWER"),
+        ("aux_cap_ratio", "RSRS_RECALL_AUX_CAP_RATIO"),
+        ("rrf_cap", "RSRS_RECALL_RRF_CAP"),
+    ] {
+        explicit_setting::<f32>(&mut settings, key, name)?;
+    }
     explicit_setting::<String>(&mut settings, "fusion", "RSRS_RECALL_FUSION")?;
     explicit_setting::<f32>(&mut settings, "fusion_alpha", "RSRS_RECALL_FUSION_ALPHA")?;
     explicit_setting::<f32>(&mut settings, "fusion_beta", "RSRS_RECALL_FUSION_BETA")?;
-    explicit_setting::<f32>(&mut settings, "fusion_temperature", "RSRS_RECALL_FUSION_TEMPERATURE")?;
-    explicit_setting::<f32>(&mut settings, "fusion_gate_recency", "RSRS_RECALL_FUSION_GATE_RECENCY")?;
-    explicit_setting::<f32>(&mut settings, "fusion_gate_recency_temporal", "RSRS_RECALL_FUSION_GATE_RECENCY_TEMPORAL")?;
-    explicit_setting::<f32>(&mut settings, "fusion_gate_hot", "RSRS_RECALL_FUSION_GATE_HOT")?;
-    explicit_setting::<f32>(&mut settings, "fusion_gate_tree", "RSRS_RECALL_FUSION_GATE_TREE")?;
-    explicit_setting::<f32>(&mut settings, "fusion_temporal_alpha", "RSRS_RECALL_FUSION_TEMPORAL_ALPHA")?;
+    explicit_setting::<f32>(
+        &mut settings,
+        "fusion_temperature",
+        "RSRS_RECALL_FUSION_TEMPERATURE",
+    )?;
+    explicit_setting::<f32>(
+        &mut settings,
+        "fusion_gate_recency",
+        "RSRS_RECALL_FUSION_GATE_RECENCY",
+    )?;
+    explicit_setting::<f32>(
+        &mut settings,
+        "fusion_gate_recency_temporal",
+        "RSRS_RECALL_FUSION_GATE_RECENCY_TEMPORAL",
+    )?;
+    explicit_setting::<f32>(
+        &mut settings,
+        "fusion_gate_hot",
+        "RSRS_RECALL_FUSION_GATE_HOT",
+    )?;
+    explicit_setting::<f32>(
+        &mut settings,
+        "fusion_gate_tree",
+        "RSRS_RECALL_FUSION_GATE_TREE",
+    )?;
+    explicit_setting::<f32>(
+        &mut settings,
+        "fusion_temporal_alpha",
+        "RSRS_RECALL_FUSION_TEMPORAL_ALPHA",
+    )?;
     for (key, name, default) in [
-        ("bm25", "RSRS_RECALL_BM25", true), ("max_fusion", "RSRS_RECALL_MAX_FUSION", false),
-        ("normalize_ablation", "RSRS_RECALL_NORMALIZE_ABLATION", true), ("debug_score", "RSRS_DEBUG_SCORE", false),
+        ("bm25", "RSRS_RECALL_BM25", true),
+        ("max_fusion", "RSRS_RECALL_MAX_FUSION", false),
+        ("normalize_ablation", "RSRS_RECALL_NORMALIZE_ABLATION", true),
+        ("debug_score", "RSRS_DEBUG_SCORE", false),
     ] {
-        if crate::env::var_os(name).is_some() { settings.insert(key.into(), json!(feedback_switch(name, default)?)); }
+        if crate::env::var_os(name).is_some() {
+            settings.insert(key.into(), json!(feedback_switch(name, default)?));
+        }
     }
     explicit_setting::<u32>(&mut settings, "heat_cap", "RSRS_RECALL_HEAT_CAP")?;
     explicit_setting::<f32>(&mut settings, "recall_min_score", "RSRS_RECALL_MIN_SCORE")?;
@@ -530,6 +721,9 @@ pub fn query_settings_from_env()->Result<serde_json::Map<String,Value>> {
         "ancestor_root_floor",
         "RSRS_ANCESTOR_ROOT_FLOOR",
     )?;
-    settings.insert("now".into(), json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+    settings.insert(
+        "now".into(),
+        json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+    );
     Ok(settings)
 }

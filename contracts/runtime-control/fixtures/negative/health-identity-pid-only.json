@@ -1,0 +1,8 @@
+{
+  "fixture_type": "health_identity",
+  "expected": "reject",
+  "error_code": "identity_incomplete",
+  "payload": {
+    "pid": 4321
+  }
+}

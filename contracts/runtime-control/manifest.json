@@ -1,0 +1,390 @@
+{
+  "contract": "runtime-control",
+  "contract_version": 1,
+  "release_metadata_schema_version": 2,
+  "wire_protocol": {
+    "minimum": 1,
+    "maximum": 1
+  },
+  "fixtures": {
+    "positive": [
+      "fixtures/positive/release-metadata-v2.json",
+      "fixtures/positive/release-metadata-v1.json",
+      "fixtures/positive/health-identity.json",
+      "fixtures/positive/stop-draining.json",
+      "fixtures/positive/operation-result-completed.json",
+      "fixtures/positive/root-layout.json",
+      "fixtures/positive/bootstrap-route.json",
+      "fixtures/positive/stop-final-drained.json",
+      "fixtures/positive/business-rpc-scoped.json",
+      "fixtures/positive/runtime-result-scoped.json",
+      "fixtures/positive/rpc-response-completed.json",
+      "fixtures/positive/rpc-response-failed.json",
+      "fixtures/positive/rpc-response-pending.json",
+      "fixtures/positive/rpc-response-replay.json",
+      "fixtures/positive/rpc-result-completed.json",
+      "fixtures/positive/rpc-result-pending.json",
+      "fixtures/positive/rpc-result-unknown.json",
+      "fixtures/positive/rpc-response-scope-rejected-missing.json",
+      "fixtures/positive/rpc-response-scope-rejected-current.json",
+      "fixtures/positive/stop-final-forced-timeout.json",
+      "fixtures/positive/stop-final-compatibility-timeout.json",
+      "fixtures/positive/assets-loaded.json",
+      "fixtures/positive/assets-legacy-incomplete.json",
+      "fixtures/positive/assets-not-run.json",
+      "fixtures/positive/assets-failed.json"
+    ],
+    "negative": [
+      "fixtures/negative/release-metadata-conflicting-hash.json",
+      "fixtures/negative/release-metadata-missing-binary-hash.json",
+      "fixtures/negative/release-metadata-wrong-target.json",
+      "fixtures/negative/health-identity-pid-only.json",
+      "fixtures/negative/stop-ambiguous-ok.json",
+      "fixtures/negative/idempotency-conflict.json",
+      "fixtures/negative/root-layout-legacy-as-data-only.json",
+      "fixtures/negative/stop-final-unfinished.json",
+      "fixtures/negative/business-scope-missing.json",
+      "fixtures/negative/business-scope-empty.json",
+      "fixtures/negative/business-scope-account-mismatch.json",
+      "fixtures/negative/business-scope-instance-mismatch.json",
+      "fixtures/negative/business-scope-generation-mismatch.json",
+      "fixtures/negative/runtime-result-scope-missing.json",
+      "fixtures/negative/rpc-response-stale-request.json",
+      "fixtures/negative/rpc-response-wrong-version.json",
+      "fixtures/negative/rpc-response-foreign-operation.json",
+      "fixtures/negative/rpc-response-scope-missing.json",
+      "fixtures/negative/rpc-response-scope-foreign.json",
+      "fixtures/negative/rpc-response-key-foreign.json",
+      "fixtures/negative/rpc-response-ok-exit.json",
+      "fixtures/negative/rpc-result-stale-request.json",
+      "fixtures/negative/rpc-result-foreign-operation.json",
+      "fixtures/negative/rpc-result-scope-foreign.json",
+      "fixtures/negative/rpc-result-key-foreign.json",
+      "fixtures/negative/rpc-response-replay-stale-request.json",
+      "fixtures/negative/rpc-response-replay-mutated-receipt.json",
+      "fixtures/negative/rpc-response-scope-rejection-success.json",
+      "fixtures/negative/stop-final-fabricated-completion.json",
+      "fixtures/negative/assets-complete-without-probe.json",
+      "fixtures/negative/assets-complete-failed.json",
+      "fixtures/negative/assets-complete-not-run.json",
+      "fixtures/negative/assets-missing-evidence.json",
+      "fixtures/negative/assets-not-ready.json",
+      "fixtures/negative/assets-reused-session.json",
+      "fixtures/negative/assets-no-inference.json",
+      "fixtures/negative/assets-runtime-version-missing.json",
+      "fixtures/negative/assets-module-hash-invalid.json",
+      "fixtures/negative/assets-module-path.json",
+      "fixtures/negative/assets-raw-address.json",
+      "fixtures/negative/assets-reason-json.json",
+      "fixtures/negative/assets-missing-file.json",
+      "fixtures/negative/assets-false-loaded.json",
+      "fixtures/negative/assets-provider-mismatch.json",
+      "fixtures/negative/assets-wrong-contract.json",
+      "fixtures/negative/assets-empty-modules.json",
+      "fixtures/negative/assets-failed-with-evidence.json",
+      "fixtures/negative/assets-unknown-state.json"
+    ]
+  },
+  "files": [
+    {
+      "path": "fixtures/negative/business-scope-account-mismatch.json",
+      "sha256": "8536e1eb228ba86a3b2b10d024e92f6765cb46a7c32210edbca9e0bb2d646324"
+    },
+    {
+      "path": "fixtures/negative/business-scope-empty.json",
+      "sha256": "dc65048d6979e72bbfad5ff1d39899735e82155b6779decff9e77596bf5f3f92"
+    },
+    {
+      "path": "fixtures/negative/business-scope-generation-mismatch.json",
+      "sha256": "9d07e99c5fb1a211db366469e17e68c2238853bc9c7a83145c96fd042e351ca7"
+    },
+    {
+      "path": "fixtures/negative/business-scope-instance-mismatch.json",
+      "sha256": "a97569d8808733552b0f30541afa936ed3e6abb8779ffbac5e4ef65138184771"
+    },
+    {
+      "path": "fixtures/negative/business-scope-missing.json",
+      "sha256": "4479d20a942b35eb2b9f4c0ba8edc69ff4c400d763cc121324129228b8f8940f"
+    },
+    {
+      "path": "fixtures/negative/health-identity-pid-only.json",
+      "sha256": "7e997e4b21df45060ec4847a0ee475220b8b4aef25c53e4807c1cb3a1b723e25"
+    },
+    {
+      "path": "fixtures/negative/idempotency-conflict.json",
+      "sha256": "be34847d52a17e75dc9ef0f08e8b8e8bfd97d58dcc975a608e0d7df94304a1a7"
+    },
+    {
+      "path": "fixtures/negative/release-metadata-conflicting-hash.json",
+      "sha256": "ceebc92b47498e71a10a4b207712555c4223bf7548112399744a3b9780e35be5"
+    },
+    {
+      "path": "fixtures/negative/release-metadata-missing-binary-hash.json",
+      "sha256": "9b4affff90860be5771be619f9f58973d14de5fcd485abb4636be9734ceceeda"
+    },
+    {
+      "path": "fixtures/negative/release-metadata-wrong-target.json",
+      "sha256": "db987834584c5f264feeb7a6a3335fa60361b848a9714e87bb66fb502c434684"
+    },
+    {
+      "path": "fixtures/negative/root-layout-legacy-as-data-only.json",
+      "sha256": "c88d7f5966d362c53658a42cd120be05fdffe35801ebfa49f92ca78fdb309447"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-foreign-operation.json",
+      "sha256": "8c6b480eb7705a5a9b14c2d8904f4845aa3368c10c1e193a52b43e94c890a6fc"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-key-foreign.json",
+      "sha256": "bada5ed1bbe2226204454a56af333aa17450105868337e3f3f66b78d45c97dd3"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-ok-exit.json",
+      "sha256": "f0f148d37c60924ef92ec5ac735b18baa5d740d043f2720c2efef1d6eadc77ef"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-replay-mutated-receipt.json",
+      "sha256": "181567e279058895a5d1cb6a9bd1d20a8f0569c47c15e80f038212df2aaa21d5"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-replay-stale-request.json",
+      "sha256": "36412a87ce397d4fef1982001f1be98dd98c432df7dbb658825bdf897d11158c"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-scope-foreign.json",
+      "sha256": "7ffeec9f5386e6ca4348bb453758bd2a9c58a2d6a32666f181656b2ce25e1a6b"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-scope-missing.json",
+      "sha256": "5703918ec85440e041c03b63bd13c4953e1535f38c75a9aaf7ac114e1ce576fa"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-scope-rejection-success.json",
+      "sha256": "41285bc3353a7674ab3068b2290595a6bcb6cfe60eb885280e81121f4ed6c481"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-stale-request.json",
+      "sha256": "ef9225a987f587f26cc787c4f5ce1c17b74f0a88650f04ac80362f9e38406313"
+    },
+    {
+      "path": "fixtures/negative/rpc-response-wrong-version.json",
+      "sha256": "d119b215ac9c834be3319134d805ebf8f7fb5c40c0f5f7391416ee89f4c59c1f"
+    },
+    {
+      "path": "fixtures/negative/rpc-result-foreign-operation.json",
+      "sha256": "81dcd79f2e5d092619eea5933d3cf5c7fd64fcb1ab90f0437f940fde4e758891"
+    },
+    {
+      "path": "fixtures/negative/rpc-result-key-foreign.json",
+      "sha256": "c3f08281e9bbee032a9f47d15fb04fd605820045f3675f2cac06285e7e4521b1"
+    },
+    {
+      "path": "fixtures/negative/rpc-result-scope-foreign.json",
+      "sha256": "bf3588d29721748f189259f6957c7e3f1d1dcea12fdb8f9960e78e37f2646c8a"
+    },
+    {
+      "path": "fixtures/negative/rpc-result-stale-request.json",
+      "sha256": "d9b1d0498a6849c05934c8457eb16a364bf31ddb499416d168c19db4e53f31e1"
+    },
+    {
+      "path": "fixtures/negative/runtime-result-scope-missing.json",
+      "sha256": "9ce0c9e95152ef50a4e738cb3b3ce2eefcba6355193b317df94df3deaf1167f5"
+    },
+    {
+      "path": "fixtures/negative/stop-ambiguous-ok.json",
+      "sha256": "8a710c008dbc7fc69468e7788d2d0584df8f922e5d3964672d4b49778c3813dc"
+    },
+    {
+      "path": "fixtures/negative/stop-final-unfinished.json",
+      "sha256": "15173d321a20b726f8af2ca985c7a55542d03186d6bb6214ed50ebd69fba3751"
+    },
+    {
+      "path": "fixtures/positive/bootstrap-route.json",
+      "sha256": "017e2c006eb7d610d62de7832735bf099ceba27253f1d8e62c0b1a78aacd96d1"
+    },
+    {
+      "path": "fixtures/positive/business-rpc-scoped.json",
+      "sha256": "c5b17e4c795fbf1838fde92fe03a2a99865561c5dfcf4704d395b2e226ecad09"
+    },
+    {
+      "path": "fixtures/positive/health-identity.json",
+      "sha256": "bed194d776b542db105c12077e636fe00ad31435f965c2c9a3eb78a930c1def7"
+    },
+    {
+      "path": "fixtures/positive/operation-result-completed.json",
+      "sha256": "7e01d41890d2f0085cc11401119d53e74c63114ccef272e01a347ce4bf56aec0"
+    },
+    {
+      "path": "fixtures/positive/release-metadata-v1.json",
+      "sha256": "e183454a059aa0725dd216b252630eabd8551c58c45d431bc51686e3b12d4d6b"
+    },
+    {
+      "path": "fixtures/positive/release-metadata-v2.json",
+      "sha256": "f822e9dd290823b8161075c842d58eecc8c7491fde1c1d70f7de38a174023c7f"
+    },
+    {
+      "path": "fixtures/positive/root-layout.json",
+      "sha256": "41a7ba6bd4d70992b9a66fe702d22394f58b96833a58b7819f4fef5ec4a9b6be"
+    },
+    {
+      "path": "fixtures/positive/rpc-response-completed.json",
+      "sha256": "85b86a05a25aa046c266853a0a3eb5fd1822db6edcb629026193651a94f1b0ef"
+    },
+    {
+      "path": "fixtures/positive/rpc-response-failed.json",
+      "sha256": "a24cdd9be8e5cc20ab8d1c7659ad01e29ebb68891bd0c908feb4662441be53e4"
+    },
+    {
+      "path": "fixtures/positive/rpc-response-pending.json",
+      "sha256": "3fd7f92a639943723234786e0e45920381c5b8b6249611a79129029a7ded1a7e"
+    },
+    {
+      "path": "fixtures/positive/rpc-response-replay.json",
+      "sha256": "f14d942103aeb20f7b87dce63641e0e0a2bb928cc046e5f159fb1e69326b7e35"
+    },
+    {
+      "path": "fixtures/positive/rpc-response-scope-rejected-current.json",
+      "sha256": "07d822b7737566711fe13389c3cfdafb9e42e5b6b765d25cbc7aa3d6e3b3ed00"
+    },
+    {
+      "path": "fixtures/positive/rpc-response-scope-rejected-missing.json",
+      "sha256": "fb9814397b00edf1dca91affbdfe939265043654c3e2fcadfe38cdbbb6bfe097"
+    },
+    {
+      "path": "fixtures/positive/rpc-result-completed.json",
+      "sha256": "f37322094e3a6e08a44b6f077737e8bbed96384b291f91bbdf7911354ad7c3ca"
+    },
+    {
+      "path": "fixtures/positive/rpc-result-pending.json",
+      "sha256": "ae7aaf8ba4ea965c3ef5b66e8d3c2389c170160c19fb353da41da09ec7312eaa"
+    },
+    {
+      "path": "fixtures/positive/rpc-result-unknown.json",
+      "sha256": "7ae64de1419142ee7613e0ddd4d600420df2eeb7771a5d01bef8c60367cf0cbb"
+    },
+    {
+      "path": "fixtures/positive/runtime-result-scoped.json",
+      "sha256": "1182474bc2c2f872b8c6cdd818fda253f43164bb4bd98ee00e1e47c5208819db"
+    },
+    {
+      "path": "fixtures/positive/stop-draining.json",
+      "sha256": "7be87d90a01c578d9070b50c53a093bb51a452d643ec6cd0de6ba83de2b92196"
+    },
+    {
+      "path": "fixtures/positive/stop-final-drained.json",
+      "sha256": "1e49dda7ffb1380da10460c949c701337c2bfaae28380126766e2314068bbcaa"
+    },
+    {
+      "path": "schema/control-contract.schema.json",
+      "sha256": "7cfe9d5b741c061266a26c467f35eb0f2ccbf6b1885f1b36c7bb9ab552b41fd7"
+    },
+    {
+      "path": "schema/release-metadata.schema.json",
+      "sha256": "769e34a3fe927ec1e7d2a2a4b6b06c62a4b769123723ab42820a6b018296e3c8"
+    },
+    {
+      "path": "fixtures/positive/stop-final-forced-timeout.json",
+      "sha256": "c833973de7370c1134f16566334f3b406d1d063ddcc7500e951370b689871c60"
+    },
+    {
+      "path": "fixtures/positive/stop-final-compatibility-timeout.json",
+      "sha256": "7ebf29d31923b4f7b0b61dd7cd4adfbe06e75f33ad3a89d5c84580046704957c"
+    },
+    {
+      "path": "fixtures/negative/stop-final-fabricated-completion.json",
+      "sha256": "21c89e3926c008b536ed32786bd0a96100d1ca08dd70baa2fe204b989925b359"
+    },
+    {
+      "path": "fixtures/positive/assets-loaded.json",
+      "sha256": "78587b16b7fa7e02d2be03486a7e4f3f25575722bf013bc1bb272fb73d7d1524"
+    },
+    {
+      "path": "fixtures/positive/assets-legacy-incomplete.json",
+      "sha256": "73c33de8812c11412dfe155a67a6c0abdfa88205765f7726539ffd037c6e1f30"
+    },
+    {
+      "path": "fixtures/positive/assets-not-run.json",
+      "sha256": "1d69917b884403c252b191d5848d17f9cc1a97245b3749bac6ddad0c14f4f26a"
+    },
+    {
+      "path": "fixtures/positive/assets-failed.json",
+      "sha256": "625876186d8fd95129c9ba6619c16c902ff4a603e5a3a1567e3b14561393ebfa"
+    },
+    {
+      "path": "fixtures/negative/assets-complete-without-probe.json",
+      "sha256": "082a616a371ea35208a1b02ebd909bf7fcf6153cb1e19189ec1c191dfeda5611"
+    },
+    {
+      "path": "fixtures/negative/assets-complete-failed.json",
+      "sha256": "b5d3969888b7e91b4afd947d19bf4adf5e0f0a193b1fbd0673115b907bb85379"
+    },
+    {
+      "path": "fixtures/negative/assets-complete-not-run.json",
+      "sha256": "86a04e87370dc131843b0c7a4b8e14d57dc1259edd20319c7f49be9b796db508"
+    },
+    {
+      "path": "fixtures/negative/assets-missing-evidence.json",
+      "sha256": "efc6b2f9a9bda45cf93025f39c4b25f75d3e2c5517e76f71c44cb88d2dd265a5"
+    },
+    {
+      "path": "fixtures/negative/assets-not-ready.json",
+      "sha256": "c26d7debdfd648f363045e39bc88bc894b1c56a1d67c44a32af124d5aef88c4c"
+    },
+    {
+      "path": "fixtures/negative/assets-reused-session.json",
+      "sha256": "acdbbf049492cfd01a301bb933d90c3f3d6eba7c4369601a2e64458df40a7d3e"
+    },
+    {
+      "path": "fixtures/negative/assets-no-inference.json",
+      "sha256": "397b6760d9c0fdefc598d309e9d9a425c6518e5666265ee0383a4f7b828de20e"
+    },
+    {
+      "path": "fixtures/negative/assets-runtime-version-missing.json",
+      "sha256": "352ca654f9758cf1fcdf40816f77305a845a6c000d5ed3fc35ac228a6dd81ee1"
+    },
+    {
+      "path": "fixtures/negative/assets-module-hash-invalid.json",
+      "sha256": "2c073ab75151a2e08f9d07aa4e27ba9256764eb28b16e4268653d51f72b6ebeb"
+    },
+    {
+      "path": "fixtures/negative/assets-module-path.json",
+      "sha256": "894b9590ec1053baa23e2837acd5d21d28190d572e24ca9d1d29567f58b2e20a"
+    },
+    {
+      "path": "fixtures/negative/assets-raw-address.json",
+      "sha256": "e65d7ea9e82a2228db54d34f0395b720e5d0303a78b0862c666ee06516478c4a"
+    },
+    {
+      "path": "fixtures/negative/assets-reason-json.json",
+      "sha256": "acd7528cbff58744057418ccc772911ae7eafc764325308c64c908d92e3764c1"
+    },
+    {
+      "path": "fixtures/negative/assets-missing-file.json",
+      "sha256": "453f04741ac83d32964c5c6c4434bd0acc6830b6a6faad27260810148b071a17"
+    },
+    {
+      "path": "fixtures/negative/assets-false-loaded.json",
+      "sha256": "3117cd779d954e337993bc986e339f2944d132d79d6a855c751540963d871bee"
+    },
+    {
+      "path": "fixtures/negative/assets-provider-mismatch.json",
+      "sha256": "e8033001126a0685bb1ccad13637fa7f0b893e0f294450b55e2838d5fdd99c41"
+    },
+    {
+      "path": "fixtures/negative/assets-wrong-contract.json",
+      "sha256": "fc486ec0ad46c174cc3f2fef13c0df11a709a26ed1c450788eab3133b6ce1d39"
+    },
+    {
+      "path": "fixtures/negative/assets-empty-modules.json",
+      "sha256": "f1112b33115f1baac003db664b4fb1d2adb3c210eece3a19292d56a3eeb80cb9"
+    },
+    {
+      "path": "fixtures/negative/assets-failed-with-evidence.json",
+      "sha256": "b68f06ebda09aee5d39a30fcf3f9f726cdb4f0177def875400181c8d03e28adf"
+    },
+    {
+      "path": "fixtures/negative/assets-unknown-state.json",
+      "sha256": "7a2360a4b7f3a5251a7655dac4d41cdd05ea9f119942e037737146fbaa8374df"
+    }
+  ]
+}

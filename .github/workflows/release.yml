@@ -1,11 +1,11 @@
 name: Runtime release
 
-# Builds rsrs-runtime for all seven platform targets, runs the full native
+# Builds rsrs-runtime for all eight platform targets, runs the full native
 # regression matrix and publishes the release assets:
 #   rsrs-runtime-<triple>(.exe)      raw binary
 #   rsrs-runtime-<triple>.tar.gz     binary + core-runtime.json + native Core
 #                                    runtime libraries and notices
-#   runtime-build-<triple>.json      version/tag/triple/SHA-256/compat metadata
+#   runtime-build-<triple>.json      schema-2 build metadata and integrity manifest
 on:
   push:
     tags: ['v*']
@@ -117,6 +117,8 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-15
+            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rustflags: -C target-feature=-crt-static
@@ -141,6 +143,26 @@ jobs:
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
+      - name: Configure Intel macOS cross compilation on Apple silicon
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ARCH" = 'ARM64'
+          test "$(uname -s)" = 'Darwin'
+          test "$(sysctl -n hw.optional.arm64)" = '1'
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          cc="$(xcrun --find clang)"
+          cxx="$(xcrun --find clang++)"
+          ar="$(xcrun --find ar)"
+          {
+            echo "SDKROOT=$sdk"
+            echo "CC_x86_64_apple_darwin=$cc"
+            echo "CXX_x86_64_apple_darwin=$cxx"
+            echo "AR_x86_64_apple_darwin=$ar"
+            echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=$cc"
+            echo 'MACOSX_DEPLOYMENT_TARGET=13.4'
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -222,6 +244,7 @@ jobs:
           RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
           RUNTIME_CHANNEL: ${{ needs.plan.outputs.channel }}
           RUNTIME_TARGET: ${{ matrix.target }}
+          RUNTIME_SOURCE_SHA: ${{ needs.plan.outputs.sha }}
           BUILD_DIR: ${{ steps.builddir.outputs.dir }}
         run: |
           set -euo pipefail
@@ -239,37 +262,78 @@ jobs:
           rm -rf payload; mkdir payload
           cp "$BUILD_DIR/$built" "payload/$binary"
           cp "$BUILD_DIR/core-runtime.json" payload/core-runtime.json
-          # The dev.21 Core SDK statically links Core FFI into the runtime
-          # binary; a separate runtime/ payload exists only for dynamic SDKs.
-          if [ -d "$BUILD_DIR/runtime" ]; then cp -R "$BUILD_DIR/runtime" payload/runtime; fi
-          cp -R "$BUILD_DIR/core-notices" payload/core-notices
+          # SDK staging preserves loader-relative paths next to the binary.
+          # Copy every declared file, including root DLLs and nested resources.
+          node - <<'NODE'
+          const fs = require('fs'), path = require('path'), {createHash} = require('crypto');
+          const manifest = JSON.parse(fs.readFileSync('payload/core-runtime.json', 'utf8'));
+          if (manifest.schema_version !== 1 || manifest.target !== process.env.RUNTIME_TARGET ||
+              !Array.isArray(manifest.files) || !manifest.files.length || manifest.files.length > 4094) {
+            throw new Error('Invalid staged Core runtime manifest');
+          }
+          const seen = new Set(['core-runtime.json', process.env.RUNTIME_BINARY_FILE.toLowerCase()]);
+          let total = 0;
+          for (const file of manifest.files) {
+            if (typeof file.path !== 'string' || file.path.length > 1024 || /[\\:\x00-\x1f\x7f]/.test(file.path) ||
+                file.path.split('/').some(part => !part || part === '.' || part === '..' || /[. ]$/.test(part))) {
+              throw new Error('Unsafe staged Core payload path');
+            }
+            const key = file.path.toLowerCase();
+            if (seen.has(key)) throw new Error('Duplicate staged Core payload path');
+            seen.add(key);
+            let source = process.env.BUILD_DIR;
+            for (const part of file.path.split('/')) {
+              source = path.join(source, part);
+              if (fs.lstatSync(source).isSymbolicLink()) throw new Error('Linked staged Core payload');
+            }
+            const info = fs.lstatSync(source);
+            if (!info.isFile() || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > 256 * 2**20 ||
+                info.size !== file.size || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('Invalid staged Core payload file');
+            total += info.size;
+            if (total > 512 * 2**20) throw new Error('Core payload exceeds extraction limit');
+            const bytes = fs.readFileSync(source);
+            if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error('Staged Core payload checksum mismatch');
+            const destination = path.join('payload', file.path);
+            fs.mkdirSync(path.dirname(destination), {recursive: true});
+            fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+            fs.chmodSync(destination, info.mode & 0o777);
+          }
+          NODE
           if [ -n "$(find payload -type l -print -quit)" ]; then
             echo "::error::Symlinked release payloads are forbidden"
             exit 1
           fi
           export RUNTIME_BINARY_FILE="$binary"
-          tar -czf "rsrs-runtime-$target.tar.gz" -C payload .
+          tar --format=ustar -czf "rsrs-runtime-$target.tar.gz" -C payload .
           node - <<'NODE'
-          const cp = require('child_process');
+          const cp = require('child_process'), fs = require('fs');
           const target = process.env.RUNTIME_TARGET;
           const binary = `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`;
           const archive = `rsrs-runtime-${process.env.RUNTIME_TARGET}.tar.gz`;
           const entries = cp.execFileSync('tar', ['-tzf', archive], {encoding: 'utf8'})
             .split(/\r?\n/).filter(Boolean);
+          const resources = JSON.parse(fs.readFileSync('payload/core-runtime.json', 'utf8')).files;
+          const required = new Set([binary, 'core-runtime.json', ...resources.map(file => file.path)]);
+          const directories = new Set();
+          for (const file of required) {
+            const parts = file.split('/');
+            while (parts.length > 1) { parts.pop(); directories.add(parts.join('/')); }
+          }
+          const seen = new Set();
           let runtimeFiles = 0, noticeFiles = 0;
           for (const raw of entries) {
             const entry = raw.replace(/^\.\//, '').replace(/\/$/, '');
             if (!entry || entry === '.') continue;
             const safePath = !entry.includes('\\') && !entry.startsWith('/') &&
               entry.split('/').every(part => part && part !== '.' && part !== '..');
-            const withinWhitelist = entry === binary || entry === 'core-runtime.json' ||
-              entry === 'runtime' || entry === 'core-notices' ||
-              entry.startsWith('runtime/') || entry.startsWith('core-notices/');
+            const withinWhitelist = required.has(entry) || directories.has(entry);
+            if (seen.has(entry.toLowerCase())) throw new Error('Duplicate archive payload path');
+            seen.add(entry.toLowerCase());
             if (!safePath || !withinWhitelist) throw new Error(`Unsafe archive path: ${entry}`);
-            if (entry.startsWith('runtime/')) ++runtimeFiles;
+            if (required.has(entry) && entry !== binary && entry !== 'core-runtime.json' && !entry.startsWith('core-notices/')) ++runtimeFiles;
             if (entry.startsWith('core-notices/')) ++noticeFiles;
           }
-          for (const name of [binary, 'core-runtime.json']) {
+          for (const name of required) {
             if (!entries.some(entry => entry.replace(/^\.\//, '') === name)) throw new Error(`Archive is missing ${name}`);
           }
           if (!noticeFiles) throw new Error('Archive is missing redistribution notices');
@@ -279,21 +343,45 @@ jobs:
           binary_sha256="$(sha256sum "payload/$binary" | cut -d ' ' -f 1)"
           export RUNTIME_TAR_SHA256="$tar_sha256" RUNTIME_BINARY_SHA256="$binary_sha256" RUNTIME_BINARY_FILE="$binary"
           node - <<'NODE'
+          const {createHash} = require('crypto');
           const fs = require('fs');
+          const path = require('path');
+          function manifestFiles(directory, root) {
+            const files = [];
+            for (const entry of fs.readdirSync(directory, {withFileTypes: true}).sort((a, b) => a.name.localeCompare(b.name))) {
+              const file = path.join(directory, entry.name);
+              if (entry.isDirectory()) files.push(...manifestFiles(file, root));
+              else if (entry.isFile()) {
+                const relative = path.relative(root, file).split(path.sep).join('/');
+                files.push({path: relative, size: fs.statSync(file).size,
+                  sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex')});
+              } else throw new Error(`Unsupported payload entry: ${file}`);
+            }
+            return files;
+          }
           const report = {
-            schema_version: 1,
+            schema_version: 2,
             runtime_version: process.env.RUNTIME_VERSION,
             tag: process.env.RUNTIME_TAG,
             channel: process.env.RUNTIME_CHANNEL,
-            triple: process.env.RUNTIME_TARGET,
-            sha256: process.env.RUNTIME_TAR_SHA256,
+            target_triple: process.env.RUNTIME_TARGET,
+            archive_file: `rsrs-runtime-${process.env.RUNTIME_TARGET}.tar.gz`,
+            archive_sha256: process.env.RUNTIME_TAR_SHA256,
             binary_file: process.env.RUNTIME_BINARY_FILE,
             binary_sha256: process.env.RUNTIME_BINARY_SHA256,
-            compat: {min_cli: process.env.RUNTIME_MIN_CLI, max_cli: process.env.RUNTIME_MAX_CLI}
+            source_commit: process.env.RUNTIME_SOURCE_SHA,
+            compat: {min_cli: process.env.RUNTIME_MIN_CLI, max_cli: process.env.RUNTIME_MAX_CLI},
+            protocol_range: {minimum: 1, maximum: 1},
+            capabilities: {business_executor: '1', mcp_server: '1'},
+            files: manifestFiles('payload', 'payload')
           };
           if (!/^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$/.test(report.runtime_version)) throw new Error('Invalid runtime_version');
-          for (const field of ['sha256', 'binary_sha256']) {
+          for (const field of ['archive_sha256', 'binary_sha256']) {
             if (!/^[a-f0-9]{64}$/.test(report[field])) throw new Error(`Invalid ${field}`);
+          }
+          if (!/^[0-9a-f]{40}$/.test(report.source_commit)) throw new Error('Invalid source_commit');
+          if (!report.files.some(file => file.path === report.binary_file && file.sha256 === report.binary_sha256)) {
+            throw new Error('Binary file manifest does not match binary_sha256');
           }
           for (const field of ['min_cli', 'max_cli']) {
             if (typeof report.compat[field] !== 'string') throw new Error(`Invalid compat.${field}`);
@@ -343,6 +431,8 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
@@ -362,6 +452,13 @@ jobs:
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
+      - name: Require native Intel Mac hardware
+        if: matrix.os == 'macos-15-intel'
+        shell: bash
+        run: |
+          test "$RUNNER_ARCH" = 'X64'
+          test "$(uname -s)" = 'Darwin'
+          test "$(sysctl -n hw.optional.arm64)" = '0'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -399,6 +496,7 @@ jobs:
         env:
           RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
           RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
+          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
           RUNTIME_TARGET: ${{ matrix.target }}
           EXPECTED_MIN_CLI: ${{ env.RUNTIME_MIN_CLI }}
           EXPECTED_MAX_CLI: ${{ env.RUNTIME_MAX_CLI }}
@@ -407,7 +505,9 @@ jobs:
           const fs = require('fs'), cp = require('child_process');
           const target = process.env.RUNTIME_TARGET, version = process.env.RUNTIME_VERSION;
           const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
-          const required = {runtime_version: version, tag: process.env.RUNTIME_TAG, triple: target,
+          const required = {schema_version: 2, runtime_version: version, tag: process.env.RUNTIME_TAG,
+            target_triple: target, archive_file: `rsrs-runtime-${target}.tar.gz`,
+            source_commit: process.env.RUNTIME_SHA,
             binary_file: `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`};
           for (const [key, value] of Object.entries(required)) {
             if (report[key] !== value) throw new Error(`runtime-build ${key} differs: ${report[key]} != ${value}`);
@@ -417,11 +517,11 @@ jobs:
             throw new Error('runtime-build compat window differs from the workflow contract');
           }
           const digest = file => cp.execFileSync('sha256sum', [file], {encoding: 'utf8'}).split(' ')[0];
-          if (digest(`release-assets/rsrs-runtime-${target}.tar.gz`) !== report.sha256) throw new Error('Archive SHA-256 mismatch');
+          if (digest(`release-assets/rsrs-runtime-${target}.tar.gz`) !== report.archive_sha256) throw new Error('Archive SHA-256 mismatch');
           if (digest(`release-assets/${report.binary_file}`) !== report.binary_sha256) throw new Error('Binary SHA-256 mismatch');
           console.log(`Verified ${target} digests for runtime ${version}`);
           NODE
-      - name: Runtime serve/health/stop smoke on the real binary
+      - name: Verify complete release payload and normal drain
         shell: bash
         env:
           RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
@@ -429,61 +529,7 @@ jobs:
           EXPECTED_MIN_CLI: ${{ env.RUNTIME_MIN_CLI }}
           EXPECTED_MAX_CLI: ${{ env.RUNTIME_MAX_CLI }}
         run: |
-          node - <<'NODE'
-          const fs = require('fs'), cp = require('child_process'), os = require('os'), path = require('path');
-          const target = process.env.RUNTIME_TARGET, version = process.env.RUNTIME_VERSION;
-          const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
-          const exe = path.resolve('release-assets', report.binary_file);
-          fs.chmodSync(exe, 0o755);
-          const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rsrs-runtime-smoke-'));
-          const port = 15000 + (process.pid % 20000);
-          const child = cp.spawn(exe, ['serve', '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir],
-            {stdio: ['ignore', 'ignore', 'inherit']});
-          const stop = () => { try { child.kill(); } catch {} };
-          process.on('exit', stop);
-          const deadline = Date.now() + 60000;
-          (async () => {
-            const fail = async message => {
-              console.error(`::error::${message}`);
-              stop();
-              process.exit(1);
-            };
-            let health = null;
-            while (Date.now() < deadline) {
-              try {
-                const response = await fetch(`http://127.0.0.1:${port}/api/health`, {signal: AbortSignal.timeout(3000)});
-                if (response.ok) {
-                  const candidate = await response.json();
-                  const compat = candidate.runtime?.runtime_compat || {};
-                  if (candidate.store_ready === true && candidate.runtime_version === version &&
-                      compat.min_cli === process.env.EXPECTED_MIN_CLI &&
-                      compat.max_cli === process.env.EXPECTED_MAX_CLI) {
-                    health = candidate;
-                    break;
-                  }
-                  console.log(`runtime is reachable but not ready: ${JSON.stringify({
-                    store_ready: candidate.store_ready, runtime_version: candidate.runtime_version, runtime_compat: compat,
-                  })}`);
-                }
-              } catch {}
-              await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-            if (!health) await fail(`Health endpoint on port ${port} never became ready`);
-            if (health.store_ready !== true) await fail(`Health reported store_ready=${health.store_ready}`);
-            if (health.runtime_version !== version) await fail(`Health runtime_version ${health.runtime_version} != ${version}`);
-            const compat = health.runtime?.runtime_compat || {};
-            if (compat.min_cli !== process.env.EXPECTED_MIN_CLI || compat.max_cli !== process.env.EXPECTED_MAX_CLI) {
-              await fail(`Health runtime_compat ${JSON.stringify(compat)} differs from the workflow contract`);
-            }
-            stop();
-            fs.mkdirSync('smoke-report', {recursive: true});
-            fs.writeFileSync(`smoke-report/runtime-smoke-${target}.json`,
-              JSON.stringify({target, version, port, runtime_version: health.runtime_version,
-                runtime_compat: compat, inference_state: health.inference?.state ?? null, passed: true}, null, 2) + '\n');
-            console.log(`Serve/health smoke passed on ${target}: runtime ${version}`);
-            process.exit(0);
-          })().catch(error => { console.error(error); stop(); process.exit(1); });
-          NODE
+          node scripts/smoke-runtime-release.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -515,7 +561,7 @@ jobs:
           pattern: runtime-release-*
           path: release-assets
           merge-multiple: true
-      - name: Verify the complete seven-platform asset inventory and digests
+      - name: Verify the complete eight-platform asset inventory and digests
         env:
           RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
           RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
@@ -523,7 +569,8 @@ jobs:
           node - <<'NODE'
           const fs = require('fs'), cp = require('child_process');
           const targets = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl',
-            'aarch64-unknown-linux-musl', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
+            'aarch64-unknown-linux-musl', 'aarch64-apple-darwin', 'x86_64-apple-darwin',
+            'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
           const expected = [];
           for (const target of targets) {
             expected.push(`rsrs-runtime-${target}.tar.gz`, `runtime-build-${target}.json`);
@@ -533,13 +580,16 @@ jobs:
           const digest = file => cp.execFileSync('sha256sum', [file], {encoding: 'utf8'}).split(' ')[0];
           for (const target of targets) {
             const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
-            if (report.runtime_version !== process.env.RUNTIME_VERSION || report.tag !== process.env.RUNTIME_TAG || report.triple !== target) {
+            if (report.schema_version !== 2 || report.runtime_version !== process.env.RUNTIME_VERSION ||
+                report.tag !== process.env.RUNTIME_TAG || report.target_triple !== target ||
+                report.archive_file !== `rsrs-runtime-${target}.tar.gz` ||
+                !/^[0-9a-f]{64}$/.test(report.archive_sha256 || '')) {
               throw new Error(`runtime-build-${target}.json identity mismatch`);
             }
             if (report.compat?.min_cli !== process.env.RUNTIME_MIN_CLI || report.compat?.max_cli !== process.env.RUNTIME_MAX_CLI) {
               throw new Error(`runtime-build-${target}.json compat window mismatch`);
             }
-            for (const [file, field] of [[`rsrs-runtime-${target}.tar.gz`, 'sha256'], [report.binary_file, 'binary_sha256']]) {
+            for (const [file, field] of [[`rsrs-runtime-${target}.tar.gz`, 'archive_sha256'], [report.binary_file, 'binary_sha256']]) {
               if (!fs.existsSync(`release-assets/${file}`)) throw new Error(`Missing release asset: ${file}`);
               if (digest(`release-assets/${file}`) !== report[field]) throw new Error(`SHA-256 mismatch for ${file}`);
             }
@@ -578,6 +628,6 @@ jobs:
         run: |
           set -euo pipefail
           count="$(gh release view "$RUNTIME_TAG" --json assets --jq '.assets | length')"
-          test "$count" -eq 21 || { echo "::error::Draft release holds $count assets, expected 21"; exit 1; }
+          test "$count" -eq 24 || { echo "::error::Draft release holds $count assets, expected 24"; exit 1; }
           gh release edit "$RUNTIME_TAG" --draft=false
-          echo "Published $RUNTIME_TAG with 21 assets"
+          echo "Published $RUNTIME_TAG with 24 assets"

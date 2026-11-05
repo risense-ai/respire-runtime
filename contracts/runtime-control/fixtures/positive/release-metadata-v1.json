@@ -1,0 +1,19 @@
+{
+  "fixture_type": "release_metadata",
+  "expected": "accept",
+  "payload": {
+    "schema_version": 1,
+    "runtime_version": "1.0.21-dev.1",
+    "tag": "v1.0.21-dev.1",
+    "triple": "x86_64-pc-windows-msvc",
+    "target_triple": "x86_64-pc-windows-msvc",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "archive_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "binary_file": "rsrs-runtime-x86_64-pc-windows-msvc.exe",
+    "binary_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "compat": {
+      "min_cli": "1.0.20",
+      "max_cli": "*"
+    }
+  }
+}

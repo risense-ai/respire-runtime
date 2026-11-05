@@ -7,7 +7,7 @@
 //! | argv                                   | behaviour                                  |
 //! |----------------------------------------|--------------------------------------------|
 //! | `serve [--host H] [--port P] [--data-dir D] [--supervised]` | serve until stopped |
-//! | `--json runtime start` / `runtime start` | same as `serve`, plus a start envelope on stdout |
+//! | `--json runtime start` / `runtime start` | legacy foreground alias for `serve`; no readiness claim |
 //! | `--json runtime stop` / `runtime stop` / `--stop` | ask the resident runtime to stop |
 //! | `--status`                              | probe the resident runtime health          |
 //! | `--version`                             | print the binary version                   |
@@ -16,11 +16,14 @@
 //! consumed with `respire_spawn` semantics: `RSRS_RUNTIME_BOOT_TOKEN` is read
 //! and then removed from this process's environment.
 
+mod startup_identity;
+
 use std::io::Write;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
+use respire_commands::host_hooks::{self, HostHooks};
 use respire_commands::net_rpc;
 use respire_commands::rpc_serve::{self, RuntimeFlags};
 use respire_protocol::{RuntimeCompat, RuntimeIdentity};
@@ -31,11 +34,8 @@ const MIN_CLI: &str = "1.0.20";
 const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
-    // Consume the spawn-time boot token first: exactly one process may read it
-    // and it must never leak into child processes.
-    let boot_token = consume_boot_token();
-    let _ = boot_token;
-    match run() {
+    // Remove the inherited secret before any worker or business code can spawn.
+    match consume_boot_token().and_then(run) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
             eprintln!("rsrs-runtime: {error:#}");
@@ -44,14 +44,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn consume_boot_token() -> Option<String> {
-    match std::env::var("RSRS_RUNTIME_BOOT_TOKEN") {
-        Ok(token) => {
-            std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN");
-            Some(token)
-        }
-        Err(_) => None,
-    }
+fn consume_boot_token() -> Result<Option<String>> {
+    let token = std::env::var_os("RSRS_RUNTIME_BOOT_TOKEN");
+    std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN");
+    token
+        .map(|token| {
+            token
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("runtime boot token is not valid Unicode"))
+        })
+        .transpose()
 }
 
 struct Flags {
@@ -86,8 +88,22 @@ fn usage() -> &'static str {
     "Usage: rsrs-runtime serve [--host 127.0.0.1] [--port 15169] [--data-dir DIR] [--supervised]\n       rsrs-runtime [--json] runtime start|stop|status\n       rsrs-runtime --stop | --status | --version\n"
 }
 
-fn run() -> Result<i32> {
-    if std::env::args().nth(1).is_some_and(|arg| arg == "--core-worker-internal") {
+fn run(boot_token: Option<String>) -> Result<i32> {
+    if std::env::args().nth(1).as_deref() == Some("--backend-load-probe-internal") {
+        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
+            "private backend probe accepts no boot token or public runtime arguments");
+        // Dispatch before flags, authorization, hooks, keyring, store or listener initialization.
+        respire_commands::model_install::run_backend_probe_helper()?;
+        return Ok(0);
+    }
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|arg| arg == "--core-worker-internal")
+    {
+        anyhow::ensure!(
+            boot_token.is_none(),
+            "core workers cannot consume runtime boot authorization"
+        );
         return match respire_core_sdk::worker::run() {
             Ok(()) => Ok(0),
             Err(error) => {
@@ -105,11 +121,7 @@ fn run() -> Result<i32> {
             "--stop" => flags.stop = true,
             "--status" => flags.status = true,
             "--version" => flags.version = true,
-            "--supervised" => {
-                // Accepted for the P2 supervisor handshake; serving behaviour
-                // is unchanged until lifecycle registration moves here.
-                flags.supervised = true;
-            }
+            "--supervised" => flags.supervised = true,
             "--host" => {
                 let value = args.next().context("--host requires a value")?;
                 anyhow::ensure!(!value.is_empty(), "--host requires a loopback address");
@@ -117,8 +129,13 @@ fn run() -> Result<i32> {
             }
             "--port" => {
                 let value = args.next().context("--port requires a value")?;
-                let port: u16 = value.parse().map_err(|_| anyhow::anyhow!("--port requires a numeric port between 1 and 65535"))?;
-                anyhow::ensure!(port > 0, "--port requires a numeric port between 1 and 65535");
+                let port: u16 = value.parse().map_err(|_| {
+                    anyhow::anyhow!("--port requires a numeric port between 1 and 65535")
+                })?;
+                anyhow::ensure!(
+                    port > 0,
+                    "--port requires a numeric port between 1 and 65535"
+                );
                 flags.port = Some(port);
             }
             "--data-dir" => {
@@ -148,15 +165,32 @@ fn run() -> Result<i32> {
         .into_iter()
         .filter(|requested| *requested)
         .count();
-    anyhow::ensure!(requested <= 1, "combine at most one of start/serve, stop, status, version\n{}", usage());
+    anyhow::ensure!(
+        requested <= 1,
+        "combine at most one of start/serve, stop, status, version\n{}",
+        usage()
+    );
 
+    anyhow::ensure!(
+        !(flags.status || flags.stop || flags.version)
+            || (!flags.supervised && boot_token.is_none()),
+        "boot authorization and --supervised are only valid when serving"
+    );
     if flags.version {
         if flags.json {
-            print_envelope("version", true, 0, None);
+            print_envelope("version", true, 0, None, None);
         } else {
             println!("rsrs-runtime {VERSION}");
         }
         return Ok(0);
+    }
+    apply_data_dir(&flags);
+    if let Err(error) = respire_app::service::validate_client_config() {
+        if flags.json {
+            print_envelope("configuration", false, 2, Some(&format!("{error:#}")), None);
+            return Ok(2);
+        }
+        return Err(error).context("Runtime client configuration is invalid");
     }
     if flags.status {
         return status_command(flags.json);
@@ -165,7 +199,7 @@ fn run() -> Result<i32> {
         return stop_command(flags.json);
     }
     // Bare invocation defaults to serving, mirroring `--runtime-internal`.
-    serve_command(&flags)
+    serve_command(&flags, boot_token.as_deref())
 }
 
 fn apply_data_dir(flags: &Flags) {
@@ -184,19 +218,32 @@ fn publish_identity() {
     });
 }
 
-fn serve_command(flags: &Flags) -> Result<i32> {
+fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
+    respire_commands::model_install::enable_backend_probe_host();
+    startup_identity::authorize(
+        flags.supervised,
+        boot_token,
+        flags.port.unwrap_or_else(net_rpc::rpc_port),
+    )?;
+    let installed = host_hooks::install(HostHooks {
+        capture_run: Some(respire_commands::runtime_executor::capture_run),
+        mcp_http_response: Some(respire_commands::runtime_mcp::http_response),
+        managed_id: Some(startup_identity::managed_id),
+        verify_managed_boot: Some(startup_identity::verify_managed_boot),
+        ..HostHooks::default()
+    });
+    anyhow::ensure!(installed, "Runtime executor hooks were installed twice");
     publish_identity();
-    apply_data_dir(flags);
-    if flags.json {
-        // client2 fires this argv shape and then polls /api/health; stdout is
-        // detached from the supervisor, so the envelope is best-effort.
-        print_envelope("start", true, 0, None);
-    } else {
-        println!("runtime=starting host={host} port={port}",
+    if !flags.json {
+        println!(
+            "runtime=starting host={host} port={port}",
             host = flags.host,
-            port = flags.port.map(|port| port.to_string()).unwrap_or_else(|| "default".to_owned()));
+            port = flags
+                .port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "default".to_owned())
+        );
     }
-    let _ = flags.supervised;
     rpc_serve::serve(RuntimeFlags {
         port: flags.port,
         host: flags.host.clone(),
@@ -205,7 +252,7 @@ fn serve_command(flags: &Flags) -> Result<i32> {
     })
     .map_err(|error| {
         if flags.json {
-            print_envelope("start", false, 1, Some(&format!("{error:#}")));
+            print_envelope("start", false, 1, Some(&format!("{error:#}")), None);
         }
         error
     })?;
@@ -231,16 +278,14 @@ fn status_command(json: bool) -> Result<i32> {
             } else {
                 println!(
                     "runtime=up pid={} url={} data_dir={}",
-                    health.pid,
-                    health.url,
-                    health.data_dir,
+                    health.pid, health.url, health.data_dir,
                 );
             }
             Ok(0)
         }
         Err(error) => {
             if json {
-                print_envelope("status", false, 2, Some(&format!("{error:#}")));
+                print_envelope("status", false, 2, Some(&format!("{error:#}")), None);
             } else {
                 eprintln!("runtime=down: {error:#}");
             }
@@ -250,25 +295,57 @@ fn status_command(json: bool) -> Result<i32> {
 }
 
 fn stop_command(json: bool) -> Result<i32> {
-    let up = net_rpc::health().is_ok();
-    if up {
-        net_rpc::request_stop().context("runtime stop request failed")?;
-        // A following start must not race the draining owner.
-        net_rpc::wait_until_down().context("runtime did not release its endpoint")?;
-    }
+    let runtime = match net_rpc::health() {
+        Ok(runtime) => runtime,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<respire_commands::runtime_error::RuntimeError>(),
+                Some(respire_commands::runtime_error::RuntimeError::Unavailable)
+            ) =>
+        {
+            if json {
+                print_envelope("stop", true, 0, None, Some("not_running"));
+            } else {
+                println!("runtime=not_running");
+            }
+            return Ok(0);
+        }
+        Err(error) => return Err(error).context("cannot establish runtime stop identity"),
+    };
+    let root = respire_app::service::main_data_dir().canonicalize()?;
+    let library = respire_app::service::data_dir().canonicalize()?;
+    anyhow::ensure!(
+        !runtime.installation_root.is_empty()
+            && std::fs::canonicalize(&runtime.installation_root)? == root
+            && !runtime.data_dir.is_empty()
+            && std::fs::canonicalize(&runtime.data_dir)? == library,
+        "runtime stop target differs from the selected installation or library"
+    );
+    anyhow::ensure!(
+        net_rpc::instance_is_running(&runtime)?,
+        "runtime instance changed before the stop request"
+    );
+    let accepted = net_rpc::request_stop_for(&runtime, std::time::Duration::from_secs(10))
+        .context("runtime stop request failed")?;
+    net_rpc::wait_for_instance_exit(&runtime, std::time::Duration::from_secs(120))
+        .context("runtime instance exit is not proven; no drained result is available")?;
+    net_rpc::final_stop_receipt(&runtime, Some(&accepted.operation_id))
+        .context("runtime normal drain is not proven")?;
+    // The receipt proves shutdown intent; taking the existing guard proves release.
+    let released = respire_app::lock::LibraryLock::acquire(&library, std::time::Duration::ZERO)
+        .context("runtime library lock was not released after its final drain receipt")?;
+    drop(released);
     if json {
-        print_envelope("stop", true, 0, None);
-    } else if up {
-        println!("runtime=stopped");
+        print_envelope("stop", true, 0, None, Some("drained"));
     } else {
-        println!("runtime=stopped (not running)");
+        println!("runtime=stopped result=drained");
     }
     Ok(0)
 }
 
 /// One-line envelope aligned with the CLI `rpc::` reply shape
 /// (`{"v":1,"id":"start","ok":true,"exit":0,...}`).
-fn print_envelope(id: &str, ok: bool, exit: i32, error: Option<&str>) {
+fn print_envelope(id: &str, ok: bool, exit: i32, error: Option<&str>, result: Option<&str>) {
     let mut body = serde_json::json!({
         "v": respire_commands::rpc_worker::PROTOCOL_V,
         "id": id,
@@ -278,6 +355,9 @@ fn print_envelope(id: &str, ok: bool, exit: i32, error: Option<&str>) {
     });
     if let Some(error) = error {
         body["error"] = serde_json::json!(error);
+    }
+    if let Some(result) = result {
+        body["result"] = serde_json::json!(result);
     }
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();

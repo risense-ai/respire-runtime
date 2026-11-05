@@ -1,0 +1,1303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://respire.rs/contracts/runtime-control/control-contract.schema.json",
+  "title": "Runtime health, stop, scoped business RPC, operation, root, and route fixtures",
+  "type": "object",
+  "required": [
+    "fixture_type",
+    "expected"
+  ],
+  "properties": {
+    "fixture_type": {
+      "enum": [
+        "health_identity",
+        "stop_state",
+        "operation_result",
+        "root_layout",
+        "bootstrap_route",
+        "stop_final_receipt",
+        "business_rpc_request",
+        "business_rpc_response",
+        "assets_status"
+      ]
+    },
+    "expected": {
+      "type": "string",
+      "enum": [
+        "accept",
+        "reject"
+      ]
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "health_identity"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "installation_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "installation_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "pid": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "process_start_id": {
+                "type": "string"
+              },
+              "image_path": {
+                "type": "string"
+              },
+              "image_sha256": {
+                "type": "string"
+              },
+              "runtime_version": {
+                "type": "string"
+              },
+              "account_id": {
+                "type": "string"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "managed_id": {
+                "type": "string"
+              },
+              "protocol_range": {
+                "type": "object",
+                "required": [
+                  "minimum",
+                  "maximum"
+                ],
+                "properties": {
+                  "minimum": {
+                    "type": "integer"
+                  },
+                  "maximum": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "store_ready": {
+                "type": "boolean"
+              },
+              "state": {
+                "enum": [
+                  "starting",
+                  "ready",
+                  "maintenance",
+                  "draining",
+                  "stopping",
+                  "stopped"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "stop_state"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "request_id",
+              "operation_id",
+              "state"
+            ],
+            "properties": {
+              "request_id": {
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "accepted",
+                  "draining",
+                  "resources_closing",
+                  "drained",
+                  "forced_timeout",
+                  "compatibility_timeout",
+                  "failed",
+                  "unknown"
+                ]
+              },
+              "unfinished": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "operation_id",
+                    "result"
+                  ],
+                  "properties": {
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "result": {
+                      "enum": [
+                        "aborted",
+                        "unknown"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "operation_result"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "request_id",
+              "operation_id",
+              "method",
+              "result",
+              "scope"
+            ],
+            "properties": {
+              "request_id": {
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              },
+              "idempotency_key": {
+                "type": "string"
+              },
+              "parent_operation_id": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
+              "normalized_args_sha256": {
+                "$ref": "release-metadata.schema.json#/$defs/sha256"
+              },
+              "result": {
+                "enum": [
+                  "pending",
+                  "completed",
+                  "failed",
+                  "aborted",
+                  "unknown"
+                ]
+              },
+              "conflict": {
+                "type": "boolean"
+              },
+              "scope": {
+                "$ref": "#/$defs/runtimeRequestScope"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "root_layout"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "schema_version",
+              "layout",
+              "installation_root",
+              "device_config_root",
+              "client_config_path",
+              "account_data_root",
+              "accounts_root",
+              "asset_root",
+              "runtime_state_root",
+              "legacy_whole_isolation",
+              "sources"
+            ],
+            "properties": {
+              "schema_version": {
+                "const": 1
+              },
+              "layout": {
+                "const": "phase1"
+              },
+              "installation_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "device_config_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "client_config_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "account_data_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "accounts_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "asset_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runtime_state_root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "legacy_whole_isolation": {
+                "type": "boolean"
+              },
+              "sources": {
+                "type": "object",
+                "required": [
+                  "installation_root",
+                  "device_config_root",
+                  "client_config_path",
+                  "account_data_root",
+                  "accounts_root",
+                  "asset_root",
+                  "runtime_state_root"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "installation_root": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir"
+                    ]
+                  },
+                  "device_config_root": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir"
+                    ]
+                  },
+                  "client_config_path": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir"
+                    ]
+                  },
+                  "account_data_root": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir",
+                      "client.json:data_dir"
+                    ]
+                  },
+                  "accounts_root": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir"
+                    ]
+                  },
+                  "asset_root": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir",
+                      "RSRS_M3_DIR"
+                    ]
+                  },
+                  "runtime_state_root": {
+                    "enum": [
+                      "RSRS_DATA_DIR",
+                      "default_data_dir"
+                    ]
+                  }
+                }
+              },
+              "log_root": {
+                "type": "string",
+                "description": "Compatibility fixture extension only: Client2 Manager.Root contains runtime.log; not emitted by ResolvedRoots."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "bootstrap_route"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "operation",
+              "executor"
+            ],
+            "properties": {
+              "operation": {
+                "type": "string"
+              },
+              "executor": {
+                "enum": [
+                  "runtime",
+                  "cli",
+                  "shared-config",
+                  "runtime-manager"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "stop_final_receipt"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "schema_version",
+              "protocol_version",
+              "operation_id",
+              "installation_id",
+              "instance_id",
+              "pid",
+              "process_start_id",
+              "image_path",
+              "image_sha256",
+              "runtime_version",
+              "account_id",
+              "generation",
+              "state",
+              "unfinished"
+            ],
+            "properties": {
+              "schema_version": {
+                "const": 1
+              },
+              "protocol_version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "operation_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "installation_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "instance_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              },
+              "pid": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "process_start_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "image_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "image_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "runtime_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "account_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "state": {
+                "enum": [
+                  "drained",
+                  "forced_timeout",
+                  "compatibility_timeout",
+                  "failed",
+                  "unknown"
+                ]
+              },
+              "unfinished": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "operation_id",
+                    "result"
+                  ],
+                  "properties": {
+                    "operation_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "result": {
+                      "enum": [
+                        "aborted",
+                        "unknown"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "state": {
+                      "const": "drained"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "unfinished": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "business_rpc_request"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "payload"
+        ],
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/businessRpcRequest"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "business_rpc_response"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "payload"
+        ],
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/businessRpcResponseCase"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture_type": {
+            "const": "assets_status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/assetsStatus"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "runtimeRequestScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "instance_id",
+        "generation"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "businessRpcRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "id",
+        "method",
+        "scope"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^\\S+$"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "parent_operation_id": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "$ref": "#/$defs/runtimeRequestScope"
+        },
+        "queue_wait_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lifecycle": {
+          "type": "string"
+        }
+      }
+    },
+    "rpcResponse": {
+      "type": "object",
+      "required": [
+        "v",
+        "id",
+        "ok",
+        "exit"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/runtimeRequestScope"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "exit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "envelope": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "summary": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "enum": [
+                  "scope_required",
+                  "scope_mismatch"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ok": {
+                "const": false
+              },
+              "exit": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "operation_id",
+              "scope"
+            ]
+          }
+        }
+      ]
+    },
+    "businessRpcResponseCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "response"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/businessRpcRequest"
+        },
+        "response": {
+          "$ref": "#/$defs/rpcResponse"
+        },
+        "cached_response": {
+          "$ref": "#/$defs/rpcResponse"
+        }
+      },
+      "description": "Relational checks bind v/id to the current transport and operation/scope/key to the original submission. runtime.result summary uses the polling request ID. A replay differs from cached_response only in id. Scope rejection may omit scope or report current scope; it never rebinds the operation.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "request": {
+                "properties": {
+                  "method": {
+                    "const": "runtime.result"
+                  }
+                }
+              },
+              "response": {
+                "not": {
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "scope_required",
+                        "scope_mismatch"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "response": {
+                "required": [
+                  "envelope"
+                ],
+                "properties": {
+                  "envelope": {
+                    "type": "object",
+                    "required": [
+                      "summary"
+                    ],
+                    "properties": {
+                      "summary": {
+                        "type": "object",
+                        "required": [
+                          "request_id",
+                          "operation_id",
+                          "scope"
+                        ],
+                        "properties": {
+                          "request_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "operation_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "scope": {
+                            "$ref": "#/$defs/runtimeRequestScope"
+                          },
+                          "idempotency_key": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "pending",
+                              "completed",
+                              "failed",
+                              "aborted",
+                              "unknown"
+                            ]
+                          },
+                          "response": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/$defs/rpcResponse"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "backendLoadRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "api_version",
+        "version",
+        "build_info_sha256"
+      ],
+      "properties": {
+        "kind": {
+          "const": "onnxruntime"
+        },
+        "api_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!0[xX][0-9a-fA-F]+$)[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "build_info_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backendLoadSdkPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "sdk_version",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!0[xX][0-9a-fA-F]+$)[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "sdk_version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!0[xX][0-9a-fA-F]+$)[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backendLoadModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!0[xX][0-9a-fA-F]+$)[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "backendLoadEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "status",
+        "ready",
+        "backend",
+        "engine",
+        "selected",
+        "provider",
+        "fresh_session",
+        "inference_completed",
+        "model",
+        "index_identity",
+        "dimensions",
+        "node_assignment",
+        "cpu_node_fallback",
+        "runtime",
+        "sdk_pin",
+        "modules",
+        "module_identity_source"
+      ],
+      "properties": {
+        "contract": {
+          "const": 1
+        },
+        "status": {
+          "const": "loaded"
+        },
+        "ready": {
+          "const": true
+        },
+        "backend": {
+          "const": "onnx"
+        },
+        "engine": {
+          "enum": [
+            "cpu",
+            "gpu",
+            "npu"
+          ]
+        },
+        "selected": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(CPU|Host|Gpu: DmlExecutionProvider|Npu: [A-Za-z][A-Za-z0-9_]*)$"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$"
+        },
+        "fresh_session": {
+          "const": true
+        },
+        "inference_completed": {
+          "const": true
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!0[xX][0-9a-fA-F]+$)[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "index_identity": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(m3|[a-f0-9]{64})$"
+        },
+        "dimensions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "node_assignment": {
+          "const": "not_measured"
+        },
+        "cpu_node_fallback": {
+          "enum": [
+            "allowed",
+            "disabled",
+            "host_managed",
+            "not_applicable"
+          ]
+        },
+        "runtime": {
+          "$ref": "#/$defs/backendLoadRuntime"
+        },
+        "sdk_pin": {
+          "$ref": "#/$defs/backendLoadSdkPin"
+        },
+        "modules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/backendLoadModule"
+          }
+        },
+        "module_identity_source": {
+          "const": "host_verified"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": "CPU"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "cpu"
+              },
+              "provider": {
+                "const": "CPUExecutionProvider"
+              },
+              "cpu_node_fallback": {
+                "const": "not_applicable"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": "Gpu: DmlExecutionProvider"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "gpu"
+              },
+              "provider": {
+                "const": "DmlExecutionProvider"
+              },
+              "cpu_node_fallback": {
+                "const": "allowed"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "pattern": "^Npu: "
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "npu"
+              },
+              "cpu_node_fallback": {
+                "const": "disabled"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": "Host"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "cpu_node_fallback": {
+                "const": "host_managed"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "backendLoadStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_run",
+            "loaded",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "evidence": {
+          "$ref": "#/$defs/backendLoadEvidence"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "loaded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "evidence"
+            ],
+            "not": {
+              "required": [
+                "reason"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "evidence"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "assetRequirement": {
+      "type": "object",
+      "required": [
+        "name",
+        "suggested_source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suggested_source": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "missing",
+            "incomplete",
+            "corrupt",
+            "incompatible",
+            "complete"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "actual_sha256": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "version": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "expected_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actual_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "assetsStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "missing"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assetRequirement"
+          }
+        },
+        "assets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assetRequirement"
+          }
+        },
+        "backend_load": {
+          "$ref": "#/$defs/backendLoadStatus"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "backend_load"
+            ],
+            "properties": {
+              "missing": {
+                "maxItems": 0
+              },
+              "backend_load": {
+                "required": [
+                  "state",
+                  "evidence"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "loaded"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

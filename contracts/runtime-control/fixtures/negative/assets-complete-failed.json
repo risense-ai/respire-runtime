@@ -1,0 +1,14 @@
+{
+  "fixture_type": "assets_status",
+  "expected": "reject",
+  "error_code": "assets_status_invalid",
+  "payload": {
+    "complete": true,
+    "missing": [],
+    "assets": [],
+    "backend_load": {
+      "state": "failed",
+      "reason": "backend_load_failed"
+    }
+  }
+}
