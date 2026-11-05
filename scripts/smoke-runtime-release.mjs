@@ -338,6 +338,7 @@ try {
   report.passed = true;
 } catch (error) {
   report.error = String(error);
+  console.error(report.error);
   process.exitCode = 1;
 } finally {
   // Force cleanup is failure-only and never becomes a drained/pass receipt.

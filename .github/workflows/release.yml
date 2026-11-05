@@ -21,7 +21,7 @@ on:
         default: false
         type: boolean
       dev_version:
-        description: Exact DEV version (X.Y.Z-dev.N) for manual branch/commit builds; required when ref is not a v* tag
+        description: Exact DEV version (X.Y.Z-dev.N), matching runtime/Cargo.toml; required when ref is not a v* tag
         default: ''
         type: string
 
@@ -83,7 +83,6 @@ jobs:
             if (!/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(ref)) throw new Error('Release tags must use vX.Y.Z or vX.Y.Z-dev.N');
             version = ref.slice(1);
             channel = version.includes('-dev.') ? 'dev' : 'latest';
-            if (cargo !== version) throw new Error('Release tag must exactly match the runtime source version');
             cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
           } else {
             if (!/^\d+\.\d+\.\d+-dev\.\d+$/.test(process.env.RELEASE_DEV_VERSION || '')) throw new Error('Manual non-tag builds require the dev_version input (X.Y.Z-dev.N)');
@@ -91,6 +90,7 @@ jobs:
             channel = 'dev';
             if (process.env.RELEASE_PUBLISH === 'true') cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
           }
+          if (cargo !== version) throw new Error('Release version must match runtime/Cargo.toml; update the manifest and Cargo.lock before building');
           if (channel === 'latest') throw new Error('Stable publication is disabled until complete G1 evidence is verified and promotion is authorized');
           const sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);

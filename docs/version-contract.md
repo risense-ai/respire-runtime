@@ -98,7 +98,7 @@ When a change touches the RPC contract:
 
 ## Current stage-one DEV scope
 
-The next unpublished Runtime version is 1.0.21-dev.3. Its standalone doctor
+Runtime 1.0.21-dev.3 and later provide a standalone doctor that
 executes Runtime-owned store, asset/backend, index and optional bounded remote
 health diagnostics. Asset readiness uses the existing supervised fresh-session
 probe; diagnostics do not download, install, access host keyring, inspect host
