@@ -89,3 +89,21 @@ When a change touches the RPC contract:
    `respire-cli`) that require the new version.
 3. CI on both sides verifies that lockfiles reference versions that exist on
    crates.io; a consumer PR referencing an unpublished version must not merge.
+
+
+## Current stage-one DEV scope
+
+The next unpublished Runtime version is 1.0.21-dev.3. Its standalone doctor
+executes Runtime-owned store, asset/backend, index and optional bounded remote
+health diagnostics. Asset readiness uses the existing supervised fresh-session
+probe; diagnostics do not download, install, access host keyring, inspect host
+injection targets or check CLI updates. Repair and CLI-update flags remain
+host-owned; callers must coordinate them through the CLI and request Runtime
+verification afterwards. Request-scoped progress stays observable during work.
+
+Intel macOS is explicitly deferred from the current release. The seven remaining
+targets retain their native release gates and complete payload/digest checks.
+Previously published eight-target assets and the SDK pin inventory are retained;
+a deferred target is not a passed acceptance item. Stable release planning stays
+closed until full G1 evidence is verified and promotion is separately authorized.
+None of these source changes or native smoke checks establishes full G1.
