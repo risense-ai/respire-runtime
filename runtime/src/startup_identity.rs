@@ -1366,6 +1366,14 @@ mod tests {
         eprintln!("offline-read root_eq={root_eq} profile_eq={profile_eq} account_eq={account_eq} generation_eq={generation_eq}");
         anyhow::ensure!(root_eq && profile_eq && account_eq && generation_eq,
             "diagnostic context comparison failed");
+        // Path equality ignores trailing separators; identity hashes cannot ignore them.
+        let representation_eq = context.root.as_os_str() == root.as_os_str()
+            && context.profile.as_os_str() == expected.as_os_str();
+        let repeated = respire_protocol::metadata_control::metadata_status_path(&context.profile)?;
+        let normalization_stable = repeated.as_os_str() == expected.as_os_str();
+        eprintln!("offline-read representation_eq={representation_eq} normalization_stable={normalization_stable}");
+        anyhow::ensure!(representation_eq && normalization_stable,
+            "diagnostic path representation changed");
         eprintln!("offline-read stage=grant");
         validate_grant(&grant, &context, true, &grant.nonce, now_ms()?)?;
         let mut changed = grant.clone();
