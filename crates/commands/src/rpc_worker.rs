@@ -166,16 +166,74 @@ fn endpoint_record_bytes(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-pub fn write_endpoint(url: &str) -> Result<()> {
+#[derive(Clone)]
+pub(crate) struct EndpointPublication {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    identity: Value,
+    receipt: PathBuf,
+    receipt_bytes: Option<Vec<u8>>,
+}
+
+impl EndpointPublication {
+    pub(crate) fn revoke_failed_start(
+        &self,
+        owner: &respire_app::lock::LibraryLock,
+    ) -> Result<()> {
+        let url = self.identity["url"].as_str().context("published endpoint URL missing")?;
+        let (identity, receipt, receipt_bytes) = endpoint_body(url)?;
+        self.revoke_matching(owner, &endpoint_path(), &identity, &receipt, &receipt_bytes)
+    }
+
+    fn revoke_matching(
+        &self,
+        owner: &respire_app::lock::LibraryLock,
+        path: &std::path::Path,
+        identity: &Value,
+        receipt: &std::path::Path,
+        receipt_bytes: &Option<Vec<u8>>,
+    ) -> Result<()> {
+        let directory = self.path.parent().context("published endpoint parent missing")?;
+        anyhow::ensure!(owner.protects(directory)?, "startup endpoint ownership lock changed");
+        anyhow::ensure!(
+            path == self.path && receipt == self.receipt && identity == &self.identity
+                && receipt_bytes == &self.receipt_bytes,
+            "startup endpoint path/identity/launch receipt changed; record retained"
+        );
+        anyhow::ensure!(
+            endpoint_record_bytes(&self.receipt)? == self.receipt_bytes
+                && endpoint_record_bytes(&self.path)?.as_deref() == Some(self.bytes.as_slice()),
+            "startup endpoint or launch receipt bytes changed; record retained"
+        );
+        // Only the live publisher can revoke this exact publication, never a dead owner.
+        std::fs::remove_file(&self.path)?;
+        respire_spawn::durable::sync_directory(directory)?;
+        Ok(())
+    }
+}
+
+fn endpoint_body(url: &str) -> Result<(Value, PathBuf, Option<Vec<u8>>)> {
     let dir = runtime_dir();
     let mut body = crate::rpc_serve::endpoint_identity(url)?;
     let instance = body["instance_id"].as_str().context("endpoint instance missing")?;
     let nonce = uuid::Uuid::parse_str(instance)?;
     anyhow::ensure!(nonce.get_version_num() == 4 && nonce.to_string() == instance, "invalid endpoint instance");
     let receipt = dir.join("autostart/launch").join(format!("launch-{instance}.claimed"));
-    if let Some(bytes) = endpoint_record_bytes(&receipt)? {
-        body["launch_receipt_sha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+    let receipt_bytes = endpoint_record_bytes(&receipt)?;
+    if let Some(bytes) = receipt_bytes.as_ref() {
+        body["launch_receipt_sha256"] = json!(format!("{:x}", Sha256::digest(bytes)));
     }
+    Ok((body, receipt, receipt_bytes))
+}
+
+pub fn write_endpoint(url: &str) -> Result<()> {
+    publish_endpoint(url).map(|_| ())
+}
+
+pub(crate) fn publish_endpoint(url: &str) -> Result<EndpointPublication> {
+    let dir = runtime_dir();
+    let (body, receipt, receipt_bytes) = endpoint_body(url)?;
+    let bytes = serde_json::to_vec_pretty(&body)?;
     let target = endpoint_path();
     let previous = endpoint_record_bytes(&target)?;
     std::fs::create_dir_all(&dir)?;
@@ -189,7 +247,7 @@ pub fn write_endpoint(url: &str) -> Result<()> {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
-        file.write_all(&serde_json::to_vec_pretty(&body)?)?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
         anyhow::ensure!(endpoint_record_bytes(&target)? == previous, "endpoint changed before publication");
@@ -199,7 +257,8 @@ pub fn write_endpoint(url: &str) -> Result<()> {
     if result.is_err() && temporary.try_exists()? {
         std::fs::remove_file(&temporary)?;
     }
-    result
+    result?;
+    Ok(EndpointPublication { path: target, bytes, identity: body, receipt, receipt_bytes })
 }
 
 pub fn endpoint_pid() -> Option<u32> {
@@ -208,6 +267,94 @@ pub fn endpoint_pid() -> Option<u32> {
     data.get("pid")?
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok())
+}
+
+#[cfg(test)]
+mod endpoint_publication_tests {
+    use super::*;
+
+    #[test]
+    fn failed_start_revokes_only_unchanged_owned_publication() -> Result<()> {
+        for change in ["none", "no-claim", "bytes", "claim", "missing-claim", "new-claim", "path", "receipt-path", "lock", "missing"] {
+            let directory = tempfile::tempdir()?;
+            let other = tempfile::tempdir()?;
+            let owner = respire_app::lock::LibraryLock::acquire(directory.path(), Duration::from_secs(1))?;
+            let wrong_owner = respire_app::lock::LibraryLock::acquire(other.path(), Duration::from_secs(1))?;
+            let path = directory.path().join("endpoint.json");
+            let receipt = directory.path().join("launch.claimed");
+            let identity = json!({"pid": std::process::id(), "instance_id": "owned-startup"});
+            let bytes = serde_json::to_vec(&identity)?;
+            let receipt_bytes = if matches!(change, "no-claim" | "new-claim") {
+                None
+            } else {
+                Some(b"consumed; never reusable".to_vec())
+            };
+            std::fs::write(&path, &bytes)?;
+            if let Some(bytes) = receipt_bytes.as_ref() {
+                std::fs::write(&receipt, bytes)?;
+            }
+            let published = EndpointPublication {
+                path: path.clone(), bytes, identity: identity.clone(),
+                receipt: receipt.clone(), receipt_bytes: receipt_bytes.clone(),
+            };
+            match change {
+                "bytes" => std::fs::write(&path, b"foreign endpoint")?,
+                "claim" | "new-claim" => std::fs::write(&receipt, b"changed claim")?,
+                "missing-claim" => std::fs::remove_file(&receipt)?,
+                "missing" => std::fs::remove_file(&path)?,
+                _ => {}
+            }
+            let before_endpoint = endpoint_record_bytes(&path)?;
+            let before_claim = endpoint_record_bytes(&receipt)?;
+            let result = published.revoke_matching(
+                if change == "lock" { &wrong_owner } else { &owner },
+                if change == "path" { &receipt } else { &path },
+                &identity,
+                if change == "receipt-path" { &path } else { &receipt },
+                &receipt_bytes,
+            );
+            if matches!(change, "none" | "no-claim") {
+                result?;
+                assert!(!path.try_exists()?);
+            } else {
+                assert!(result.is_err(), "accepted changed {change}");
+                assert_eq!(endpoint_record_bytes(&path)?, before_endpoint);
+            }
+            assert_eq!(endpoint_record_bytes(&receipt)?, before_claim);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_start_retains_endpoint_on_any_identity_change() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let owner = respire_app::lock::LibraryLock::acquire(directory.path(), Duration::from_secs(1))?;
+        let path = directory.path().join("endpoint.json");
+        let receipt = directory.path().join("launch.claimed");
+        let identity = json!({
+            "schema_version": 2, "server": "respire", "v": PROTOCOL_V,
+            "pid": std::process::id(), "bin": "test", "url": "http://127.0.0.1:1",
+            "runtime_version": "test", "exe": "image", "image_path": "image",
+            "image_sha256": "digest", "installation_root": "root", "data_dir": "profile",
+            "installation_id": "installation", "instance_id": "instance",
+            "process_start_id": "birth", "account_id": "account", "generation": 1,
+            "managed_id": null, "launch_receipt_sha256": "claim-digest"
+        });
+        let bytes = serde_json::to_vec(&identity)?;
+        std::fs::write(&path, &bytes)?;
+        let published = EndpointPublication {
+            path: path.clone(), bytes: bytes.clone(), identity: identity.clone(),
+            receipt: receipt.clone(), receipt_bytes: None,
+        };
+        for key in identity.as_object().context("identity object")?.keys() {
+            let mut changed = identity.clone();
+            changed[key] = json!("changed");
+            assert!(published.revoke_matching(&owner, &path, &changed, &receipt, &None).is_err(),
+                "accepted changed {key}");
+            assert_eq!(std::fs::read(&path)?, bytes);
+        }
+        Ok(())
+    }
 }
 
 // ---- Worker face migrated from the CLI rpc module (runtime split WP-2b) ----

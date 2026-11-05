@@ -5285,7 +5285,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     candidates,
                     scores,
                 };
-                if rpc::worker_active() {
+                if stats.candidates.is_empty() && query_log_id.is_some() {
+                    // A returned empty-query identity must already have its durable negative record.
+                    commit_prepared_write(true, recall_generation, || stats.persist(&store))?;
+                } else if rpc::worker_active() {
                     rpc::queue_recall_stats(stats, recall_generation);
                 } else if let Err(error) = stats.persist(&store) {
                     eprintln!("recall statistics writeback failed: {error:#}");

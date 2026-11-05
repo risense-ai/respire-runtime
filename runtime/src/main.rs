@@ -233,6 +233,12 @@ fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
         ..HostHooks::default()
     });
     anyhow::ensure!(installed, "Runtime executor hooks were installed twice");
+    anyhow::ensure!(
+        respire_commands::rpc_worker::install_recall_stats_enqueue(
+            rpc_serve::enqueue_recall_stats_local,
+        ),
+        "Runtime recall statistics hook was installed twice"
+    );
     publish_identity();
     if !flags.json {
         println!(
