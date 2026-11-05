@@ -146,11 +146,25 @@ struct RequiredAsset<'a> {
 const PROBE_INPUT_LIMIT: usize = 256 * 1024;
 const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
 const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(150);
-static PROBE_HELPER_HOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PROBE_HELPER_HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(Clone, Copy)]
+pub enum BackendProbeHost {
+    Serving = 1,
+    PrivateControl = 2,
+}
 
 /// Only the standalone runtime installs the early private helper entry.
-pub fn enable_backend_probe_host() {
-    PROBE_HELPER_HOST.store(true, std::sync::atomic::Ordering::Release);
+pub fn enable_backend_probe_host(host: BackendProbeHost) {
+    PROBE_HELPER_HOST.store(host as usize, std::sync::atomic::Ordering::Release);
+}
+
+fn probe_needs_serving_admission(host: usize) -> Result<bool> {
+    match host {
+        1 => Ok(true),
+        2 => Ok(false),
+        _ => anyhow::bail!("this host image has not installed the private backend probe entry"),
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -276,13 +290,18 @@ fn probe_cancelled() -> bool {
 
 fn managed_backend_probe(selection: &ProbeSelection) -> Result<serde_json::Value> {
     use std::{process::{Command, Stdio}, sync::mpsc, time::Instant};
-    anyhow::ensure!(PROBE_HELPER_HOST.load(std::sync::atomic::Ordering::Acquire),
-        "this host image has not installed the private backend probe entry");
+    let serving = probe_needs_serving_admission(
+        PROBE_HELPER_HOST.load(std::sync::atomic::Ordering::Acquire))?;
     anyhow::ensure!(!probe_cancelled(), "runtime is draining; probe was not started");
     let nonce = uuid::Uuid::new_v4().to_string();
-    // Existing drain accounting waits for this guard. Child cleanup runs before it is dropped.
-    let _admission = crate::rpc_serve::begin_admission(nonce.clone(), "backend_load_probe")
-        .context("runtime drain rejected the backend probe")?;
+    // Authenticated private verification runs while the serving host is Paused.
+    // Serving probes retain drain accounting until owned-child cleanup finishes.
+    let _admission = if serving {
+        Some(crate::rpc_serve::begin_admission(nonce.clone(), "backend_load_probe")
+            .context("runtime drain rejected the backend probe")?)
+    } else {
+        None
+    };
     let request = serde_json::to_vec(&serde_json::json!({"nonce":nonce,"selection":selection}))?;
     anyhow::ensure!(request.len() <= PROBE_INPUT_LIMIT, "probe request exceeds input limit");
     let mut command = Command::new(std::fs::canonicalize(std::env::current_exe()?)?);
@@ -576,7 +595,6 @@ pub fn model_preparation_verify(
     }
     let missing: Vec<_> = reports.iter().filter(|asset| asset.state != AssetState::Complete).cloned().collect();
     unchanged()?;
-    enable_backend_probe_host();
     respire_app::memory::bge::invalidate_cpu_ort_validation()?;
     let assets = with_backend_load(AssetsStatus { complete: missing.is_empty(), missing,
         assets: reports, backend_load: None }, || {
@@ -698,8 +716,6 @@ fn unprepared_asset(name: &str, reason: &str) -> AssetRequirement {
 /// The authenticated paused dispatcher must install `watch_control_parent` after reading
 /// both frames, and allow the 150s native probe plus file validation and child cleanup.
 pub fn model_install_verify() -> Result<AssetsStatus> {
-    // Private control dispatch bypasses normal startup's probe-host initialization.
-    enable_backend_probe_host();
     respire_app::memory::bge::invalidate_cpu_ort_validation()?;
     assets_status()
 }
@@ -1875,6 +1891,15 @@ fn read_download(reader: &mut impl Read, buf: &mut [u8], url: &str) -> Result<us
 mod tests {
     use super::*;
     use anyhow::Result;
+
+    #[test]
+    fn backend_probe_host_keeps_serving_and_private_admission_separate() -> Result<()> {
+        assert!(probe_needs_serving_admission(BackendProbeHost::Serving as usize)?);
+        assert!(!probe_needs_serving_admission(BackendProbeHost::PrivateControl as usize)?);
+        assert!(probe_needs_serving_admission(0).is_err());
+        assert!(probe_needs_serving_admission(usize::MAX).is_err());
+        Ok(())
+    }
 
     #[test]
     fn backend_load_is_not_attempted_for_incomplete_files() {

@@ -240,7 +240,8 @@ fn publish_identity() {
 }
 
 fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
-    respire_commands::model_install::enable_backend_probe_host();
+    respire_commands::model_install::enable_backend_probe_host(
+        respire_commands::model_install::BackendProbeHost::Serving);
     startup_identity::authorize(
         flags.supervised,
         boot_token,
