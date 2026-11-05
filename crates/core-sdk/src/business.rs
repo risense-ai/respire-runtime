@@ -640,7 +640,7 @@ pub mod onnx {
         let revision_path = settings_dir().join("inference.json");
         if let Some(expected) = expected_revision { ensure_engine_revision(&revision_path, expected)?; }
         let (path, value) = engine_settings(engine, false, model)?;
-        commit_engine_settings(&path, &value, reset_sessions)?;
+        commit_engine_settings(&path, &value, reset_sessions_locked)?;
         Ok(bytes_revision(&serde_json::to_vec_pretty(&value)?))
     }
     /// Persist an explicit model variant selection without touching the engine.
@@ -657,6 +657,10 @@ pub mod onnx {
     pub fn reset_sessions() -> Result<()> {
         let _gate = crate::model_selection::gate(true)?;
         let _config_lock = inference_config_lock()?;
+        reset_sessions_locked()
+    }
+    // The caller holds the model gate and inference configuration lock through reset.
+    fn reset_sessions_locked() -> Result<()> {
         execute::<()>("engine_control", json!({"action":"reset"}))?;
         crate::host::reset_model_cache()
     }
