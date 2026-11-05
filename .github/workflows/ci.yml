@@ -1,16 +1,18 @@
 name: Runtime CI
 
-# Source-test CI for the runtime workspace. Before the P2 subtree migration
-# lands there is no workspace to test; the detect job reports that clearly and
-# the cargo test jobs skip. After P2, `workflow_dispatch` with
-# source_checks_only runs the full source test matrix in CI (never locally).
+# Source tests are mandatory on PR, push, and manual runs.
+# Native artifact acceptance is a separate gate.
 on:
   workflow_dispatch:
     inputs:
       source_checks_only:
-        description: Run all source tests and contracts without native compile or release validation
+        description: Compatibility input; mandatory source tests always run
         type: boolean
         default: true
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -33,17 +35,35 @@ jobs:
           persist-credentials: false
       - id: detect
         run: |
-          if [ -f runtime/Cargo.toml ]; then
-            echo "workspace_present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "workspace_present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::The runtime workspace has not been migrated yet (phase P2); source tests are skipped."
-          fi
+          set -euo pipefail
+          for path in runtime/Cargo.toml crates/protocol/tests contracts/runtime-control/manifest.json scripts/required-tests.json; do
+            test -e "$path" || { echo "::error::Missing required workspace input: $path"; exit 1; }
+          done
+          echo "workspace_present=true" >> "$GITHUB_OUTPUT"
+
+  control-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify the frozen Runtime control fixtures
+        run: node scripts/verify-runtime-control-contract.mjs
+      - name: Reject invalid required-gate evidence
+        run: node scripts/test-required-tests.mjs
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Run the Rust contract consumer tests
+        run: cargo test -p respire_protocol --locked
 
   workspace-tests:
     # cargo test source matrix (Linux GNU host target). Extends after P2 with
     # the migrated coverage groups (runtime smoke, autostart supervision).
-    if: needs.detect.outputs.workspace_present == 'true' && inputs.source_checks_only
     needs: detect
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -102,29 +122,100 @@ jobs:
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-core-sdk.mjs "$target"
       - name: Run the workspace source tests
-        run: cargo test --workspace --locked
+        id: source-tests
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/runtime-source-config
+          XDG_DATA_HOME: ${{ runner.temp }}/runtime-source-data
+          XDG_CACHE_HOME: ${{ runner.temp }}/runtime-source-cache
+          APPDATA: ${{ runner.temp }}/runtime-source-appdata
+          LOCALAPPDATA: ${{ runner.temp }}/runtime-source-local
+          RSRS_DATA_DIR: ${{ runner.temp }}/runtime-source-state
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export HOME="$RUNNER_TEMP/runtime-source-home"
+          export USERPROFILE="$HOME"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$APPDATA" "$LOCALAPPDATA" "$RSRS_DATA_DIR"
+          node --input-type=module <<'NODE'
+          import {spawnSync} from 'node:child_process';
+          import {closeSync, mkdirSync, openSync, readFileSync, writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {join} from 'node:path';
+          const directory = join(process.env.RUNNER_TEMP, 'required-tests-raw-runtime-workspace');
+          mkdirSync(directory);
+          const command = ['cargo', 'test', '--workspace', '--locked']; // cargo test --workspace --locked
+          const started_at = new Date().toISOString();
+          const stdout = openSync(join(directory, 'stdout.log'), 'wx'), stderr = openSync(join(directory, 'stderr.log'), 'wx');
+          let result;
+          try { result = spawnSync(command[0], command.slice(1), {stdio: ['inherit', stdout, stderr]}); }
+          finally { closeSync(stdout); closeSync(stderr); }
+          const out = readFileSync(join(directory, 'stdout.log')), err = readFileSync(join(directory, 'stderr.log'));
+          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+          writeFileSync(join(directory, 'execution.json'), JSON.stringify({
+            schema: 1, evidence_class: 'source-raw', gate: 'not-evaluated', candidate_sha256: null,
+            repository: process.env.GITHUB_REPOSITORY, source_sha: process.env.GITHUB_SHA,
+            run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            job: process.env.GITHUB_JOB, runner_os: process.env.RUNNER_OS, runner_arch: process.env.RUNNER_ARCH,
+            command, started_at, completed_at: new Date().toISOString(),
+            exit_code: result.status, signal: result.signal ?? null, error: result.error?.message ?? null,
+            stdout_sha256: hash(out), stderr_sha256: hash(err)
+          }, null, 2) + '\n', {flag: 'wx'});
+          process.stdout.write(out); process.stderr.write(err);
+          process.exit(result.status ?? 1);
+          NODE
+      - name: Preserve workspace source test output
+        if: ${{ always() && !cancelled() && (steps.source-tests.outcome == 'success' || steps.source-tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-raw-runtime-workspace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/required-tests-raw-runtime-workspace
+          retention-days: 7
+          if-no-files-found: error
+
+  required-tests:
+    if: always()
+    needs: [control-contract, detect, workspace-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # A separate producer uploads raw execution evidence first, then this report bundle.
+      # No report producer is implied by a source-test or syntax-check job.
+      - name: Download this exact attempt's required execution reports
+        uses: actions/download-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .verification/required-tests
+      - name: Require every Stage 1 test and matrix leg
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-required-tests.mjs --ci
 
   ci-complete:
     if: always()
-    needs: [detect, workspace-tests]
+    needs: [control-contract, detect, workspace-tests, required-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Require source tests when requested and available
+      - name: Require all source gates
         env:
           WORKSPACE_PRESENT: ${{ needs.detect.outputs.workspace_present }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
-          SOURCE_CHECKS_ONLY: ${{ inputs.source_checks_only }}
+          CONTRACT_RESULT: ${{ needs.control-contract.result }}
+          REQUIRED_RESULT: ${{ needs.required-tests.result }}
         run: |
-          if [ "$SOURCE_CHECKS_ONLY" != 'true' ]; then
-            echo "source_checks_only is false; this workflow only performs source checks. Nothing to do."
-            exit 0
-          fi
-          if [ "$WORKSPACE_PRESENT" = 'true' ]; then
-            test "$TESTS_RESULT" = success || { echo "::error::Source tests did not pass"; exit 1; }
-            echo "Source tests passed"
-          else
-            test "$TESTS_RESULT" = skipped || { echo "::error::Tests ran without a workspace; investigate"; exit 1; }
-            echo "Skeleton state: no workspace yet; CI is green with tests skipped until P2"
-          fi
+          test "$CONTRACT_RESULT" = success || { echo "::error::Runtime control contract did not pass"; exit 1; }
+          test "$REQUIRED_RESULT" = success || { echo "::error::Required Stage 1 tests did not pass"; exit 1; }
+          test "$WORKSPACE_PRESENT" = true || { echo "::error::Required workspace is missing"; exit 1; }
+          test "$TESTS_RESULT" = success || { echo "::error::Source tests did not pass"; exit 1; }

@@ -39,13 +39,25 @@ if (builds) {
     const path = join(resolve(builds), `runtime-build-${target}.json`);
     if (!existsSync(path)) throw new Error(`Missing ${path}; download all release assets first`);
     const report = JSON.parse(readFileSync(path, 'utf8'));
-    if (report.runtime_version !== version || report.triple !== target) throw new Error(`Build report mismatch in ${path}`);
+    if (report.schema_version !== 1 && report.schema_version !== 2) throw new Error(`Unsupported schema in ${path}`);
+    if (report.target_triple !== undefined && report.triple !== undefined && report.target_triple !== report.triple) {
+      throw new Error(`Conflicting target aliases in ${path}`);
+    }
+    if (report.archive_sha256 !== undefined && report.sha256 !== undefined && report.archive_sha256 !== report.sha256) {
+      throw new Error(`Conflicting archive aliases in ${path}`);
+    }
+    const targetTriple = report.target_triple ?? report.triple;
+    const archiveDigest = report.archive_sha256 ?? report.sha256;
+    if (report.runtime_version !== version || targetTriple !== target) throw new Error(`Build report mismatch in ${path}`);
     const binaryFile = `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`;
     if (report.binary_file !== binaryFile || !/^[a-f0-9]{64}$/.test(report.binary_sha256 || '')) {
       throw new Error(`Invalid binary identity/digest in ${path}`);
     }
-    if (!/^[a-f0-9]{64}$/.test(report.sha256 || '')) throw new Error(`Invalid archive digest in ${path}`);
-    digests[target] = report.sha256;
+    if (report.schema_version === 2 && report.archive_file !== `rsrs-runtime-${target}.tar.gz`) {
+      throw new Error(`Invalid archive file in ${path}`);
+    }
+    if (!/^[a-f0-9]{64}$/.test(archiveDigest || '')) throw new Error(`Invalid archive digest in ${path}`);
+    digests[target] = archiveDigest;
   }
   const unique = new Set(Object.values(digests));
   if (unique.size !== RELEASE_TARGETS.length) throw new Error('Duplicate archive digest across targets; refuse to publish a pin for ambiguous assets');

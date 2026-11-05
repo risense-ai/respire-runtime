@@ -9,6 +9,7 @@ pub fn prepare() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=host-winml-build.rs");
     println!("cargo:rerun-if-changed=notices/WinML-2.4.89-license.txt");
+    println!("cargo:rerun-if-env-changed=RSRS_WINML_PACKAGE");
     if env::var("CARGO_CFG_TARGET_OS")? != "windows" {
         return Ok(());
     }
@@ -19,7 +20,9 @@ pub fn prepare() -> Result<(), Box<dyn std::error::Error>> {
     };
     let out = PathBuf::from(env::var("OUT_DIR")?);
     let package = out.join("winml-2.4.89.nupkg");
-    let bytes = if package.is_file() {
+    let bytes = if let Some(path) = env::var_os("RSRS_WINML_PACKAGE") {
+        fs::read(PathBuf::from(path))?
+    } else if package.is_file() {
         fs::read(&package)?
     } else {
         let mut bytes = Vec::new();

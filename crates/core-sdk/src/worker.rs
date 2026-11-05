@@ -14,7 +14,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// Maintenance ops (full index rebuild) may need far more than the default;
 /// `RSRS_CORE_CALL_LIMIT_SECS` overrides per process without changing the default.
 fn call_limit() -> Duration {
-    crate::inference_policy::call_limit(crate::env::var("RSRS_CORE_CALL_LIMIT_SECS").ok().as_deref(), CALL_LIMIT)
+    crate::inference_policy::call_limit(
+        crate::env::var("RSRS_CORE_CALL_LIMIT_SECS").ok().as_deref(),
+        CALL_LIMIT,
+    )
 }
 #[cfg(not(feature = "native-fault-tests"))]
 const CALL_LIMIT: Duration = Duration::from_secs(365);
@@ -447,7 +450,9 @@ fn process() -> Result<Arc<Process>> {
 fn unconfirmed_model_load(operation: &str, error: anyhow::Error) -> anyhow::Error {
     if operation == "host_load_selection" {
         error.context("load outcome unconfirmed; settings may already be saved; previous model recovery unconfirmed; request was not replayed; inspect runtime state and follow host recovery guidance")
-    } else { error }
+    } else {
+        error
+    }
 }
 
 pub(crate) fn execute(
@@ -477,9 +482,13 @@ pub(crate) fn execute(
     }
     let root = crate::business::index_root().ok();
     if let Err(error) = process.send(&RequestFrame {
-        id, operation, payload, index_root: root, transport: transport.is_some(), selection: crate::profiles::current()?,
-    })
-    {
+        id,
+        operation,
+        payload,
+        index_root: root,
+        transport: transport.is_some(),
+        selection: crate::profiles::current()?,
+    }) {
         let _ = process.retire(&format!("IPC write failed: {error:#}"));
         return Err(unconfirmed_model_load(operation, error));
     }
@@ -501,8 +510,12 @@ pub(crate) fn execute(
             anyhow::ensure!(!process.retired.load(Ordering::Acquire) && process.generation == generation(),
                 "host transport already started and was not cancelled; its result was discarded after Core retirement; business outcome unavailable; not replayed");
             let body = match &result {
-                Ok(value) => ResponseBody::CallbackResult { callback_result: value },
-                Err(error) => ResponseBody::CallbackError { callback_error: format!("{error:#}") },
+                Ok(value) => ResponseBody::CallbackResult {
+                    callback_result: value,
+                },
+                Err(error) => ResponseBody::CallbackError {
+                    callback_error: format!("{error:#}"),
+                },
             };
             let frame = ResponseFrame { id, body };
             if let Err(error) = process.send(&frame) {
@@ -513,7 +526,9 @@ pub(crate) fn execute(
             let error = anyhow::anyhow!("{error}");
             return Err(if process.retired.load(Ordering::Acquire) {
                 unconfirmed_model_load(operation, error)
-            } else { error });
+            } else {
+                error
+            });
         } else {
             if process.retired.load(Ordering::Acquire) || process.generation != generation() {
                 return Err(unconfirmed_model_load(operation, anyhow::anyhow!(
@@ -616,6 +631,7 @@ type CallbackMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>;
 
 /// Hidden binary entry. No App, profile migration, store, or LibraryLock is opened.
 pub fn run() -> Result<()> {
+    crate::bge::m3_model_dir()?;
     let output = Arc::new(Mutex::new(std::io::stdout()));
     let callbacks: CallbackMap = Arc::new(Mutex::new(HashMap::new()));
     let (ordinary_tx, ordinary_rx) = mpsc::channel::<Value>();
@@ -670,7 +686,10 @@ pub fn run() -> Result<()> {
                             &mut *output
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("Core worker output poisoned"))?,
-                            &ResponseFrame { id, body: ResponseBody::Callback { callback: request } },
+                            &ResponseFrame {
+                                id,
+                                body: ResponseBody::Callback { callback: request },
+                            },
                         )?;
                         let mut response = receiver
                             .recv()
@@ -687,21 +706,33 @@ pub fn run() -> Result<()> {
                     if operation == "test_worker_callback" {
                         return callback(&json!({"synthetic_fixture":true}));
                     }
-                    let selection = frame.get("selection").filter(|v| !v.is_null()).cloned().map(serde_json::from_value::<crate::profiles::Selection>).transpose()?;
-                    let execute = || -> Result<Value> { if frame["transport"].as_bool() == Some(true) {
-                        crate::business::execute_with_transport::<Value>(
-                            operation,
-                            payload,
-                            &mut callback,
-                        )
-                    } else {
-                        crate::business::execute::<Value>(operation, payload)
-                    } };
-                    match selection { Some(selection) => crate::profiles::scoped(selection, execute), None => execute() }
+                    let selection = frame
+                        .get("selection")
+                        .filter(|v| !v.is_null())
+                        .cloned()
+                        .map(serde_json::from_value::<crate::profiles::Selection>)
+                        .transpose()?;
+                    let execute = || -> Result<Value> {
+                        if frame["transport"].as_bool() == Some(true) {
+                            crate::business::execute_with_transport::<Value>(
+                                operation,
+                                payload,
+                                &mut callback,
+                            )
+                        } else {
+                            crate::business::execute::<Value>(operation, payload)
+                        }
+                    };
+                    match selection {
+                        Some(selection) => crate::profiles::scoped(selection, execute),
+                        None => execute(),
+                    }
                 })();
                 let body = match &result {
                     Ok(value) => ResponseBody::Result { result: value },
-                    Err(error) => ResponseBody::Error { error: format!("{error:#}") },
+                    Err(error) => ResponseBody::Error {
+                        error: format!("{error:#}"),
+                    },
                 };
                 let response = ResponseFrame { id, body };
                 if let Ok(mut output) = output.lock() {
@@ -733,7 +764,9 @@ pub fn run() -> Result<()> {
                     });
                 match (status, heartbeat_output.lock()) {
                     (Ok(status), Ok(mut output)) => {
-                        if write_frame(&mut *output, &HeartbeatFrame { heartbeat: &status }).is_err() {
+                        if write_frame(&mut *output, &HeartbeatFrame { heartbeat: &status })
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -768,7 +801,8 @@ pub fn run() -> Result<()> {
 mod tests {
     #[test]
     fn interrupted_load_reports_uncertainty_without_replaying_or_claiming_rollback() {
-        let load = super::unconfirmed_model_load("host_load_selection", anyhow::anyhow!("IPC closed"));
+        let load =
+            super::unconfirmed_model_load("host_load_selection", anyhow::anyhow!("IPC closed"));
         let message = format!("{load:#}");
         assert!(message.contains("load outcome unconfirmed"));
         assert!(message.contains("settings may already be saved"));
@@ -782,8 +816,12 @@ mod tests {
     fn borrowed_frames_keep_the_existing_wire_contract() -> Result<()> {
         let payload = json!({"nested":[null, {"body":"synthetic unicode fixture", "ids":[1,2,3]}]});
         let request = RequestFrame {
-            id: u64::MAX, operation: "query", payload: &payload,
-            index_root: None, transport: true, selection: None,
+            id: u64::MAX,
+            operation: "query",
+            payload: &payload,
+            index_root: None,
+            transport: true,
+            selection: None,
         };
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &request)?;
@@ -796,9 +834,24 @@ mod tests {
         for (key, body) in [
             ("result", ResponseBody::Result { result: &payload }),
             ("callback", ResponseBody::Callback { callback: &payload }),
-            ("callback_result", ResponseBody::CallbackResult { callback_result: &payload }),
-            ("error", ResponseBody::Error { error: String::from("synthetic error") }),
-            ("callback_error", ResponseBody::CallbackError { callback_error: String::from("synthetic error") }),
+            (
+                "callback_result",
+                ResponseBody::CallbackResult {
+                    callback_result: &payload,
+                },
+            ),
+            (
+                "error",
+                ResponseBody::Error {
+                    error: String::from("synthetic error"),
+                },
+            ),
+            (
+                "callback_error",
+                ResponseBody::CallbackError {
+                    callback_error: String::from("synthetic error"),
+                },
+            ),
         ] {
             bytes.clear();
             write_frame(&mut bytes, &ResponseFrame { id: 9, body })?;
@@ -812,7 +865,12 @@ mod tests {
             }
         }
         bytes.clear();
-        write_frame(&mut bytes, &HeartbeatFrame { heartbeat: &payload })?;
+        write_frame(
+            &mut bytes,
+            &HeartbeatFrame {
+                heartbeat: &payload,
+            },
+        )?;
         let decoded = read_frame(&mut bytes.as_slice())?;
         assert_eq!(decoded["heartbeat"], payload);
         assert!(decoded.get("id").is_none());

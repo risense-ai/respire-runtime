@@ -1,0 +1,43 @@
+{
+  "fixture_type": "business_rpc_response",
+  "expected": "accept",
+  "payload": {
+    "request": {
+      "v": 1,
+      "id": "request-submit-1",
+      "operation_id": "operation-memory-1",
+      "idempotency_key": "key-memory-1",
+      "method": "cli.exec",
+      "args": [
+        "--json",
+        "remember",
+        "isolated scope fixture"
+      ],
+      "scope": {
+        "account_id": "account-1",
+        "instance_id": "instance-1",
+        "generation": 7
+      }
+    },
+    "response": {
+      "v": 1,
+      "id": "request-submit-1",
+      "operation_id": "operation-memory-1",
+      "scope": {
+        "account_id": "account-1",
+        "instance_id": "instance-1",
+        "generation": 7
+      },
+      "idempotency_key": "key-memory-1",
+      "ok": false,
+      "exit": 1,
+      "bin": "fixture-only",
+      "envelope": null,
+      "error": "fixture failure",
+      "code": "daemon_unavailable",
+      "web_url": null,
+      "pid": null,
+      "data_dir": null
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "fixture_type": "assets_status",
+  "expected": "accept",
+  "payload": {
+    "complete": false,
+    "missing": []
+  }
+}

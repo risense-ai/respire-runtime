@@ -1,0 +1,27 @@
+{
+  "fixture_type": "root_layout",
+  "expected": "accept",
+  "payload": {
+    "schema_version": 1,
+    "layout": "phase1",
+    "installation_root": "C:/isolated/.rsrs",
+    "device_config_root": "C:/isolated/.rsrs",
+    "client_config_path": "C:/isolated/.rsrs/client.json",
+    "account_data_root": "C:/isolated/.rsrs/accounts/account-1",
+    "accounts_root": "C:/isolated/.rsrs/accounts",
+    "asset_root": "C:/isolated/.rsrs/models/bge-m3",
+    "runtime_state_root": "C:/isolated/.rsrs/runtime",
+    "legacy_whole_isolation": true,
+    "sources": {
+      "installation_root": "RSRS_DATA_DIR",
+      "device_config_root": "RSRS_DATA_DIR",
+      "client_config_path": "RSRS_DATA_DIR",
+      "account_data_root": "client.json:data_dir",
+      "accounts_root": "RSRS_DATA_DIR",
+      "asset_root": "RSRS_DATA_DIR",
+      "runtime_state_root": "RSRS_DATA_DIR"
+    },
+    "log_root": "C:/isolated/.rsrs/client2"
+  },
+  "fixture_notes": "log_root is a compatibility fixture extension: the existing Client2 Manager.Root contains runtime.log; ResolvedRoots does not emit this field. asset_root is the BGE-M3 installation target, not inference discovery."
+}

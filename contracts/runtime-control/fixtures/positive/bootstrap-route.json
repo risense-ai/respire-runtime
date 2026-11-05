@@ -1,0 +1,8 @@
+{
+  "fixture_type": "bootstrap_route",
+  "expected": "accept",
+  "payload": {
+    "operation": "auth.login",
+    "executor": "cli"
+  }
+}

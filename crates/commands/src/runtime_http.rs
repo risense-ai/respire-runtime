@@ -100,6 +100,20 @@ fn mcp_http(
         _ => "OTHER",
     };
     let mut body = String::new();
+    let admission = if *method == tiny_http::Method::Post && matches!(path, "/mcp" | "/sse") {
+        match crate::rpc_serve::begin_admission(uuid::Uuid::new_v4().to_string(), "mcp_call") {
+            Some(admission) => Some(admission),
+            None => return (
+                503,
+                "application/json; charset=utf-8",
+                json!({"error":"runtime is draining and rejected new MCP business","code":"runtime_maintenance"})
+                    .to_string().into_bytes(),
+            ),
+        }
+    } else {
+        None
+    };
+    let _admission = admission;
     if *method == tiny_http::Method::Post {
         if req
             .as_reader()
@@ -187,15 +201,64 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
     if path == "/api/runtime/stop" && method == tiny_http::Method::Post {
         // Coordination-version handshake, not an authorization credential. Old
         // hosts must not detach/replace a manager-supervised process.
-        if crate::host_hooks::managed_id().is_some() && header_value(req, "X-Respire-Lifecycle") != "coordinator-v1" {
-            return (409, "application/json; charset=utf-8", br#"{"error":"managed_lifecycle_required"}"#.to_vec());
+        if crate::host_hooks::managed_id().is_some()
+            && header_value(req, "X-Respire-Lifecycle") != "coordinator-v1"
+        {
+            return (
+                409,
+                "application/json; charset=utf-8",
+                br#"{"error":"managed_lifecycle_required"}"#.to_vec(),
+            );
         }
+        let mut body = String::new();
+        if req
+            .as_reader()
+            .take(4097)
+            .read_to_string(&mut body)
+            .is_err()
+            || body.len() > 4096
+        {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"invalid_stop_identity"}"#.to_vec(),
+            );
+        }
+        let expected: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(expected) => expected,
+            Err(_) => {
+                return (
+                    400,
+                    "application/json; charset=utf-8",
+                    br#"{"error":"invalid_stop_identity"}"#.to_vec(),
+                )
+            }
+        };
+        let operation_id = match crate::rpc_serve::request_drain_exit(&expected) {
+            Ok(operation_id) => operation_id,
+            Err(_) => {
+                return (
+                    409,
+                    "application/json; charset=utf-8",
+                    br#"{"error":"stop_identity_mismatch"}"#.to_vec(),
+                )
+            }
+        };
         return (
             200,
             "application/json; charset=utf-8",
-            serde_json::json!({"ok": true, "server": "respire"})
-                .to_string()
-                .into_bytes(),
+            serde_json::json!({
+                "ok": true,
+                "server": "respire",
+                "request_id": uuid::Uuid::new_v4().to_string(),
+                "operation_id": operation_id,
+                "state": "accepted",
+                "deadline_ms": null,
+                "timeout_state": null,
+                "admitted": crate::rpc_serve::admitted_list(),
+            })
+            .to_string()
+            .into_bytes(),
         );
     }
     if path == "/api/rpc" && method == tiny_http::Method::Post {
@@ -387,14 +450,29 @@ async fn serve_request(
         let (send, receive) = tokio::sync::oneshot::channel();
         // The completion callback only sends an in-memory result. Hyper owns
         // response ordering and all socket backpressure in its async task.
-        if let Err(error) = crate::rpc_serve::handle_http_rpc_deferred(&bytes, move |value| {
-            let _ = send.send(value);
-        }) {
-            return response(
-                400,
-                "application/json",
-                json!({"error": error.to_string()}).to_string().into_bytes(),
-            );
+        // Admission may wait for a business gate; never block a network worker.
+        match tokio::task::spawn_blocking(move || {
+            crate::rpc_serve::handle_http_rpc_deferred(&bytes, move |value| {
+                let _ = send.send(value);
+            })
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return response(
+                    400,
+                    "application/json",
+                    json!({"error": error.to_string()}).to_string().into_bytes(),
+                )
+            }
+            Err(_) => {
+                return response(
+                    503,
+                    "application/json",
+                    b"{\"error\":\"runtime admission unavailable\"}".to_vec(),
+                )
+            }
         }
         return match receive.await {
             Ok(value) => response(
@@ -410,25 +488,18 @@ async fn serve_request(
         };
     }
     local.body = std::io::Cursor::new(bytes.to_vec());
-    let control = path == "/api/health" || path == "/api/runtime/stop";
-    let result = if control {
-        handle_request(&mut local, bound)
-    } else {
-        // The existing synchronous MCP bridge runs outside the network executor.
-        match tokio::task::spawn_blocking(move || handle_request(&mut local, bound)).await {
-            Ok(result) => result,
-            Err(_) => {
-                return response(
-                    503,
-                    "application/json",
-                    b"{\"error\":\"runtime handler unavailable\"}".to_vec(),
-                )
-            }
+    // Health and stop also acquire synchronous state locks.
+    let result = match tokio::task::spawn_blocking(move || handle_request(&mut local, bound)).await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            return response(
+                503,
+                "application/json",
+                b"{\"error\":\"runtime handler unavailable\"}".to_vec(),
+            )
         }
     };
-    if result.0 == 200 && path == "/api/runtime/stop" && parts.method == axum::http::Method::POST {
-        crate::rpc_serve::request_drain_exit();
-    }
     response(result.0, result.1, result.2)
 }
 

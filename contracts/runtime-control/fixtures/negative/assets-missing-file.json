@@ -1,0 +1,52 @@
+{
+  "fixture_type": "assets_status",
+  "expected": "reject",
+  "error_code": "assets_status_invalid",
+  "payload": {
+    "complete": true,
+    "missing": [
+      {
+        "name": "bge-m3",
+        "suggested_source": "mirror"
+      }
+    ],
+    "assets": [],
+    "backend_load": {
+      "state": "loaded",
+      "evidence": {
+        "contract": 1,
+        "status": "loaded",
+        "ready": true,
+        "backend": "onnx",
+        "engine": "cpu",
+        "selected": "CPU",
+        "provider": "CPUExecutionProvider",
+        "fresh_session": true,
+        "inference_completed": true,
+        "model": "m3",
+        "index_identity": "m3",
+        "dimensions": 1024,
+        "node_assignment": "not_measured",
+        "cpu_node_fallback": "not_applicable",
+        "runtime": {
+          "kind": "onnxruntime",
+          "api_version": 22,
+          "version": "1.22.0",
+          "build_info_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "sdk_pin": {
+          "target": "x86_64-pc-windows-msvc",
+          "sdk_version": "0.0.0-dev.4",
+          "manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "modules": [
+          {
+            "id": "linked-sdk-executable",
+            "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ],
+        "module_identity_source": "host_verified"
+      }
+    }
+  }
+}

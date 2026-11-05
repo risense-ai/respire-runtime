@@ -1,0 +1,13 @@
+{
+  "fixture_type": "stop_state",
+  "expected": "reject",
+  "error_code": "ambiguous_stop_result",
+  "payload": {
+    "request_id": "request-stop-1",
+    "operation_id": "operation-stop-1",
+    "state": "drained",
+    "unfinished": [
+      { "operation_id": "operation-write-1", "result": "unknown" }
+    ]
+  }
+}

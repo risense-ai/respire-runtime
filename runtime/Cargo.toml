@@ -1,6 +1,6 @@
 [package]
 name = "respire_runtime"
-version = "1.0.21-dev.1"
+version = "1.0.21-dev.2"
 edition = "2021"
 rust-version = "1.88"
 description = "standalone respire runtime binary (rsrs-runtime): loopback RPC host for the CLI and client2"
@@ -13,6 +13,7 @@ name = "rsrs-runtime"
 path = "src/main.rs"
 
 [dependencies]
+respire_app = { package = "respire_app", path = "../crates/app", default-features = false }
 respire_commands = { path = "../crates/commands" }
 respire_core_sdk = { path = "../crates/core-sdk" }
 respire_protocol = { path = "../crates/protocol" }
@@ -20,7 +21,10 @@ respire_protocol = { path = "../crates/protocol" }
 # this crate into the runtime repository together with respire_spawn).
 respire_spawn = { path = "../spawn" }
 anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+uuid = { version = "1.0", features = ["v4"] }
 
 [lints.rust]
 unsafe_code = "forbid"

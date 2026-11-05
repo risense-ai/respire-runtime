@@ -1,8 +1,8 @@
 name: Verify and publish protocol crate
 
 # Publishes crates/protocol (respire-protocol) to crates.io. The RPC contract
-# of this repository and respire-cli is owned here; the SDK binding crate
-# publication stays owned by respire-core. Requires the CARGO_REGISTRY_TOKEN
+# of this repository and respire-cli is owned here; native SDK archives are
+# private respire-core release assets, never registry packages. Requires the CARGO_REGISTRY_TOKEN
 # repository secret (read only by the explicit publish step).
 on:
   push:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       package:
-        description: Protocol publication only; SDK publication is owned by respire-core
+        description: Protocol only; native SDK uses private Core release assets
         type: choice
         default: protocol
         options: [protocol]

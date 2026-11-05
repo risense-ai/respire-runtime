@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://respire.rs/contracts/runtime-control/release-metadata.schema.json",
+  "title": "Runtime release metadata",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "integer", "enum": [1, 2] },
+    "runtime_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$" },
+    "tag": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$" },
+    "triple": { "type": "string", "minLength": 1 },
+    "target_triple": { "type": "string", "minLength": 1 },
+    "archive_file": { "type": "string", "minLength": 1 },
+    "sha256": { "$ref": "#/$defs/sha256" },
+    "archive_sha256": { "$ref": "#/$defs/sha256" },
+    "binary_file": { "type": "string", "minLength": 1 },
+    "binary_sha256": { "$ref": "#/$defs/sha256" },
+    "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "compat": {
+      "type": "object",
+      "required": ["min_cli", "max_cli"],
+      "properties": {
+        "min_cli": { "type": "string" },
+        "max_cli": { "type": "string" }
+      }
+    },
+    "protocol_range": {
+      "type": "object",
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": { "type": "integer", "minimum": 1 },
+        "maximum": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "propertyNames": { "type": "string" },
+      "additionalProperties": { "type": "string" }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "size", "sha256"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "size": { "type": "integer", "minimum": 0 },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

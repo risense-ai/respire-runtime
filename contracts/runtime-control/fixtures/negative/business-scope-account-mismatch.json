@@ -1,0 +1,22 @@
+{
+  "fixture_type": "business_rpc_request",
+  "expected": "reject",
+  "error_code": "scope_mismatch",
+  "payload": {
+    "v": 1,
+    "id": "request-submit-1",
+    "operation_id": "operation-memory-1",
+    "idempotency_key": "key-memory-1",
+    "method": "cli.exec",
+    "args": [
+      "--json",
+      "remember",
+      "isolated scope fixture"
+    ],
+    "scope": {
+      "account_id": "another-account",
+      "instance_id": "instance-1",
+      "generation": 7
+    }
+  }
+}

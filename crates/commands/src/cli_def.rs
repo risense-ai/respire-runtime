@@ -42,9 +42,12 @@ pub enum ModelAction {
     /// Backends: onnx (default), mlx (Apple Silicon), host_transport.
     Switch {
         model: String,
-        #[arg(long, default_value = "onnx")] backend: String,
-        #[arg(long, default_value = "cpu", value_parser = ["cpu","gpu","npu"])] engine: String,
-        #[arg(long)] variant: Option<String>,
+        #[arg(long, default_value = "onnx")]
+        backend: String,
+        #[arg(long, default_value = "cpu", value_parser = ["cpu","gpu","npu"])]
+        engine: String,
+        #[arg(long)]
+        variant: Option<String>,
     },
     /// Read the profile-switch task, cancellation ID and current operation.
     Progress,
@@ -76,6 +79,9 @@ pub enum ModelAction {
         /// Onnx model variant to pin (quantized, fp16, int8, uint8, q4, q4f16).
         #[arg(long)]
         model: Option<String>,
+        /// Apply only if inference.json still has this SHA-256 revision.
+        #[arg(long, requires = "engine")]
+        expected_revision: Option<String>,
     },
     /// Validate installed weights, load and trial inference, then save selection. Never downloads.
     Load {
@@ -91,13 +97,15 @@ pub enum ModelAction {
         #[arg(long)]
         model: Option<String>,
         /// Text to compare against the CPU baseline, including long-input checks.
-        #[arg(long, default_value = "\u{672c}\u{5730}\u{63a8}\u{7406}\u{5f15}\u{64ce}\u{9a8c}\u{8bc1}\u{ff1a}\u{8bb0}\u{5fc6}\u{68c0}\u{7d22}")]
+        #[arg(
+            long,
+            default_value = "\u{672c}\u{5730}\u{63a8}\u{7406}\u{5f15}\u{64ce}\u{9a8c}\u{8bc1}\u{ff1a}\u{8bb0}\u{5fc6}\u{68c0}\u{7d22}"
+        )]
         text: String,
     },
     /// Delete the user-installed BGE-M3 files.
     #[command(name = "uninstall", visible_alias = "uninstall-m3")]
     UninstallM3,
-
 }
 
 #[derive(Subcommand)]
@@ -848,7 +856,9 @@ pub enum Command {
     /// Log in through browser authorization, or use --interactive for password and TOTP prompts.
     /// Address defaults to the last server this machine used (kept in session.json by register/logout).
     /// Missing user/password drops into an interactive prompt (TTY only).
-    #[command(after_long_help = "Vault recovery: cloud authorization does not decrypt memories. Use the existing recovery code or a trusted device's keys-export, then retry login. Missing or incorrect recovery material must not replace the selected account. super-reset rotates an already unlocked vault; it cannot recover a lost data key. keygen --force switches to unrelated offline keys and is not cloud recovery. If all recovery material is lost, existing encrypted data cannot be recovered by resetting a password. See docs/vault-recovery.md.")]
+    #[command(
+        after_long_help = "Vault recovery: cloud authorization does not decrypt memories. Use the existing recovery code or a trusted device's keys-export, then retry login. Missing or incorrect recovery material must not replace the selected account. super-reset rotates an already unlocked vault; it cannot recover a lost data key. keygen --force switches to unrelated offline keys and is not cloud recovery. If all recovery material is lost, existing encrypted data cannot be recovered by resetting a password. See docs/vault-recovery.md."
+    )]
     Login {
         #[arg(long)]
         addr: Option<String>,
@@ -992,7 +1002,10 @@ pub enum SnapshotCmd {
         confirm: bool,
     },
     /// Recover an interrupted local snapshot transaction (host only)
-    Recover { #[arg(long)] confirm: bool },
+    Recover {
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Resume sync only after reviewing local/remote differences at this exact local revision
     ResumeSync {
         #[arg(long)]
@@ -1082,7 +1095,9 @@ pub enum PluginCommand {
 pub fn changes_profile(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
-        Some(Command::Space { action, yes, .. }) => matches!(action.as_str(), "create" | "use" | "join") || (action == "remove" && *yes),
+        Some(Command::Space { action, yes, .. }) => {
+            matches!(action.as_str(), "create" | "use" | "join") || (action == "remove" && *yes)
+        }
         Some(Command::Config { data_dir, .. }) => data_dir.is_some(),
         _ => false,
     }

@@ -2888,8 +2888,8 @@ pub fn run_tree_float(go: bool, min: i64) -> Result<()> {
                     OutputStatus::Pending
                 },
                 format!(
-                    "{} hits {} {} -> {} {}",
-                    it.recall_count,
+                    "{} good {} {} -> {} {}",
+                    it.good_marks,
                     it.title,
                     respire_app::service::short_id(&it.id),
                     it.new_parent_title,
@@ -3814,6 +3814,7 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
 }
 
 pub fn run_local(args: Cli) -> Result<()> {
+    respire_app::service::validate_client_config()?;
     set_json_mode(args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
     if respire_app::service::off_mode() && matches!(args.command, Some(Command::Status)) {
         let session = respire_app::service::session_info();
@@ -4317,16 +4318,26 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 ModelAction::ResetCpu => {
                     anyhow::bail!("run `rsrs model reset-cpu` directly in your terminal")
                 }
-                ModelAction::Engine { engine, model } => {
+                ModelAction::Engine { engine, model, expected_revision } => {
                     use respire_app::memory::onnx;
                     let selected = respire_app::embedding::saved_selection()?;
                     respire_app::core_sdk::profiles::set_active(selected.clone());
                     anyhow::ensure!(selected.is_none() || (engine.is_none() && model.is_none()),"library uses a model profile; use model switch instead of legacy engine settings");
                     if let Some(engine) = engine {
-                        onnx::save_engine_with_variant(onnx::Engine::parse(engine)?, model.as_deref())?;
+                        let revision = onnx::save_engine_with_variant_revision(
+                            onnx::Engine::parse(engine)?,
+                            model.as_deref(),
+                            expected_revision.as_deref(),
+                        )?;
                         *EMBEDDER_SLOT
                             .lock()
                             .map_err(|_| anyhow!("embedder cache poisoned"))? = None;
+                        let summary = serde_json::json!({"engine":engine,
+                            "model":onnx::configured_variant(onnx::Engine::parse(engine)?)?.name,
+                            "revision":revision,"variants":crate::model_install::variant_inventory()?,
+                            "active_selection":selected});
+                        emit_result(ResultEnvelope::new("model",OutputStatus::Ok,summary,vec![]))?;
+                        return Ok(());
                     } else if let Some(model) = model.as_deref() {
                         onnx::save_model_variant(model)?;
                         *EMBEDDER_SLOT.lock().map_err(|_| anyhow!("embedder cache poisoned"))? = None;

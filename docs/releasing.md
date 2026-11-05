@@ -26,7 +26,10 @@ Per platform triple (seven targets: `x86_64`/`aarch64` Linux glibc and musl,
 | --- | --- |
 | `rsrs-runtime-<triple>` / `.exe` | raw binary |
 | `rsrs-runtime-<triple>.tar.gz` | triple-qualified binary + `core-runtime.json` manifest + native Core runtime libraries (onnxruntime / DirectML / metallib, staged from the Core SDK by the `crates/core-sdk` tooling) + notices |
-| `runtime-build-<triple>.json` | `runtime_version`, `tag`, `triple`, archive `sha256`, triple-qualified `binary_file`, `binary_sha256`, `compat.min_cli/max_cli` |
+| `runtime-build-<triple>.json` | Schema-2 identity, `archive_sha256`, `binary_sha256`, source commit, protocol range, capabilities, and per-file integrity manifest |
+
+Consumers map legacy schema 1 by reading `sha256` as `archive_sha256` and
+`triple` as `target_triple`; conflicting aliases are rejected.
 
 Exactly 21 assets per release (three per platform). The tarball extracts to a
  flat layout: the triple-qualified binary sits at the archive root next to `core-runtime.json`

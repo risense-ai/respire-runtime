@@ -12,8 +12,8 @@
 //! - the CLI binary re-imports these items so `crate::rpc::...` paths and bare
 //!   call sites keep resolving.
 
-use std::path::PathBuf;
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -35,18 +35,31 @@ pub fn is_status(args: &[String]) -> bool {
 
 /// Viewing account/configuration state must not invalidate ongoing sync or indexing.
 pub fn is_context_query(args: &[String]) -> bool {
-    if !matches!(command_name(args), Some("account" | "space" | "config" | "agent-config" | "session")) {
+    if !matches!(
+        command_name(args),
+        Some("account" | "space" | "config" | "agent-config" | "session")
+    ) {
         return false;
     }
-    let Ok(cli) = Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned())) else {
+    let Ok(cli) =
+        Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned()))
+    else {
         return false;
     };
     match cli.command {
         Some(Command::Account { action, .. }) => action == "list",
         Some(Command::Space { action, .. }) => matches!(action.as_str(), "list" | "members"),
-        Some(Command::Config { data_dir: None, addr: None, autosync: None, cure_auto: None, rpc_parallelism: None })
+        Some(Command::Config {
+            data_dir: None,
+            addr: None,
+            autosync: None,
+            cure_auto: None,
+            rpc_parallelism: None,
+        })
         | Some(Command::AgentConfig { set: None })
-        | Some(Command::Session { command: SessionCommand::List }) => true,
+        | Some(Command::Session {
+            command: SessionCommand::List,
+        }) => true,
         _ => false,
     }
 }
@@ -75,18 +88,33 @@ pub fn command_name(args: &[String]) -> Option<&str> {
 
 pub fn diary_lexical_mode(args: &[String]) -> bool {
     // Values after -- are literal queries, never runtime routing flags.
-    let options=&args[..args.iter().position(|arg|arg=="--").unwrap_or(args.len())];
-    let modes:Vec<&str>=options.iter().enumerate().filter_map(|(index,arg)| {
-        if arg=="--mode" {Some(options.get(index+1).map(String::as_str).unwrap_or(""))}
-        else {arg.strip_prefix("--mode=")}
-    }).collect();
-    modes==["lexical"]
+    let options = &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())];
+    let modes: Vec<&str> = options
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            if arg == "--mode" {
+                Some(options.get(index + 1).map(String::as_str).unwrap_or(""))
+            } else {
+                arg.strip_prefix("--mode=")
+            }
+        })
+        .collect();
+    modes == ["lexical"]
 }
 
 pub fn needs_inference(args: &[String]) -> bool {
-    matches!(command_name(args), Some("remember" | "recall" | "related" | "reembed" | "classify" | "update"))
-        || (command_name(args) == Some("diary-search") && !diary_lexical_mode(args))
-        || (command_name(args) == Some("model") && args.iter().any(|arg| matches!(arg.as_str(), "probe" | "load")))
+    matches!(
+        command_name(args),
+        Some("remember" | "recall" | "related" | "reembed" | "classify" | "update")
+    ) || (command_name(args) == Some("diary-search") && !diary_lexical_mode(args))
+        || (command_name(args) == Some("model")
+            && args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "probe" | "load")))
 }
 
 pub fn current_url() -> String {
@@ -155,14 +183,12 @@ pub static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
     requested: false,
     state: "idle",
     error: None,
-    prepare_mirror: None,
 });
 
 pub struct IndexWork {
     pub(crate) requested: bool,
     pub(crate) state: &'static str,
     pub(crate) error: Option<String>,
-    pub(crate) prepare_mirror: Option<String>,
 }
 #[derive(Default)]
 pub struct GateState {
@@ -231,7 +257,7 @@ pub fn mark_worker() {
 }
 
 pub struct RecallStats {
-    pub request_id:String,
+    pub request_id: String,
     pub query: String,
     pub project: String,
     pub candidates: Vec<String>,
@@ -240,9 +266,18 @@ pub struct RecallStats {
 
 impl RecallStats {
     pub fn persist(&self, store: &respire_app::transport::local::LocalStore) -> Result<()> {
-        if respire_app::service::workspace_mode() != "normal" { return Ok(()); }
+        if respire_app::service::workspace_mode() != "normal" {
+            return Ok(());
+        }
         store.write_transaction(|| {
-            store.log_query_request(&self.request_id,&self.query, &self.project, "", &self.candidates, &self.scores)?;
+            store.log_query_request(
+                &self.request_id,
+                &self.query,
+                &self.project,
+                "",
+                &self.candidates,
+                &self.scores,
+            )?;
             store.bump_recall(&self.candidates)?;
             store.bump_recall_pairs(&self.candidates)
         })
@@ -264,6 +299,14 @@ pub fn shared_exclusive() -> Arc<WriteGate> {
     EXCLUSIVE
         .get_or_init(|| Arc::new(WriteGate::default()))
         .clone()
+}
+
+pub(crate) fn generation_on_wire(generation: usize) -> u64 {
+    generation.saturating_add(1).max(1) as u64
+}
+
+pub(crate) fn wire_generation() -> u64 {
+    generation_on_wire(GENERATION.load(Ordering::Acquire))
 }
 
 pub fn sync_generation() -> usize {
@@ -288,10 +331,7 @@ pub fn sync_local<T>(generation: usize, action: impl FnOnce() -> Result<T>) -> R
 }
 
 /// Short local preparation/commit for commands whose Core call performs networking.
-pub fn foreground_phase<T>(
-    generation: usize,
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
+pub fn foreground_phase<T>(generation: usize, action: impl FnOnce() -> Result<T>) -> Result<T> {
     let gate = shared_exclusive();
     let _held = gate.acquire(true);
     check_sync_context(generation)?;
@@ -300,14 +340,18 @@ pub fn foreground_phase<T>(
 
 pub fn invalidate_sync_boundary(generation: usize) -> Result<()> {
     check_sync_context(generation)?;
-    GENERATION.fetch_add(1, Ordering::AcqRel);
+    crate::rpc_serve::advance_generation(generation)?;
     // The sync scheduler and resident catalog live beside the dispatch loop.
     crate::rpc_serve::context_changed();
     Ok(())
 }
 
 pub fn check_sync_context(generation: usize) -> Result<()> {
-    anyhow::ensure!(!crate::host_hooks::background_paused(), "runtime maintenance pauses background work");
+    respire_app::service::validate_client_config()?;
+    anyhow::ensure!(
+        !crate::host_hooks::background_paused(),
+        "runtime maintenance pauses background work"
+    );
     respire_app::service::ensure_runtime_profile()?;
     if STOPPING.load(Ordering::Acquire) {
         bail!("runtime is stopping");
@@ -350,7 +394,10 @@ pub fn kick_index() {
 }
 
 pub fn index_yield_to_foreground(generation: usize) -> Result<()> {
-    anyhow::ensure!(!respire_app::service::service_paused(), "background index paused by service mode");
+    anyhow::ensure!(
+        !respire_app::service::service_paused(),
+        "background index paused by service mode"
+    );
     // A separate background Session no longer waits for foreground inference.
     // Context and cancellation checks still occur between every committed source.
     check_sync_context(generation)?;
@@ -360,12 +407,16 @@ pub fn index_yield_to_foreground(generation: usize) -> Result<()> {
 pub fn diary_commit(generation: usize, action: &mut dyn FnMut() -> Result<()>) -> Result<()> {
     let gate = shared_exclusive();
     let _write = gate.acquire(false);
+    check_sync_context(generation)?;
     // Account/mode transitions use the write gate; lifecycle transitions use
     // takeover. Never block on takeover while its owner waits for INDEX_RUNNING.
     let _lifecycle = crate::runtime_policy::try_takeover_lock()?;
     crate::model_progress::commit(|| {
         check_sync_context(generation)?;
-        anyhow::ensure!(!respire_app::service::service_paused(), "background index paused by service mode");
+        anyhow::ensure!(
+            !respire_app::service::service_paused(),
+            "background index paused by service mode"
+        );
         action()
     })
 }
@@ -382,8 +433,7 @@ pub fn index_loop() {
 }
 
 pub fn index_has_work() -> bool {
-    INDEX_RUNNING.load(Ordering::Acquire)
-        || INDEX_WORK.lock().is_ok_and(|work| work.requested)
+    INDEX_RUNNING.load(Ordering::Acquire) || INDEX_WORK.lock().is_ok_and(|work| work.requested)
 }
 
 pub fn index_loop_inner() -> Result<()> {
@@ -391,19 +441,30 @@ pub fn index_loop_inner() -> Result<()> {
     loop {
         if respire_app::service::service_paused() || crate::host_hooks::background_paused() {
             if STOPPING.load(Ordering::Acquire) {
-                let mut work=INDEX_WORK.lock().map_err(|_|anyhow::anyhow!("index work lock poisoned"))?;
-                work.requested=false;work.state="stopped";
+                let mut work = INDEX_WORK
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+                work.requested = false;
+                work.state = "stopped";
                 return Ok(());
             }
-            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            let mut work = INDEX_WORK
+                .lock()
+                .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             work.state = "paused";
-            let _paused = INDEX_CV.wait_timeout(work, Duration::from_secs(1)).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            let _paused = INDEX_CV
+                .wait_timeout(work, Duration::from_secs(1))
+                .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             continue;
         }
         {
-            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            let mut work = INDEX_WORK
+                .lock()
+                .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             while !work.requested && !STOPPING.load(Ordering::Acquire) {
-                work = INDEX_CV.wait(work).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+                work = INDEX_CV
+                    .wait(work)
+                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             }
             if STOPPING.load(Ordering::Acquire) {
                 work.state = "stopped";
@@ -419,54 +480,69 @@ pub fn index_loop_inner() -> Result<()> {
             check_sync_context(generation)?;
             let store = respire_app::service::open_store()?;
             let model = store.retrieval_model()?;
-            let prepare_requested = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.is_some();
             let pending = store.index_missing(&model)?;
             let diary_pending = respire_app::diary::needs_rebuild(&store)?;
             // An indexed library still needs the CPU container for its next query.
-            // Empty libraries wait for a write or explicit preparation instead of
-            // starting an unsolicited model download during status/restart.
+            // Missing assets are reported; only the CLI may install them.
             let active_profile = store.active_selection()?;
-            let cpu_upgrade = active_profile.is_none() && model == "m3" && respire_app::MemoryTransport::count(&store)? > 0
+            let cpu_upgrade = active_profile.is_none()
+                && model == "m3"
+                && respire_app::MemoryTransport::count(&store)? > 0
                 && crate::model_install::cpu_model_preparation_needed()?;
-            if !pending && !diary_pending && !prepare_requested && !cpu_upgrade {
+            if !pending && !diary_pending && !cpu_upgrade {
                 return Ok(true);
             }
-            let Some(_operation) = crate::model_progress::Operation::try_begin_background_index()? else {
+            let Some(_operation) = crate::model_progress::Operation::try_begin_background_index()?
+            else {
                 return Ok(false);
             };
             index_yield_to_foreground(generation)?;
-            if diary_pending && !pending && !prepare_requested && !cpu_upgrade
-                && respire_app::diary::clear_if_empty(&store, |action| diary_commit(generation,action))? {
+            if diary_pending
+                && !pending
+                && !cpu_upgrade
+                && respire_app::diary::clear_if_empty(&store, |action| {
+                    diary_commit(generation, action)
+                })?
+            {
                 return Ok(true);
             }
-            let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
-            if let Some(mirror) = mirror {
-                crate::model_install::prepare_m3_from_mirror(&mirror)?;
-            } else if let Some(selection) = active_profile.as_ref() {
-                respire_app::embedding::prepare(selection, |item,done,total| {
-                    check_sync_context(generation)?;
-                    crate::model_progress::update("prepare",item,done,total)
-                })?;
+            if let Some(selection) = active_profile.as_ref() {
+                crate::model_progress::update("verify", &selection.model, 0, None)?;
+                crate::model_install::verify_selection_assets(selection)?;
             } else if model == "m3" {
-                crate::model_progress::update("prepare", "BGE-M3", 0, None)?;
+                crate::model_progress::update("verify", "BGE-M3", 0, None)?;
                 crate::model_install::prepare_m3_for_index()?;
-                check_sync_context(generation)?;
             }
-            if !pending && !diary_pending { return Ok(true); }
+            check_sync_context(generation)?;
+            if !pending && !diary_pending {
+                return Ok(true);
+            }
             let keys = crate::engine::build_session()?;
             let embedder = respire_app::memory::bge::BgeEmbedder::load_model(&model)?;
             while pending {
-                let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
-                    index_yield_to_foreground(generation)?;
-                    crate::model_progress::update("index", &model, done as u64, Some(total as u64))
-                });
+                let rebuilt =
+                    store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
+                        index_yield_to_foreground(generation)?;
+                        crate::model_progress::update(
+                            "index",
+                            &model,
+                            done as u64,
+                            Some(total as u64),
+                        )
+                    });
                 match rebuilt {
                     Ok(_) => break,
-                    Err(error) if error.downcast_ref::<respire_app::transport::local::IndexSourceChanged>().is_some() => {
+                    Err(error)
+                        if error
+                            .downcast_ref::<respire_app::transport::local::IndexSourceChanged>()
+                            .is_some() =>
+                    {
                         // Keep this Operation across source changes: cancellation and
                         // the 30-minute idle budget apply to the whole resumed task.
                         crate::model_progress::check()?;
-                        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+                        let mut work = INDEX_WORK
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                         work.error = Some(format!("{error:#}"));
                         drop(work);
                         for _ in 0..5 {
@@ -478,17 +554,24 @@ pub fn index_loop_inner() -> Result<()> {
                     Err(error) => return Err(error),
                 }
             }
-            respire_app::diary::rebuild_with_progress(&store, &keys, &embedder, || {
-                index_yield_to_foreground(generation)?;
-                crate::model_progress::check()
-            }, |action| diary_commit(generation, action), |done| {
-                crate::model_progress::update("index", "diary-fragments", done as u64, None)
-            })?;
+            respire_app::diary::rebuild_with_progress(
+                &store,
+                &keys,
+                &embedder,
+                || {
+                    index_yield_to_foreground(generation)?;
+                    crate::model_progress::check()
+                },
+                |action| diary_commit(generation, action),
+                |done| crate::model_progress::update("index", "diary-fragments", done as u64, None),
+            )?;
             check_sync_context(generation)?;
             Ok(true)
         })();
         INDEX_RUNNING.store(false, Ordering::Release);
-        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+        let mut work = INDEX_WORK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
         match result {
             Ok(true) => {
                 work.state = "ready";
@@ -500,31 +583,42 @@ pub fn index_loop_inner() -> Result<()> {
                 if started.elapsed() >= Duration::from_secs(1800) {
                     work.state = "failed";
                     work.requested = false;
-                    work.error = Some("background indexing timed out waiting for another model operation".into());
+                    work.error = Some(
+                        "background indexing timed out waiting for another model operation".into(),
+                    );
                     model_wait_started = None;
                     continue;
                 }
                 work.state = "waiting_model";
                 work.requested = true;
-                work = INDEX_CV.wait_timeout(work, Duration::from_secs(1))
-                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
+                work = INDEX_CV
+                    .wait_timeout(work, Duration::from_secs(1))
+                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?
+                    .0;
             }
-            Err(error) if error.downcast_ref::<crate::model_progress::OperationStopped>().is_some() => {
+            Err(error)
+                if error
+                    .downcast_ref::<crate::model_progress::OperationStopped>()
+                    .is_some() =>
+            {
                 model_wait_started = None;
-                if work.prepare_mirror.is_some() {
-                    work.state = "scheduled";
-                    work.requested = true;
-                    work.error = None;
-                } else {
-                    work.state = "paused";
-                    work.requested = false;
-                    work.error = Some(format!("{error:#}"));
-                }
+                work.state = "paused";
+                work.requested = false;
+                work.error = Some(format!("{error:#}"));
             }
             Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
                 model_wait_started = None;
                 work.state = "scheduled";
                 work.requested = true;
+                work.error = Some(format!("{error:#}"));
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::model_install::AssetsUnavailable>()
+                    .is_some() =>
+            {
+                model_wait_started = None;
+                work.state = "missing";
                 work.error = Some(format!("{error:#}"));
             }
             Err(error) => {
@@ -546,10 +640,11 @@ pub fn request_index() -> Result<Value> {
     }
     let response = crate::host_hooks::call_runtime_method("index.prepare", Vec::new(), true)?;
     anyhow::ensure!(response.ok, "{}", response.error.unwrap_or_default());
-    response.envelope.map(|envelope| envelope.summary)
+    response
+        .envelope
+        .map(|envelope| envelope.summary)
         .ok_or_else(|| anyhow::anyhow!("runtime did not acknowledge background indexing"))
 }
-
 
 // ---- Recall-statistics enqueue bridge ----
 // The write queue itself (WriteJob/WRITE_TX) still lives beside the runtime

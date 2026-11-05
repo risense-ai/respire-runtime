@@ -1,0 +1,17 @@
+{
+  "fixture_type": "assets_status",
+  "expected": "accept",
+  "payload": {
+    "complete": false,
+    "missing": [
+      {
+        "name": "bge-m3",
+        "suggested_source": "mirror"
+      }
+    ],
+    "backend_load": {
+      "state": "not_run",
+      "reason": "assets_missing"
+    }
+  }
+}
