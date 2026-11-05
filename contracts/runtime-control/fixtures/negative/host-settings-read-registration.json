@@ -1,0 +1,144 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Idle",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.metadata.status",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}"
+      ]
+    },
+    "result": {
+      "command": "metadata",
+      "status": "ok",
+      "summary": {
+        "action": "status",
+        "enabled": false,
+        "mode": "isolated",
+        "sdk_supported": true
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": {
+        "enabled": false,
+        "mode": "isolated",
+        "metadata_retained": false,
+        "backup": null
+      },
+      "related": []
+    },
+    "private_response": {
+      "command": "metadata",
+      "status": "ok",
+      "summary": {
+        "action": "status",
+        "enabled": false,
+        "mode": "isolated",
+        "sdk_supported": true
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": {
+        "enabled": false,
+        "mode": "isolated",
+        "metadata_retained": false,
+        "backup": null
+      },
+      "related": []
+    },
+    "private_rpc_response": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "ok": true,
+      "exit": 0,
+      "bin": "rsrs-runtime",
+      "envelope": {
+        "command": "metadata",
+        "status": "ok",
+        "summary": {
+          "action": "status",
+          "enabled": false,
+          "mode": "isolated",
+          "sdk_supported": true
+        },
+        "items": [
+          {
+            "name": "control_ready",
+            "status": "ok",
+            "value": "true"
+          },
+          {
+            "name": "store_ready",
+            "status": "skip",
+            "value": "false"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": {
+          "enabled": false,
+          "mode": "isolated",
+          "metadata_retained": false,
+          "backup": null
+        },
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": 1234,
+      "data_dir": null
+    },
+    "finish_maintenance": false,
+    "offline_context": {
+      "authority": {
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "grant_maintenance": "none",
+        "serving_authorized": false,
+        "parent_verified": true,
+        "binding_verified_before": true,
+        "binding_verified_after": true,
+        "launch_id": "32345678-1234-4234-a234-123456789abc",
+        "grant_verified": true,
+        "registration_verified": false
+      },
+      "auth_recovery_pending": false,
+      "snapshot_clear": true,
+      "mutated": false
+    }
+  },
+  "error_code": "settings_authority_mismatch"
+}

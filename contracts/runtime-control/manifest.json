@@ -691,7 +691,7 @@
     },
     {
       "path": "schema/private-host-control.schema.json",
-      "sha256": "554bd43d50c403b013e3a228ce6bb4fb7e220b5a94261da2ab9307cf730635a7"
+      "sha256": "d90da0c17f85c68ecbc9b684cbf1dadabe51d7daaf8e2ab2f5d0fe1811e92169"
     },
     {
       "path": "fixtures/positive/host-auth-keygen-unbound.json",
@@ -815,7 +815,7 @@
     },
     {
       "path": "consumers/private_host_control.rs",
-      "sha256": "1cff29862ea305ae61032c713014e2932122b59555797ea17312f99e654193b2"
+      "sha256": "b67476a11ecf6d270877575daf8c5fd3653a8dde2c9854b60050c192cc479cb0"
     },
     {
       "path": "fixtures/positive/host-model-verify-loaded.json",
@@ -2652,6 +2652,138 @@
     {
       "path": "fixtures/negative/host-profile-fabricated-first-unknown.json",
       "sha256": "525c7535f3d53d4afdd619d27bc2fdbf1b0453e4e2d5422419caebe94bee42a0"
+    },
+    {
+      "path": "fixtures/positive/host-settings-metadata-status.json",
+      "sha256": "d80b179e867a19b1f8abb5f75656a2e233768d391f3fb452220a0095c6e665ae"
+    },
+    {
+      "path": "fixtures/positive/host-settings-agent-read.json",
+      "sha256": "4a921f2fbc817851b9fcb816b20a35a1d4f90093381814cd17d5b72e1c9db09c"
+    },
+    {
+      "path": "fixtures/positive/host-settings-snapshot-preflight.json",
+      "sha256": "e77b1ee49879e408c580d593d564c7732b68628bc3e581761d1e0abd0d67a8bb"
+    },
+    {
+      "path": "fixtures/positive/host-settings-status-local.json",
+      "sha256": "102f12065a8632902179df2e08f40504f497964f58535371de801b5fbbcaaf09"
+    },
+    {
+      "path": "fixtures/positive/host-settings-agent-local.json",
+      "sha256": "86c0c681e6f51245c0657f10f0ce31310c3dc92f96d09847fce90dad00791c92"
+    },
+    {
+      "path": "fixtures/positive/host-settings-snapshot-starting.json",
+      "sha256": "d60ba5f00fe01364524c538d24472b21c08211ed8e86535564bc97542400ca46"
+    },
+    {
+      "path": "fixtures/positive/host-settings-snapshot-verified.json",
+      "sha256": "9fdad032d4075163c10921ea84bd1524a3a3c00d83f79f9db7f106adba280958"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-public.json",
+      "sha256": "1a6902636921e395c4641cc0dc53f58328047d9e4ccd494878ae9184e4122184"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-public-response.json",
+      "sha256": "d94740f6a00a59e9744c6d4a6d1538d64b8d0f80f3cb65464321c56962061252"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-scope.json",
+      "sha256": "20db55dbf49140830244f5879203fdb1a62e15cfd1c7ebd369e8d633163c925e"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-argv.json",
+      "sha256": "67cebb3c5d8e94b4e4c936644dce36e3890b67aa8c82d7e6c14255106249a70e"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-operation.json",
+      "sha256": "974be6923f5634a32e36e5569e4a9f30ecaf90849a1c49d63d7aa6a9879a6bac"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-key.json",
+      "sha256": "bc3227a353dde760a15f1acc474d8bc75cb15ca98c42dd5dd7e8fdc672b73794"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-schema.json",
+      "sha256": "7672dcfbe2934252df94abdca9027f9e974bfa0d76446e20196d8808798d4e93"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-param-unknown.json",
+      "sha256": "72a2496ec1e78b89ad054157306c2bf37151405f5930fcb66d4dfd5004051b69"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-root.json",
+      "sha256": "99fa52b11bd827d8396581123584f858c745bca231bdc3dacc793ae0052eaf08"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-account.json",
+      "sha256": "c5fee046e2ad13c3f349e45a1b5c1ffb34f4f1437524862ff11d9d5e1af2658a"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-parent.json",
+      "sha256": "155432ce81229bf0d38f52305f4d275fa0b62b7ea1fd797de1ab67a7228c19a5"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-grant.json",
+      "sha256": "c0a396199d395283a228749f185c041ab1b624c9ccd351928e8d83566e0af7bb"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-registration.json",
+      "sha256": "5fcd68e509cb37167550c2211561900dbb9c2462b67f25645107b0b674165ef0"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-serving.json",
+      "sha256": "50a6e1c94e392e39d5470c8ca3ea09985e8925dbe4c637d8b5744e393149304a"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-binding-after.json",
+      "sha256": "23927d5ab96b1c42d2d2be40c7a331cb3785b9a90c6107108f73a3667f34a325"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-paused.json",
+      "sha256": "ee9c268a314620d55318def7a4cee78ad0e81a7235fbc8d614ce3a9182d1481c"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-auth-pending.json",
+      "sha256": "fb9a7eef94c563440e8f52f9d563c6c3de05ed75e9d1304b41f72ec37a97e90f"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-incomplete.json",
+      "sha256": "93996046b187e4f91b745b264e80b9768605258b8e8ea4f14a2f90b4c4b7d984"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-mutated.json",
+      "sha256": "360d1a3c866403e6b1394f966707329f075653007dd458306d3cc36c89e9c21c"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-finish.json",
+      "sha256": "ee6959c7b4426bf8a431ec7b5eac182c6e78f1662ea8b61cbc7c5531faf692ee"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-envelope.json",
+      "sha256": "5cee5ab1002d4500bbdfae8e564e90afb10b1a230bf7cac44f30dd78e6b28a22"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-allowed-false.json",
+      "sha256": "32547e94565afe82bcaa314da4272514e421395bd00498021f3eeed7d14429a9"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-store-ready.json",
+      "sha256": "733c770e8700a413a8c381b9ca9e555ed78fae80f80e4d7144c9da7753ad18fc"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-response-operation.json",
+      "sha256": "2a31587e05da2dfd14bcb81b09b348917b82132f4d34b7c11b8794f5fe58314b"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-cross-context.json",
+      "sha256": "fdc07ffb5ec614c45a75da7474238c4f8844437ddb579bab5475835a846cf476"
+    },
+    {
+      "path": "fixtures/negative/host-settings-read-missing-result.json",
+      "sha256": "40725b55a11d7236dded73199171b2a911d5041a4c47e6b77a5ceceecd59e7af"
     }
   ],
   "extensions": {
@@ -2856,6 +2988,49 @@
           "fixtures/negative/host-recovery-cross-write-context.json",
           "fixtures/negative/host-recovery-cross-config-context.json",
           "fixtures/negative/host-profile-fabricated-first-unknown.json"
+        ]
+      }
+    },
+    "settings": {
+      "schema": "schema/private-host-control.schema.json",
+      "consumer": "consumers/private_host_control.rs",
+      "fixtures": {
+        "positive": [
+          "fixtures/positive/host-settings-metadata-status.json",
+          "fixtures/positive/host-settings-agent-read.json",
+          "fixtures/positive/host-settings-snapshot-preflight.json",
+          "fixtures/positive/host-settings-status-local.json",
+          "fixtures/positive/host-settings-agent-local.json",
+          "fixtures/positive/host-settings-snapshot-starting.json",
+          "fixtures/positive/host-settings-snapshot-verified.json"
+        ],
+        "negative": [
+          "fixtures/negative/host-settings-read-public.json",
+          "fixtures/negative/host-settings-read-public-response.json",
+          "fixtures/negative/host-settings-read-scope.json",
+          "fixtures/negative/host-settings-read-argv.json",
+          "fixtures/negative/host-settings-read-operation.json",
+          "fixtures/negative/host-settings-read-key.json",
+          "fixtures/negative/host-settings-read-schema.json",
+          "fixtures/negative/host-settings-read-param-unknown.json",
+          "fixtures/negative/host-settings-read-root.json",
+          "fixtures/negative/host-settings-snapshot-account.json",
+          "fixtures/negative/host-settings-read-parent.json",
+          "fixtures/negative/host-settings-read-grant.json",
+          "fixtures/negative/host-settings-read-registration.json",
+          "fixtures/negative/host-settings-read-serving.json",
+          "fixtures/negative/host-settings-read-binding-after.json",
+          "fixtures/negative/host-settings-read-paused.json",
+          "fixtures/negative/host-settings-read-auth-pending.json",
+          "fixtures/negative/host-settings-snapshot-incomplete.json",
+          "fixtures/negative/host-settings-read-mutated.json",
+          "fixtures/negative/host-settings-read-finish.json",
+          "fixtures/negative/host-settings-read-envelope.json",
+          "fixtures/negative/host-settings-snapshot-allowed-false.json",
+          "fixtures/negative/host-settings-read-store-ready.json",
+          "fixtures/negative/host-settings-read-response-operation.json",
+          "fixtures/negative/host-settings-read-cross-context.json",
+          "fixtures/negative/host-settings-read-missing-result.json"
         ]
       }
     }
