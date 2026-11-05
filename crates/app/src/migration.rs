@@ -160,6 +160,11 @@ pub fn pending_legacy_profiles() -> Result<Vec<Value>> {
 
 /// Copy only the selected profile into a new account, keeping current selection intact.
 pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
+    migrate_profile_inner(source_id, account, None)
+}
+
+fn migrate_profile_inner(source_id: &str, account: &str,
+    control: Option<&respire_protocol::migration_control::HostMigrationOperation>) -> Result<Value> {
     crate::service::require_profile_change_host()?;
     anyhow::ensure!(!account.is_empty() && account != "main" && safe_name(account) == account,
         "migration needs a new account name containing letters, digits, '-' or '_'");
@@ -192,6 +197,16 @@ pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
     private_directory(&staging_root)?;
     let stage = staging_root.join(uuid::Uuid::new_v4().to_string());
     snapshot_profile(&profiles[selected], &stage, &profiles, true)?;
+    if let Some(control) = control {
+        let path = stage.join(RECEIPT);
+        let mut receipt: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        receipt["control"] = serde_json::to_value(control)?;
+        receipt["control_result"] = json!({"state":"migrated","account":account,
+            "dir":profiles[selected].destination,"source":profiles[selected].source,
+            "original_preserved":true});
+        // The complete, O-bound receipt travels with the staged directory's atomic publication.
+        write_json(&path, &receipt)?;
+    }
     private_directory(&accounts)?;
     // rename must never replace an existing empty directory either.
     std::fs::create_dir(&profiles[selected].destination)
@@ -204,6 +219,90 @@ pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
             "snapshot_at":chrono::Utc::now().to_rfc3339()}))?;
     Ok(json!({"state":"migrated","account":account,"dir":profiles[selected].destination,
         "source":profiles[selected].source,"original_preserved":true}))
+}
+
+/// The caller holds exact Paused root/profile ownership; no auth journal is extended.
+pub fn control_migrate_profile(
+    _ownership: &crate::login_transaction::AuthOwnership,
+    original: &respire_protocol::migration_control::HostMigrationOperation,
+    query_only: bool,
+) -> Result<respire_protocol::migration_control::HostMigrationResult> {
+    use respire_protocol::migration_control::{HostMigrationOutcome as Outcome,
+        HostMigrationResult, HOST_MIGRATION_SCHEMA_V};
+    let canonical_id = uuid::Uuid::parse_str(&original.operation_id)?;
+    anyhow::ensure!(original.schema_version == HOST_MIGRATION_SCHEMA_V
+        && canonical_id.get_version_num() == 4 && canonical_id.to_string() == original.operation_id
+        && original.key == original.operation_id
+        && original.source_id.len() == 64 && original.source_id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        && !original.account.is_empty() && original.account != "main" && safe_name(&original.account) == original.account
+        && original.fingerprint == hex::encode(Sha256::digest(original.fingerprint_bytes()?)),
+        "invalid original migration binding");
+    anyhow::ensure!(original.installation_root == crate::service::main_data_dir().canonicalize()?
+        && original.profile == crate::service::data_dir().canonicalize()?
+        && crate::service::accounts_root().parent().context("migration account root has no parent")?.canonicalize()?
+            == original.installation_root, "migration selection changed");
+    crate::login_transaction::verify_auth_identity(&original.installation_root, &original.profile, &original.identity)?;
+    let (outcome, details) = if query_only {
+        let home = crate::service::home_dir()?;
+        let lock_root = home.join(".rsrs-migration-lock");
+        private_directory(&lock_root)?;
+        let _lock = crate::lock::LibraryLock::acquire(&lock_root, Duration::from_secs(30))?;
+        match migration_control_result(original)? {
+            Some(details) => (Outcome::Completed, details),
+            None => (Outcome::Unknown, Value::Null),
+        }
+    } else {
+        crate::service::ensure_writable()?;
+        anyhow::ensure!(!crate::service::off_mode(), "migration is unavailable while memory is off");
+        let details = migrate_profile_inner(&original.source_id, &original.account, Some(original))?;
+        let outcome = if details["state"] == "already_migrated" { Outcome::AlreadyMigrated } else { Outcome::Completed };
+        (outcome, details)
+    };
+    crate::login_transaction::verify_auth_identity(&original.installation_root, &original.profile, &original.identity)?;
+    Ok(HostMigrationResult { operation_id: original.operation_id.clone(), fingerprint: original.fingerprint.clone(),
+        identity: original.identity.clone(), outcome, details })
+}
+
+fn migration_control_result(original: &respire_protocol::migration_control::HostMigrationOperation) -> Result<Option<Value>> {
+    use std::io::Read;
+    let destination = crate::service::accounts_root().join(&original.account);
+    let path = destination.join(RECEIPT);
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                anyhow::ensure!(!metadata.file_type().is_symlink(), "migration result path is a symbolic link");
+                #[cfg(windows)] {
+                    use std::os::windows::fs::MetadataExt;
+                    anyhow::ensure!(metadata.file_attributes() & 0x400 == 0, "migration result path is a reparse point");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(metadata.is_file() && metadata.len() <= 64 * 1024, "invalid migration completion marker");
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= 64 * 1024, "migration completion marker exceeds its bound");
+    let receipt: Value = serde_json::from_slice(&bytes)?;
+    let Some(control) = receipt.get("control") else { return Ok(None); };
+    let control: respire_protocol::migration_control::HostMigrationOperation = serde_json::from_value(control.clone())?;
+    if control != *original { return Ok(None); }
+    anyhow::ensure!(receipt["schema"] == 2 && receipt["complete"] == true
+        && receipt["source_identity"].as_str() == Some(original.source_id.as_str())
+        && receipt["destination"] == json!(destination)
+        && receipt["namespace_migrated"] == true && receipt["original_preserved"] == true
+        && receipt["source"].as_str().is_some_and(|source| Path::new(source).is_absolute()),
+        "migration completion marker disagrees with the original operation");
+    let expected = json!({"state":"migrated","account":original.account,"dir":destination,
+        "source":receipt["source"],"original_preserved":true});
+    anyhow::ensure!(receipt["control_result"] == expected, "migration result disagrees with its published marker");
+    Ok(Some(expected))
 }
 
 fn meaningful(path: &Path) -> Result<bool> {

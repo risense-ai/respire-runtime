@@ -16,6 +16,7 @@ pub mod config_control;
 pub mod identity_control;
 pub mod identity_write_control;
 pub mod key_control;
+pub mod migration_control;
 pub mod model_maintenance;
 pub use model_control::{HostModelParams, ModelInstallIntent, ModelPreparation, HOST_MODEL_SCHEMA_V};
 pub use host_control::{

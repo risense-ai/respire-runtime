@@ -1,0 +1,91 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "accept",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "method": "control.identity.write_result",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"session_revoke\",\"session_id\":\"11111111-2222-3333-4444-555555555555\"}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "write_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "session_revoke",
+        "session_id": "11111111-2222-3333-4444-555555555555"
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "fingerprint": "6ee75dde2d850e7b70b1643df4bc9f2317825c98c4bf067131b584bcb2eab615"
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "6ee75dde2d850e7b70b1643df4bc9f2317825c98c4bf067131b584bcb2eab615",
+      "operation": {
+        "kind": "session_revoke",
+        "session_id": "11111111-2222-3333-4444-555555555555"
+      },
+      "outcome": "unknown",
+      "path": "/isolated/root/profile/session.json",
+      "session_found": true,
+      "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "revoke": null
+    },
+    "private_response": {
+      "command": "identity-write",
+      "status": "fail",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "6ee75dde2d850e7b70b1643df4bc9f2317825c98c4bf067131b584bcb2eab615",
+        "operation": {
+          "kind": "session_revoke",
+          "session_id": "11111111-2222-3333-4444-555555555555"
+        },
+        "outcome": "unknown",
+        "path": "/isolated/root/profile/session.json",
+        "session_found": true,
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "revoke": null
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    }
+  }
+}

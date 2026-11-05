@@ -210,11 +210,20 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
 
 /// Read exactly the checkpointed backend, without environment overrides or fallback.
 pub fn read_imported(account: &str, slot: &str, backend_name: &str) -> Result<String> {
+    read_imported_inner(account, slot, backend_name, false)
+}
+
+/// An explicitly supplied v1 password can be empty; missing entries still fail.
+pub fn read_imported_v1_password(account: &str, backend_name: &str) -> Result<String> {
+    read_imported_inner(account, "pass", backend_name, true)
+}
+
+fn read_imported_inner(account: &str, slot: &str, backend_name: &str, allow_empty_v1: bool) -> Result<String> {
     let backend = backends().iter().find(|backend| backend.name() == backend_name)
         .ok_or_else(|| anyhow!("credential backend is unavailable during recovery"))?;
     let value = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?
         .get_password().map_err(|_| anyhow!("recovery credential is unavailable"))?;
-    anyhow::ensure!(!value.is_empty(), "recovery credential is empty");
+    anyhow::ensure!(!value.is_empty() || allow_empty_v1 && slot == "pass", "recovery credential is empty");
     Ok(value)
 }
 

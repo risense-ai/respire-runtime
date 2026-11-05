@@ -90,7 +90,7 @@ impl AccountRequest {
     }
 }
 
-fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<()> {
+pub(crate) fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<()> {
     crate::startup_identity::verify_account_completion_authority()?;
     let health = respire_commands::net_rpc::health()?;
     respire_commands::net_rpc::request_scope(&health)?;

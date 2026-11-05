@@ -1,0 +1,87 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "error_code": "host_operation_required",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "method": "control.identity.logout",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"logout\",\"full\":true}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "write_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "logout",
+        "full": true
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "fingerprint": "ed5be7eae539c4fa697d6691fdd61889817a1e56eb7cf8f299937c3d16f4a940"
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "ed5be7eae539c4fa697d6691fdd61889817a1e56eb7cf8f299937c3d16f4a940",
+      "operation": {
+        "kind": "logout",
+        "full": true
+      },
+      "outcome": "committed",
+      "path": "/isolated/root/profile/session.json",
+      "session_found": true,
+      "session_sha256": null,
+      "identity": {
+        "kind": "absent"
+      },
+      "revoke": null
+    },
+    "private_response": {
+      "command": "identity-write",
+      "status": "ok",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "ed5be7eae539c4fa697d6691fdd61889817a1e56eb7cf8f299937c3d16f4a940",
+        "operation": {
+          "kind": "logout",
+          "full": true
+        },
+        "outcome": "committed",
+        "path": "/isolated/root/profile/session.json",
+        "session_found": true,
+        "session_sha256": null,
+        "identity": {
+          "kind": "absent"
+        },
+        "revoke": null
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    }
+  }
+}

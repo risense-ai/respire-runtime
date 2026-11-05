@@ -488,3 +488,39 @@ anchor in every consumer; only Node/Go claim independent hash recomputation. Nat
 CAS publication, sync validation, parent watching, rollback and restored Runtime
 health remain outside these fixture checks. Private config/session values must
 not be copied to public HTTP, progress, logs or operation ledgers.
+
+### Fixed identity writes, super-reset and model maintenance
+
+The existing schema, manifest and consumers also freeze these private methods:
+
+- control.identity.logout, control.identity.session_revoke and control.identity.write_result
+  use HostIdentityWriteParams / HostIdentityWriteResult. Full logout may yield
+  Absent; soft logout and revoke cannot remove a previously present identity.
+  The owned session path, digest, same-account identity and revoke UUID are bound.
+- control.key.super_reset, control.key.result and control.key.rollback use
+  HostKeyParams / HostKeyResult. Only super_reset is in this frozen cohort.
+  Later key operations are not admitted by this schema. Supplemental password
+  inputs are not part of the immutable operation fingerprint. A new super password
+  is synthetic in fixtures and permitted only in the private committed result,
+  never in public_response, progress or ledger fields. Existing native recovery
+  session snapshots are not claimed to be credential-free.
+- control.model_maintenance uses ModelMaintenanceParams / ModelMaintenanceReceipt.
+  Plan has no expected review; apply is reset_cpu-only; verify excludes reset_cpu.
+  Non-plan receipts must match both selection and revision digests. Catalog
+  package source/hash/version/member are fixed; DLL metadata in the fixture is
+  synthetic, not installed-byte or hardware evidence. npu_ready remains false.
+
+All seven methods use Paused maintenance and inherited_pipe. Identity/key writes
+require the original O and key, even on a fresh request/launch result query. The
+fixture-only write_context pins root/profile/source identity/complete operation,
+O/key and fingerprint. Node and Go independently hash the sorted JSON object used
+by the producer; Rust binds the declared complete intent/digest anchor and parses
+actual respire_protocol DTOs. None of those declarations supplies a capability.
+
+Private ResultEnvelope summaries carry identity/key receipts; model maintenance
+uses envelope.details. Readiness must be control_ready=true/store_ready=false.
+Pending/unknown results cannot masquerade as success. Even a committed receipt
+alone does not authorize finish_maintenance or prove a restored serving owner.
+The 180s long-control limit budgets four 30s key network calls or the model probe;
+fixtures do not execute or prove those timeouts, keyring durability, CAS, rollback,
+parent revocation, native model loading or full required/G1 acceptance.

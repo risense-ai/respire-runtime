@@ -1,0 +1,77 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "accept",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.model_maintenance",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"kind\":\"uninstall_m3\",\"phase\":\"plan\",\"expected\":null}"
+      ]
+    },
+    "finish_maintenance": false,
+    "result": {
+      "plan": {
+        "kind": "uninstall_m3",
+        "review": {
+          "selection_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "revision_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "preparation": null,
+        "catalog": null,
+        "uninstall_directory": "/isolated/root/models/bge-m3",
+        "cpu_candidate_sha256": null
+      },
+      "phase": "plan",
+      "verified": false,
+      "config_applied": false,
+      "npu_ready": false,
+      "warning": null
+    },
+    "public_response": {
+      "command": "model-maintenance",
+      "status": "ok",
+      "summary": {
+        "kind": "uninstall_m3",
+        "phase": "plan",
+        "verified": false
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": {
+        "plan": {
+          "kind": "uninstall_m3",
+          "review": {
+            "selection_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "revision_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "preparation": null,
+          "catalog": null,
+          "uninstall_directory": "/isolated/root/models/bge-m3",
+          "cpu_candidate_sha256": null
+        },
+        "phase": "plan",
+        "verified": false,
+        "config_applied": false,
+        "npu_ready": false,
+        "warning": null
+      },
+      "related": []
+    }
+  }
+}

@@ -41,6 +41,7 @@ signal-hook = "0.3"
 [dev-dependencies]
 tempfile = "3.15"
 tiny_http = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [lints.rust]
 unsafe_code = "forbid"

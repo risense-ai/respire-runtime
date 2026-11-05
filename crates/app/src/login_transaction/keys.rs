@@ -2,6 +2,7 @@
 use super::*;
 use std::io::Read;
 use respire_protocol::key_control::*;
+mod fivekeys;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,6 +14,8 @@ pub(super) struct KeyOperation {
     original_vault: Option<Value>,
     credential_ready: bool,
     required_inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fivekeys: Option<fivekeys::FivekeysProgress>,
 }
 
 fn operation(journal: &Journal, index: usize) -> Result<&KeyOperation> {
@@ -64,7 +67,9 @@ fn owned_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &s
     let source_matches = record.profile == profile && current.as_deref().map(digest) == record.original_sha256;
     let candidate_matches = op.target.as_deref() == Some(profile) && current.is_some() && current == record.candidate
         && matches!(record.phase, AuthPhase::Prepared | AuthPhase::AwaitingVerification | AuthPhase::Committed);
-    ensure!(source_matches || candidate_matches, "key receipt no longer owns the selected session");
+    let restoring_target = record.phase == AuthPhase::RollingBack && op.target.as_deref() == Some(profile)
+        && current.as_deref().map(digest) == op.target_original_sha256;
+    ensure!(source_matches || candidate_matches || restoring_target, "key receipt no longer owns the selected session");
     Ok(Some(index))
 }
 
@@ -86,7 +91,7 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostKeyParams)
         candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted,
         account: None, identity: None, key_operation: Some(KeyOperation { operation: params.operation.clone(),
             source_identity: params.source_identity.clone(), target: None, target_original_sha256: None,
-            original_vault: None, credential_ready: false, required_inputs: Vec::new() }) });
+            original_vault: None, credential_ready: false, required_inputs: Vec::new(), fivekeys: None }) });
     save_journal(&journal)?;
     Ok((journal, index))
 }
@@ -111,9 +116,23 @@ fn candidate_keys(record: &AuthRecord) -> Result<crate::memory::SessionKeys> {
     let backend = record.backend.as_deref().context("key credential backend is missing")?;
     require_persistent_auth_backend(backend)?;
     let version = session["vault_version"].as_i64().context("key candidate version missing")?;
-    let secret = crate::keystore::read_imported(&record.alias, if version == 1 { "pass" } else { "super" }, backend)?;
+    let secret = if version == 1 { crate::keystore::read_imported_v1_password(&record.alias, backend)? }
+        else { crate::keystore::read_imported(&record.alias, "super", backend)? };
     crate::auth::unlock_session_keys(&session, if version == 1 { &secret } else { "" },
         Some(if version == 1 { "" } else { &secret }), &record.alias)
+}
+
+pub(super) fn verify_boot_candidate(record: &AuthRecord, active: &Recovery) -> Result<()> {
+    let op = record.key_operation.as_ref().context("key boot receipt missing")?;
+    ensure!(matches!(op.operation, HostKeyOperation::Fivekeys { .. }) && op.credential_ready
+        && record.phase == AuthPhase::AwaitingVerification && active.owns_config
+        && record.root == crate::service::main_data_dir().canonicalize()?
+        && op.target.as_deref() == Some(active.directory.as_path())
+        && active.directory.canonicalize()? == crate::service::data_dir().canonicalize()?
+        && active.alias == record.alias && read_original(&active.directory)? == record.candidate,
+        "runtime verification does not own the active fivekeys candidate");
+    verify_account_config(active)?;
+    candidate_keys(record).map(|_| ())
 }
 
 fn checkpoint_credentials(journal: &mut Journal, index: usize, session: &mut Value,
@@ -176,12 +195,13 @@ fn vault(session: &Value) -> Value {
 }
 
 fn reset_address(intent: &HostKeyOperation, source: &Value) -> Result<String> {
-    let HostKeyOperation::SuperReset { addr } = intent;
+    let HostKeyOperation::SuperReset { addr } = intent else { anyhow::bail!("not a super-reset operation"); };
     Ok(addr.as_deref().map(str::trim).filter(|value| !value.is_empty())
         .or_else(|| source["addr"].as_str()).unwrap_or(crate::service::DEFAULT_SERVER_ADDR).trim_end_matches('/').to_owned())
 }
 
 fn reconcile_reset(journal: &mut Journal, index: usize) -> Result<()> {
+    if !matches!(operation(journal, index)?.operation, HostKeyOperation::SuperReset { .. }) { return Ok(()); }
     let record = &journal.operations[index];
     if !matches!(record.phase, AuthPhase::RemotePending | AuthPhase::RemoteUnknown) { return Ok(()); }
     let op = operation(journal, index)?;
@@ -281,6 +301,12 @@ fn apply_candidate(ownership: &AuthOwnership, journal: &mut Journal, index: usiz
     if active.owns_config { verify_account_config(active)?; }
     std::fs::create_dir_all(&target)?;
     private_write(&target.join("session.json"), record.candidate.as_deref().context("key candidate missing")?)?;
+    if matches!(op.operation, HostKeyOperation::Fivekeys { .. }) {
+        ensure!(active.owns_config, "fivekeys does not own the selection checkpoint");
+        crate::service::set_data_dir(&target.to_string_lossy())?;
+        journal.operations[index].phase = AuthPhase::AwaitingVerification;
+        return save_journal(journal);
+    }
     journal.operations[index].phase = AuthPhase::Committed;
     retire_active(journal)
 }
@@ -288,7 +314,7 @@ fn apply_candidate(ownership: &AuthOwnership, journal: &mut Journal, index: usiz
 fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
     let record = &journal.operations[index];
     let op = operation(journal, index)?;
-    let applied = record.phase == AuthPhase::Committed;
+    let applied = matches!(record.phase, AuthPhase::Committed | AuthPhase::AwaitingVerification);
     let current = read_original(&crate::service::data_dir())?;
     let identity = match current.as_deref() {
         None => HostAuthIdentity::Absent,
@@ -316,7 +342,8 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
         }, source_profile: record.profile.clone(), target_profile: op.target.clone(),
         account_id: session.as_ref().and_then(|session| session["user"].as_str().map(|user| digest(user.as_bytes()))),
         session_sha256: if applied { record.candidate_sha256.clone() } else { None }, identity,
-        required_inputs: op.required_inputs.clone(), super_password: if applied && matches!(op.operation, HostKeyOperation::SuperReset { .. }) {
+        required_inputs: op.required_inputs.clone(), verification_required: record.phase == AuthPhase::AwaitingVerification,
+        super_password: if applied && matches!(op.operation, HostKeyOperation::SuperReset { .. }) {
             Some(crate::keystore::read_imported(&record.alias, "super", record.backend.as_deref().context("reset backend missing")?)?)
         } else { None },
     })
@@ -330,6 +357,7 @@ pub fn control_key(ownership: &AuthOwnership, id: &str, key: &str, params: &Host
     let input = params.input.as_ref().unwrap_or(&defaults);
     match &params.operation {
         HostKeyOperation::SuperReset { .. } => execute_reset(&mut journal, index, input)?,
+        HostKeyOperation::Fivekeys { .. } => fivekeys::execute(ownership, &mut journal, index, input)?,
     }
     if journal.operations[index].phase == AuthPhase::Prepared { apply_candidate(ownership, &mut journal, index)?; }
     result(&journal, index)
@@ -340,8 +368,53 @@ pub fn control_key_result(ownership: &AuthOwnership, id: &str, key: &str, params
     let mut journal = load_journal()?;
     let index = owned_index(&journal, &ownership.root, &ownership.profile, id, key, params)?.context("key admission receipt missing")?;
     reconcile_reset(&mut journal, index)?;
+    if matches!(operation(&journal, index)?.operation, HostKeyOperation::Fivekeys { .. }) {
+        fivekeys::resume_candidate(&mut journal, index)?;
+    }
     if journal.operations[index].phase == AuthPhase::Prepared { apply_candidate(ownership, &mut journal, index)?; }
     result(&journal, index)
+}
+
+/// The caller verifies the live target Runtime independently. No library lock is
+/// acquired here because the verified Runtime already owns the selected store.
+pub fn control_key_complete(root: &Path, profile: &Path, id: &str, key: &str, params: &HostKeyParams,
+    mut verify_runtime: impl FnMut(&HostKeyResult) -> Result<()>) -> Result<HostKeyResult> {
+    crate::service::require_profile_change_host()?;
+    canonical_operation_id(id)?;
+    ensure!(!key.is_empty() && key.len() <= 128 && key.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)), "invalid key idempotency key");
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    ensure!(params.schema_version == HOST_KEY_SCHEMA_V && params.binding.installation_root == root
+        && params.binding.profile == profile && root == crate::service::main_data_dir().canonicalize()?
+        && profile == crate::service::data_dir().canonicalize()?, "key completion selection changed");
+    let _journal_lock = auth_journal_lock()?;
+    verify_auth_identity(&root, &profile, &params.identity)?;
+    let mut journal = load_journal()?;
+    let index = owned_index(&journal, &root, &profile, id, key, params)?.context("key completion receipt missing")?;
+    ensure!(matches!(operation(&journal, index)?.operation, HostKeyOperation::Fivekeys { .. })
+        && operation(&journal, index)?.target.as_deref() == Some(profile.as_path()), "key completion target mismatch");
+    if journal.operations[index].phase == AuthPhase::Committed { return result(&journal, index); }
+    ensure!(journal.operations[index].phase == AuthPhase::AwaitingVerification, "key candidate is not awaiting verification");
+    let active = journal.active.as_ref().context("key completion recovery missing")?;
+    ensure!(active.owns_config && active.directory == profile, "key completion configuration owner changed");
+    verify_account_config(active)?;
+    verify_runtime(&result(&journal, index)?)?;
+    journal.operations[index].phase = AuthPhase::Committed;
+    retire_active(&mut journal)?;
+    result(&journal, index)
+}
+
+/// Re-read the durable receipt after releasing execution ownership. A serialized
+/// target alone is never authority to change the consumed launch context.
+pub fn verify_key_receipt(root: &Path, profile: &Path, id: &str, key: &str,
+    params: &HostKeyParams, receipt: &HostKeyResult) -> Result<()> {
+    let _journal_lock = auth_journal_lock()?;
+    let journal = load_journal()?;
+    let index = owned_index(&journal, root, profile, id, key, params)?.context("key receipt owner missing")?;
+    ensure!(serde_json::to_value(result(&journal, index)?)? == serde_json::to_value(receipt)?,
+        "key result differs from its durable owner receipt");
+    Ok(())
 }
 
 pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, params: &HostKeyParams) -> Result<HostKeyResult> {
@@ -352,8 +425,10 @@ pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, p
     if journal.operations[index].phase == AuthPhase::RolledBack { return result(&journal, index); }
     ensure!(!matches!(journal.operations[index].phase, AuthPhase::Committed | AuthPhase::RemotePending | AuthPhase::RemoteUnknown),
         "committed or unknown remote key effects cannot be compensated");
-    ensure!(journal.operations[index].phase == AuthPhase::Admitted
-        || journal.operations[index].phase == AuthPhase::RollingBack, "published reset cannot be compensated");
+    ensure!(matches!(journal.operations[index].phase, AuthPhase::Admitted | AuthPhase::RollingBack)
+        || matches!(operation(&journal, index)?.operation, HostKeyOperation::Fivekeys { .. })
+            && matches!(journal.operations[index].phase, AuthPhase::LoginInput | AuthPhase::Authorized
+                | AuthPhase::Prepared | AuthPhase::AwaitingVerification), "published reset cannot be compensated");
     let active = journal.active.as_ref().context("key rollback recovery missing")?;
     let target = active.directory.clone();
     let target_lock = if target == ownership.root || target == ownership.profile || !target.exists() { None }
@@ -387,7 +462,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
         binding: respire_protocol::ControlBinding { installation_root: root.to_owned(), profile: root.to_owned(),
             launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: Some(digest(b"reset-fixture")) },
         identity: identity.clone(), source_identity: identity, operation: HostKeyOperation::SuperReset { addr: None },
-        input: Some(HostKeyInput { password: None, super_password: Some(secret.clone()) }) };
+        input: Some(HostKeyInput { super_password: Some(secret.clone()), ..HostKeyInput::default() }) };
     let mut invalid = serde_json::to_value(&params)?;
     invalid["argv"] = json!(["unsupported"]);
     assert!(serde_json::from_value::<HostKeyParams>(invalid).is_err());
@@ -421,5 +496,6 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     assert!(control_key_rollback(ownership, &id, &id, &params)?.outcome == HostKeyOutcome::RolledBack);
     assert_eq!(std::fs::read(root.join("session.json"))?, original);
     assert!(!auth_recovery_pending()?);
+    fivekeys::assert_existing_recovery(root)?;
     Ok(())
 }

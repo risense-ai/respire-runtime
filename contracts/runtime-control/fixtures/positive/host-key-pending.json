@@ -1,0 +1,95 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "accept",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "method": "control.key.result",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"source_identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"operation\":{\"kind\":\"super_reset\",\"addr\":null}}"
+      ]
+    },
+    "finish_maintenance": false,
+    "write_context": {
+      "installation_root": "/isolated/root",
+      "profile": "/isolated/root/profile",
+      "source_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "operation": {
+        "kind": "super_reset",
+        "addr": null
+      },
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "idempotency_key": "fixed-write-key",
+      "fingerprint": "03e1ff08210b656f48043270825b0af28aaac9013ef48f1a3fdca32bee198921"
+    },
+    "result": {
+      "operation_id": "42345678-1234-4234-b234-123456789abc",
+      "fingerprint": "03e1ff08210b656f48043270825b0af28aaac9013ef48f1a3fdca32bee198921",
+      "operation": {
+        "kind": "super_reset",
+        "addr": null
+      },
+      "outcome": "pending",
+      "source_profile": "/isolated/root/profile",
+      "target_profile": null,
+      "account_id": null,
+      "session_sha256": null,
+      "identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "required_inputs": [],
+      "super_password": null
+    },
+    "private_response": {
+      "command": "key-control",
+      "status": "pending",
+      "summary": {
+        "operation_id": "42345678-1234-4234-b234-123456789abc",
+        "fingerprint": "03e1ff08210b656f48043270825b0af28aaac9013ef48f1a3fdca32bee198921",
+        "operation": {
+          "kind": "super_reset",
+          "addr": null
+        },
+        "outcome": "pending",
+        "source_profile": "/isolated/root/profile",
+        "target_profile": null,
+        "account_id": null,
+        "session_sha256": null,
+        "identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "required_inputs": [],
+        "super_password": null
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    }
+  }
+}

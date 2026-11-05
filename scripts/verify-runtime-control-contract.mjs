@@ -43,8 +43,8 @@ if (manifest.release_metadata_schema_version !== 2) fail("wrong release metadata
 
 const positive = manifest.fixtures?.positive;
 const negative = manifest.fixtures?.negative;
-if (!Array.isArray(positive) || positive.length !== 53) fail("positive fixture count");
-if (!Array.isArray(negative) || negative.length !== 134) fail("negative fixture count");
+if (!Array.isArray(positive) || positive.length !== 72) fail("positive fixture count");
+if (!Array.isArray(negative) || negative.length !== 205) fail("negative fixture count");
 
 const boundPaths = new Set();
 for (const bound of manifest.files ?? []) {
@@ -580,17 +580,80 @@ function configFixtureFailure(params, context) {
   return isDeepStrictEqual(candidate, expected) ? null : "config_intent_mismatch";
 }
 
+function fixedWriteModelFailure(payload, params, kind) {
+  if (!["identityWriteResult", "keyResult", "modelMaintenanceReceipt"].includes(kind)) return null;
+  const result = payload.result, binding = params.binding;
+  if (kind !== "modelMaintenanceReceipt") {
+    const context = payload.write_context;
+    if (!context || !hostSchemaValid(context, hostSchema.$defs.writeContext) ||
+        context.installation_root !== binding.installation_root || context.profile !== binding.profile ||
+        !isDeepStrictEqual(context.source_identity, params.source_identity) ||
+        !isDeepStrictEqual(context.operation, params.operation) ||
+        context.operation_id !== payload.request.operation_id || context.idempotency_key !== payload.request.idempotency_key) return "write_context_mismatch";
+    const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    const fingerprint = createHash("sha256").update(JSON.stringify(canonical({schema_version: 1,
+      method: kind === "keyResult" ? "control.key" : "control.identity.write", root: context.installation_root,
+      profile: context.profile, source_identity: context.source_identity, operation: context.operation}))).digest("hex");
+    if (result.fingerprint !== fingerprint || context.fingerprint !== fingerprint) return "host_fingerprint_mismatch";
+    if (!isDeepStrictEqual(result.operation, params.operation)) return "write_context_mismatch";
+    const before = params.identity, after = result.identity;
+    if ((binding.expected_account_id ?? null) !== (before.kind === "bound" ? before.account_id : null)) return "write_identity_mismatch";
+    const full = kind === "identityWriteResult" && params.operation.kind === "logout" && params.operation.full;
+    if (after.kind === "absent" ? before.kind !== "absent" && !full :
+        before.kind !== after.kind || (after.kind === "bound" ? before.account_id !== after.account_id : before.operation_id !== after.operation_id)) return "write_identity_mismatch";
+    if (kind === "identityWriteResult") {
+      if (result.path !== binding.profile + "/session.json" ||
+          (result.session_sha256 ?? null) !== (after.session_sha256 ?? null) ||
+          full && result.outcome === "committed" && after.kind !== "absent" ||
+          params.operation.kind === "logout" && result.revoke != null ||
+          params.operation.kind === "session_revoke" && (result.revoke != null && result.revoke.session_id.toLowerCase() !== params.operation.session_id.toLowerCase() ||
+            result.outcome === "committed" && result.revoke == null)) return "write_identity_mismatch";
+    } else {
+      if (result.source_profile !== binding.profile || result.target_profile != null && result.target_profile !== binding.profile ||
+          result.outcome === "committed" && (result.target_profile !== binding.profile || after.kind !== "bound" ||
+            result.account_id !== after.account_id || result.session_sha256 !== after.session_sha256 || !result.super_password) ||
+          result.outcome !== "committed" && (result.super_password != null || result.account_id != null || result.session_sha256 != null) ||
+          (result.outcome === "awaiting_input") !== (result.required_inputs.length > 0)) return "write_identity_mismatch";
+    }
+  } else {
+    if (params.phase !== "plan" && !isDeepStrictEqual(params.expected, result.plan.review)) return "model_review_mismatch";
+    if (result.plan.kind !== params.kind || result.phase !== params.phase || result.verified !== (params.phase !== "plan") ||
+        result.config_applied !== (params.phase === "apply") ||
+        params.kind === "reset_cpu" && (!result.plan.cpu_candidate_sha256 || result.plan.preparation != null || result.plan.catalog != null || result.plan.uninstall_directory != null) ||
+        params.kind === "uninstall_m3" && (!result.plan.uninstall_directory || result.plan.cpu_candidate_sha256 != null || result.plan.preparation != null || result.plan.catalog != null) ||
+        params.kind === "install_engines" && (result.plan.uninstall_directory != null || result.plan.cpu_candidate_sha256 != null ||
+          (result.plan.preparation == null) !== (result.plan.catalog == null) || result.plan.catalog != null &&
+          result.plan.catalog.destination !== binding.installation_root + "/engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll")) return "model_receipt_mismatch";
+  }
+  const model = kind === "modelMaintenanceReceipt", envelope = model ? payload.public_response : payload.private_response;
+  const rule = model ? "modelMaintenanceEnvelope" : kind === "keyResult" ? "keyEnvelope" : "identityWriteEnvelope";
+  const status = model ? "ok" : result.outcome === "unknown" ? "fail" : ["pending", "awaiting_input"].includes(result.outcome) ? "pending" : "ok";
+  if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[rule]) || envelope.status !== status ||
+      !isDeepStrictEqual(model ? envelope.details : envelope.summary, result) || model &&
+      !isDeepStrictEqual(envelope.summary, {kind: params.kind, phase: params.phase, verified: result.verified})) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const matching = envelope.items.filter(item => item.name === name);
+    if (matching.length !== 1 || matching[0].status !== status || matching[0].value !== value) return "host_result_invalid";
+  }
+  return null;
+}
+
 function privateHostFailure(payload) {
   if (payload.channel !== "inherited_pipe") return "private_channel_required";
   if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
   const request = payload.request, method = hostSchema["x-methods"][request.method];
-  if (["secretResult", "keysExportResult"].includes(method.result) &&
+  if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult"].includes(method.result) &&
       Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
   if (method.mutable && (!request.operation_id || !request.idempotency_key)) return "host_operation_required";
   if (!method.mutable && (request.operation_id != null || request.idempotency_key != null)) return "host_request_invalid";
   let params;
   try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
   if (!hostSchemaValid(params, hostSchema.$defs[method.params])) return "host_params_invalid";
+  if (method.params === "identityWriteParams" && request.method !== "control.identity.write_result" &&
+      (request.method === "control.identity.logout") !== (params.operation.kind === "logout")) return "host_params_invalid";
+  if (method.params === "modelMaintenanceParams" && ((params.phase === "plan") !== (params.expected == null) ||
+      params.phase === "apply" && params.kind !== "reset_cpu" || params.phase === "verify" && params.kind === "reset_cpu")) return "host_params_invalid";
   if (method.params === "modelParams" && (request.method === "control.model_install_plan"
       ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
   const snapshot = request.method === "control.snapshot_maintenance";
@@ -612,6 +675,8 @@ function privateHostFailure(payload) {
   if (!result) return payload.finish_maintenance ? "maintenance_not_terminal" : null;
   if (!hostSchemaValid(result, hostSchema.$defs[method.result])) return "host_result_invalid";
   if (method.mutable && result.operation_id !== request.operation_id) return "host_operation_mismatch";
+  const fixedFailure = fixedWriteModelFailure(payload, params, method.result);
+  if (fixedFailure) return fixedFailure;
   if (["identityResult", "configReceipt"].includes(method.result)) {
     const envelope = payload.private_response;
     const kind = method.result === "identityResult" ? "identityEnvelope" : "configEnvelope";
@@ -666,7 +731,7 @@ function privateHostFailure(payload) {
   return null;
 }
 
-for (const [group, legacyCount, newCount] of [[positive, 25, 28], [negative, 48, 86]]) {
+for (const [group, legacyCount, newCount] of [[positive, 25, 47], [negative, 48, 157]]) {
   let checked = 0;
   for (const name of group) {
     const fixture = readJSON(fixturePath(name));
@@ -680,4 +745,4 @@ for (const [group, legacyCount, newCount] of [[positive, 25, 28], [negative, 48,
   if (checked !== newCount || group.length - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
 }
 
-console.log(`runtime control contract verified: ${boundPaths.size} bound files (73 legacy, 114 private host cases, schema and shared Rust consumer)`);
+console.log(`runtime control contract verified: ${boundPaths.size} bound files (73 legacy, 204 private host cases, schema and shared Rust consumer)`);

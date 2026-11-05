@@ -13,7 +13,7 @@ mod login;
 mod identity;
 pub use identity::{control_identity_write, control_identity_write_result};
 mod keys;
-pub use keys::{control_key, control_key_result, control_key_rollback};
+pub use keys::{control_key, control_key_result, control_key_rollback, control_key_complete, verify_key_receipt};
 
 #[derive(Serialize, Deserialize)]
 struct Recovery {
@@ -564,6 +564,10 @@ pub fn auth_recovery_pending() -> Result<bool> {
             verify_account_candidate(record)?;
             return Ok(false);
         }
+    }
+    if record.key_operation.is_some() && record.phase == AuthPhase::AwaitingVerification {
+        keys::verify_boot_candidate(record, active)?;
+        return Ok(false);
     }
     Ok(true)
 }
@@ -1226,8 +1230,9 @@ fn account_material_keys(record: &AuthRecord, require_published: bool) -> Result
         && session["keyring_account"].as_str() == Some(record.alias.as_str()), "account candidate identity mismatch");
     let backend = record.backend.as_deref().context("account credential checkpoint is missing")?;
     require_persistent_auth_backend(backend)?;
-    let secret = crate::keystore::read_imported(&record.alias,
-        if session["vault_version"] == 1 { "pass" } else { "super" }, backend)?;
+    let secret = if session["vault_version"] == 1 {
+        crate::keystore::read_imported_v1_password(&record.alias, backend)?
+    } else { crate::keystore::read_imported(&record.alias, "super", backend)? };
     let salt = session["kdf_salt"].as_str().context("account salt is missing")?;
     let wrapped = session["wrapped_urk"].as_str().context("account wrap is missing")?;
     let nonce = session["urk_nonce"].as_str().context("account nonce is missing")?;
@@ -1474,9 +1479,17 @@ impl PreparedLogin {
 
     fn prepare_with_vault_inner(addr: &str, authorized: &Value, super_password: String, vault: Value,
         legacy: Option<(Value, [u8; 32])>, registration_source: bool) -> Result<Self> {
+        Self::prepare_candidate(addr, authorized, super_password, vault, legacy, registration_source, false, None)
+    }
+
+    // Only the owned fivekeys transaction may prepare an unauthenticated candidate.
+    // Its caller verifies the kit first and never publishes it before authentication.
+    fn prepare_candidate(addr: &str, authorized: &Value, super_password: String, vault: Value,
+        legacy: Option<(Value, [u8; 32])>, registration_source: bool, without_token: bool, fixed_directory: Option<&Path>) -> Result<Self> {
         crate::service::require_profile_change_host()?;
         let user = authorized["user"].as_str().filter(|user| !user.is_empty()).context("authorization did not return a user")?.to_owned();
-        let token = authorized["token"].as_str().filter(|token| !token.is_empty()).context("authorization did not return a token")?;
+        let token = authorized["token"].as_str().filter(|token| !token.is_empty());
+        ensure!(without_token || token.is_some(), "authorization did not return a token");
         let base = addr.trim().trim_end_matches('/');
         let version = vault["version"].as_i64().context("vault missing version")?;
         ensure!((1..=4).contains(&version), "unsupported vault version; original factors were preserved");
@@ -1484,7 +1497,8 @@ impl PreparedLogin {
         let wrapped = vault["wrapped_urk"].as_str().context("vault missing wrapped_urk")?;
         let nonce = vault["urk_nonce"].as_str().context("vault missing urk_nonce")?;
         let current = crate::service::data_dir();
-        let mut directory = if (registration_source && crate::service::session_user_of_dir(&current).is_empty())
+        let mut directory = if let Some(directory) = fixed_directory { directory.to_path_buf() }
+        else if (registration_source && crate::service::session_user_of_dir(&current).is_empty())
             || (legacy.is_some() && crate::service::session_user_of_dir(&current) == user) {
             current.clone()
         } else { login_directory(base, &user)? };
@@ -1495,7 +1509,7 @@ impl PreparedLogin {
         };
         ensure!(session.is_object(), "target account session must be an object");
         let previous_alias = session["keyring_account"].as_str().unwrap_or(&user);
-        let login_password = authorized["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned)
+        let login_password = authorized["pass"].as_str().filter(|value| version == 1 || !value.is_empty()).map(str::to_owned)
             .or_else(|| if version == 1 { crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty()) } else { None })
             .or_else(|| session["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned))
             .or_else(|| crate::keystore::load_login_pass(previous_alias));
@@ -1513,7 +1527,7 @@ impl PreparedLogin {
                 salt, wrapped, nonce),
             _ => crate::memory::SessionKeys::unlock_v4(&super_password, salt, wrapped, nonce),
         }.context("original decryption factors do not unlock this account; the original account was preserved")?;
-        if original.is_none() && legacy.is_none() {
+        if fixed_directory.is_none() && original.is_none() && legacy.is_none() {
             let plain = crate::service::account_dir(&user)?;
             let suffix = hex::encode(sha2::Sha256::digest(format!("{base}\n{user}").as_bytes()));
             let isolated = crate::service::account_dir(&format!("{user}-{}", &suffix[..16]))?;
@@ -1554,8 +1568,13 @@ impl PreparedLogin {
         }
         session["user"] = json!(user);
         session["addr"] = json!(base);
-        session["token"] = json!(token);
-        session["session_id"] = authorized["session_id"].clone();
+        if let Some(token) = token {
+            session["token"] = json!(token);
+            session["session_id"] = authorized["session_id"].clone();
+        } else if let Some(object) = session.as_object_mut() {
+            object.remove("token");
+            object.remove("session_id");
+        }
         let local_wrap = [session["kdf_salt"].clone(), session["wrapped_urk"].clone(), session["urk_nonce"].clone()];
         session["vault_version"] = json!(version);
         session["kdf_salt"] = vault["kdf_salt"].clone();

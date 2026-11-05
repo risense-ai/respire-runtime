@@ -1449,6 +1449,7 @@ dependencies = [
  "respire_app",
  "respire_protocol",
  "respire_spawn",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

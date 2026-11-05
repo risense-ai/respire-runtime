@@ -4,6 +4,8 @@ use crate::{ControlBinding, HostAuthIdentity};
 
 pub const HOST_KEY_SCHEMA_V: u32 = 1;
 pub const HOST_KEY_SUPER_RESET_METHOD: &str = "control.key.super_reset";
+pub const HOST_KEY_FIVEKEYS_METHOD: &str = "control.key.fivekeys";
+pub const HOST_KEY_COMPLETE_METHOD: &str = "control.key.complete";
 pub const HOST_KEY_RESULT_METHOD: &str = "control.key.result";
 pub const HOST_KEY_ROLLBACK_METHOD: &str = "control.key.rollback";
 
@@ -11,6 +13,14 @@ pub const HOST_KEY_ROLLBACK_METHOD: &str = "control.key.rollback";
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostKeyOperation {
     SuperReset { addr: Option<String> },
+    Fivekeys {
+        addr: String,
+        user: String,
+        kdf_salt: String,
+        wrapped_urk: String,
+        urk_nonce: String,
+        use_super: bool,
+    },
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -18,6 +28,8 @@ pub enum HostKeyOperation {
 pub struct HostKeyInput {
     pub password: Option<String>,
     pub super_password: Option<String>,
+    pub account_secret: Option<String>,
+    pub totp: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -49,6 +61,9 @@ pub struct HostKeyResult {
     pub session_sha256: Option<String>,
     pub identity: HostAuthIdentity,
     pub required_inputs: Vec<String>,
+    /// Pending until a trusted Runtime verifier completes the selected candidate.
+    #[serde(default)]
+    pub verification_required: bool,
     /// Generated only by super-reset. Never copy to public progress or a ledger.
     pub super_password: Option<String>,
 }

@@ -197,6 +197,65 @@ pub(crate) fn acquire_auth_ownership(
     Ok(ownership)
 }
 
+/// Called only after the app has matched this result to its durable key receipt.
+/// The launch grant stays bound to the initial context; only fivekeys may select
+/// the receipt's exact target, and no other launch field is allowed to change.
+pub(crate) fn verify_key_control_result(
+    binding: &respire_protocol::ControlBinding,
+    launched_identity: &respire_protocol::HostAuthIdentity,
+    result: &respire_protocol::key_control::HostKeyResult,
+) -> Result<()> {
+    use respire_protocol::HostAuthIdentity;
+    let startup = STARTUP.get().context("key control grant is missing")?;
+    anyhow::ensure!(startup.auth_control, "key control requires an auth grant");
+    let grant = startup.grant.as_ref().context("key control grant is missing")?;
+    let account = match launched_identity { HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()), _ => None };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    verify_authority_for_mode(Some(grant), &startup.context, startup.paused_control)?;
+    let current = current_context(startup.context.port)?;
+    validate_key_result_context(&startup.context, launched_identity, &current, result)?;
+    respire_app::login_transaction::verify_auth_identity(&current.root, &current.profile, &result.identity)
+}
+
+fn validate_key_result_context(original: &LaunchContext, launched_identity: &respire_protocol::HostAuthIdentity,
+    current: &LaunchContext, result: &respire_protocol::key_control::HostKeyResult) -> Result<()> {
+    use respire_protocol::HostAuthIdentity;
+    use respire_protocol::key_control::{HostKeyOperation, HostKeyOutcome};
+    let mut expected = original.clone();
+    match &result.operation {
+        HostKeyOperation::SuperReset { .. } => {
+            anyhow::ensure!(result.source_profile == original.profile
+                && result.target_profile.as_ref().is_none_or(|target| *target == original.profile)
+                && !result.verification_required, "super-reset changed its profile");
+            anyhow::ensure!(matches!((launched_identity, &result.identity),
+                (HostAuthIdentity::Bound { account_id: before, .. }, HostAuthIdentity::Bound { account_id: after, .. })
+                    if before == after), "super-reset changed its account");
+        }
+        HostKeyOperation::Fivekeys { user, .. } => {
+            if result.verification_required || result.outcome == HostKeyOutcome::Committed {
+                let target = result.target_profile.as_ref().context("fivekeys target missing")?;
+                let account = hash(user.as_bytes());
+                anyhow::ensure!(result.account_id.as_ref() == Some(&account)
+                    && matches!(&result.identity, HostAuthIdentity::Bound { account_id, session_sha256 }
+                        if account_id == &account && Some(session_sha256) == result.session_sha256.as_ref()),
+                    "fivekeys target identity differs from its intent");
+                expected.profile = target.clone();
+            } else if result.outcome == HostKeyOutcome::RolledBack {
+                expected.profile = result.source_profile.clone();
+            } else {
+                anyhow::ensure!(result.identity == *launched_identity, "unpublished fivekeys changed its identity");
+            }
+            expected.account_id = match &result.identity {
+                HostAuthIdentity::Bound { account_id, .. } => account_id.clone(),
+                _ => hash(expected.profile.display().to_string().as_bytes()),
+            };
+        }
+    }
+    anyhow::ensure!(*current == expected, "key control changed fields outside its owned target");
+    Ok(())
+}
+
 /// An owned identity transaction may remove its session; the serving fence stays strict.
 pub(crate) fn verify_identity_write_result(
     binding: &respire_protocol::ControlBinding,
@@ -985,6 +1044,35 @@ mod tests {
         validate_identity_write_context(&context, &launched, &context, &receipt)?;
         receipt.session_sha256 = None;
         assert!(validate_identity_write_context(&context, &launched, &context, &receipt).is_err());
+        use respire_protocol::key_control::{HostKeyOperation, HostKeyOutcome, HostKeyResult};
+        let mut key_receipt = HostKeyResult { operation_id: auth.id.clone(), fingerprint: "e".repeat(64),
+            operation: HostKeyOperation::Fivekeys { addr: String::new(), user: "fivekeys-fixture".into(),
+                kdf_salt: "synthetic-salt".into(), wrapped_urk: "synthetic-wrap".into(), urk_nonce: "synthetic-nonce".into(), use_super: true },
+            outcome: HostKeyOutcome::Pending, source_profile: context.profile.clone(),
+            target_profile: Some(context.root.join("accounts/fivekeys-fixture")),
+            account_id: Some(hash(b"fivekeys-fixture")), session_sha256: Some("f".repeat(64)),
+            identity: respire_protocol::HostAuthIdentity::Bound { account_id: hash(b"fivekeys-fixture"), session_sha256: "f".repeat(64) },
+            required_inputs: Vec::new(), verification_required: true, super_password: None };
+        let mut target = context.clone();
+        target.profile = key_receipt.target_profile.clone().context("fivekeys target missing")?;
+        target.account_id = hash(b"fivekeys-fixture");
+        validate_key_result_context(&context, &launched, &target, &key_receipt)?;
+        assert!(validate_key_result_context(&context, &launched, &context, &key_receipt).is_err());
+        for field in ["root", "profile", "account", "generation", "image", "sha", "port"] {
+            let mut foreign = target.clone();
+            match field {
+                "root" => foreign.root = target.root.join("other"),
+                "profile" => foreign.profile = target.profile.join("other"),
+                "account" => foreign.account_id.push('x'),
+                "generation" => foreign.sync_generation += 1,
+                "image" => foreign.image_path.push("other"),
+                "sha" => foreign.image_sha256.push('x'),
+                _ => foreign.port += 1,
+            }
+            assert!(validate_key_result_context(&context, &launched, &foreign, &key_receipt).is_err(), "{field}");
+        }
+        key_receipt.operation = HostKeyOperation::SuperReset { addr: None };
+        assert!(validate_key_result_context(&context, &launched, &target, &key_receipt).is_err());
         Ok(())
     }
 

@@ -26,6 +26,11 @@ fn pattern_matches(value: &str, pattern: &str) -> bool {
             parts.len() == 5 && parts.iter().zip([8, 4, 4, 4, 12]).all(|(p, n)| p.len() == n && lower_hex(p))
                 && parts[2].starts_with('4') && matches!(parts[3].as_bytes().first(), Some(b'8' | b'9' | b'a' | b'b'))
         }
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" => {
+            let parts: Vec<_> = value.split('-').collect();
+            parts.len() == 5 && parts.iter().zip([8, 4, 4, 4, 12]).all(|(part, n)|
+                part.len() == n && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        }
         _ => false,
     }
 }
@@ -110,6 +115,86 @@ fn config_fixture_failure(params: &Value, context: &Value) -> Option<&'static st
     None
 }
 
+fn fixed_write_model_failure(payload: &Value, params: &Value, kind: &str, schema: &Value) -> Option<&'static str> {
+    if !matches!(kind, "identityWriteResult" | "keyResult" | "modelMaintenanceReceipt") { return None; }
+    let definitions = &schema["$defs"];
+    let result = &payload["result"];
+    let binding = &params["binding"];
+    if kind != "modelMaintenanceReceipt" {
+        let context = &payload["write_context"];
+        if !schema_valid(context, &definitions["writeContext"], definitions)
+            || context["installation_root"] != binding["installation_root"] || context["profile"] != binding["profile"]
+            || context["source_identity"] != params["source_identity"] || context["operation"] != params["operation"]
+            || context["operation_id"] != payload["request"]["operation_id"] || context["idempotency_key"] != payload["request"]["idempotency_key"] {
+            return Some("write_context_mismatch");
+        }
+        // Node and Go recompute SHA-256; Rust binds the declared complete intent and digest anchor.
+        if result["fingerprint"] != context["fingerprint"] { return Some("host_fingerprint_mismatch"); }
+        if result["operation"] != params["operation"] { return Some("write_context_mismatch"); }
+        let before = &params["identity"];
+        let after = &result["identity"];
+        let account = if before["kind"] == "bound" { &before["account_id"] } else { &Value::Null };
+        if binding["expected_account_id"] != *account { return Some("write_identity_mismatch"); }
+        let full = kind == "identityWriteResult" && params["operation"]["kind"] == "logout" && params["operation"]["full"] == true;
+        let changed = if after["kind"] == "absent" { before["kind"] != "absent" && !full }
+            else { before["kind"] != after["kind"] || if after["kind"] == "bound" {
+                before["account_id"] != after["account_id"]
+            } else { before["operation_id"] != after["operation_id"] } };
+        if changed { return Some("write_identity_mismatch"); }
+        if kind == "identityWriteResult" {
+            let revoke = &result["revoke"];
+            let revoke_id = revoke["session_id"].as_str().map(str::to_ascii_lowercase);
+            let requested_id = params["operation"]["session_id"].as_str().map(str::to_ascii_lowercase);
+            if result["path"] != format!("{}/session.json", binding["profile"].as_str()?)
+                || result["session_sha256"] != after["session_sha256"]
+                || full && result["outcome"] == "committed" && after["kind"] != "absent"
+                || params["operation"]["kind"] == "logout" && !revoke.is_null()
+                || params["operation"]["kind"] == "session_revoke" && ((!revoke.is_null() && revoke_id != requested_id)
+                    || result["outcome"] == "committed" && revoke.is_null()) { return Some("write_identity_mismatch"); }
+        } else {
+            let committed = result["outcome"] == "committed";
+            if result["source_profile"] != binding["profile"] || !result["target_profile"].is_null() && result["target_profile"] != binding["profile"]
+                || committed && (result["target_profile"] != binding["profile"] || after["kind"] != "bound"
+                    || result["account_id"] != after["account_id"] || result["session_sha256"] != after["session_sha256"]
+                    || result["super_password"].as_str().is_none_or(str::is_empty))
+                || !committed && ["super_password", "account_id", "session_sha256"].iter().any(|key| !result[key].is_null())
+                || (result["outcome"] == "awaiting_input") != result["required_inputs"].as_array().is_some_and(|items| !items.is_empty()) {
+                return Some("write_identity_mismatch");
+            }
+        }
+    } else {
+        let plan = &result["plan"];
+        if params["phase"] != "plan" && params["expected"] != plan["review"] { return Some("model_review_mismatch"); }
+        if plan["kind"] != params["kind"] || result["phase"] != params["phase"]
+            || result["verified"] != (params["phase"] != "plan") || result["config_applied"] != (params["phase"] == "apply")
+            || params["kind"] == "reset_cpu" && (plan["cpu_candidate_sha256"].is_null()
+                || ["preparation", "catalog", "uninstall_directory"].iter().any(|key| !plan[key].is_null()))
+            || params["kind"] == "uninstall_m3" && (plan["uninstall_directory"].is_null()
+                || ["cpu_candidate_sha256", "preparation", "catalog"].iter().any(|key| !plan[key].is_null()))
+            || params["kind"] == "install_engines" && (!plan["uninstall_directory"].is_null() || !plan["cpu_candidate_sha256"].is_null()
+                || plan["preparation"].is_null() != plan["catalog"].is_null() || !plan["catalog"].is_null()
+                && plan["catalog"]["destination"] != format!("{}/engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll", binding["installation_root"].as_str()?)) {
+            return Some("model_receipt_mismatch");
+        }
+    }
+    let model = kind == "modelMaintenanceReceipt";
+    let envelope = &payload[if model { "public_response" } else { "private_response" }];
+    let rule = if model { "modelMaintenanceEnvelope" } else if kind == "keyResult" { "keyEnvelope" } else { "identityWriteEnvelope" };
+    let status = if model { "ok" } else if result["outcome"] == "unknown" { "fail" }
+        else if matches!(result["outcome"].as_str(), Some("pending" | "awaiting_input")) { "pending" } else { "ok" };
+    if !schema_valid(envelope, &definitions[rule], definitions) || envelope["status"] != status
+        || envelope[if model { "details" } else { "summary" }] != *result
+        || model && envelope["summary"] != serde_json::json!({"kind":params["kind"],"phase":params["phase"],"verified":result["verified"]}) {
+        return Some("host_result_invalid");
+    }
+    for (name, status, value) in [("control_ready", "ok", "true"), ("store_ready", "skip", "false")] {
+        let items = envelope["items"].as_array()?;
+        let matching: Vec<_> = items.iter().filter(|item| item["name"] == name).collect();
+        if matching.len() != 1 || matching[0]["status"] != status || matching[0]["value"] != value { return Some("host_result_invalid"); }
+    }
+    None
+}
+
 fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     if payload["channel"] != "inherited_pipe" { return Some("private_channel_required"); }
     let definitions = &schema["$defs"];
@@ -117,7 +202,7 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let request = &payload["request"];
     let method = request["method"].as_str()?;
     let spec = &schema["x-methods"][method];
-    if matches!(spec["result"].as_str(), Some("secretResult" | "keysExportResult"))
+    if matches!(spec["result"].as_str(), Some("secretResult" | "keysExportResult" | "identityWriteResult" | "keyResult"))
         && payload.get("public_response").is_some() { return Some("private_secret_exposure"); }
     let mutable = spec["mutable"] == true;
     if mutable && (request["operation_id"].is_null() || request["idempotency_key"].is_null()) { return Some("host_operation_required"); }
@@ -126,6 +211,11 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         Some(params) => params, None => return Some("host_params_invalid"),
     };
     if !schema_valid(&params, &definitions[spec["params"].as_str()?], definitions) { return Some("host_params_invalid"); }
+    if spec["params"] == "identityWriteParams" && method != "control.identity.write_result"
+        && (method == "control.identity.logout") != (params["operation"]["kind"] == "logout") { return Some("host_params_invalid"); }
+    if spec["params"] == "modelMaintenanceParams" && ((params["phase"] == "plan") != params["expected"].is_null()
+        || params["phase"] == "apply" && params["kind"] != "reset_cpu"
+        || params["phase"] == "verify" && params["kind"] == "reset_cpu") { return Some("host_params_invalid"); }
     if spec["params"] == "modelParams" && if method == "control.model_install_plan" {
         !params["selection_sha256"].is_null()
     } else { params["selection_sha256"].is_null() } { return Some("host_params_invalid"); }
@@ -147,6 +237,7 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let kind = spec["result"].as_str()?;
     if !schema_valid(result, &definitions[kind], definitions) { return Some("host_result_invalid"); }
     if mutable && result["operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
+    if let Some(error) = fixed_write_model_failure(payload, &params, kind, schema) { return Some(error); }
     if matches!(kind, "identityResult" | "configReceipt") {
         let envelope = &payload["private_response"];
         let envelope_kind = if kind == "identityResult" { "identityEnvelope" } else { "configEnvelope" };
@@ -250,6 +341,15 @@ fn producer_types(payload: &Value) -> Result<()> {
         "control.keys_export.read" => { serde_json::from_value::<respire_protocol::secret_control::HostKeysExportReadParams>(params)?; }
         "control.identity.session_list" => { serde_json::from_value::<respire_protocol::identity_control::HostIdentitySessionListParams>(params)?; }
         "control.config_validate" => { serde_json::from_value::<respire_protocol::config_control::ConfigValidateParams>(params)?; }
+        "control.identity.logout" | "control.identity.session_revoke" | "control.identity.write_result" => {
+            serde_json::from_value::<respire_protocol::identity_write_control::HostIdentityWriteParams>(params)?;
+        }
+        "control.key.super_reset" | "control.key.result" | "control.key.rollback" => {
+            serde_json::from_value::<respire_protocol::key_control::HostKeyParams>(params)?;
+        }
+        "control.model_maintenance" => {
+            serde_json::from_value::<respire_protocol::model_maintenance::ModelMaintenanceParams>(params)?;
+        }
         _ => anyhow::bail!("unsupported frozen method"),
     }
     if let Some(result) = payload.get("result") {
@@ -265,6 +365,15 @@ fn producer_types(payload: &Value) -> Result<()> {
             "control.keys_export.read" => { serde_json::from_value::<respire_protocol::secret_control::HostKeysExportReadResult>(result.clone())?; }
             "control.identity.session_list" => { serde_json::from_value::<respire_protocol::identity_control::HostIdentitySessionListResult>(result.clone())?; }
             "control.config_validate" => { serde_json::from_value::<respire_protocol::config_control::ConfigValidationReceipt>(result.clone())?; }
+            "control.identity.logout" | "control.identity.session_revoke" | "control.identity.write_result" => {
+                serde_json::from_value::<respire_protocol::identity_write_control::HostIdentityWriteResult>(result.clone())?;
+            }
+            "control.key.super_reset" | "control.key.result" | "control.key.rollback" => {
+                serde_json::from_value::<respire_protocol::key_control::HostKeyResult>(result.clone())?;
+            }
+            "control.model_maintenance" => {
+                serde_json::from_value::<respire_protocol::model_maintenance::ModelMaintenanceReceipt>(result.clone())?;
+            }
             _ => {
                 let parsed: HostAuthAccountResult = serde_json::from_value(result.clone())?;
                 if result["outcome"] == "awaiting_input" {
@@ -297,12 +406,17 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
                 | "host-keys-export-out.json" | "host-secret-result-unknown.json"
                 | "host-identity-argv.json" | "host-identity-unknown.json" | "host-identity-result-unknown.json"
                 | "host-config-argv.json" | "host-config-unknown.json" | "host-config-intent-unknown.json"
-                | "host-config-receipt-unknown.json")) {
+                | "host-config-receipt-unknown.json"
+                | "host-identity-write-argv.json" | "host-identity-write-params-unknown.json" | "host-identity-write-result-unknown.json"
+                | "host-key-write-argv.json" | "host-key-write-params-unknown.json" | "host-key-write-result-unknown.json"
+                | "host-key-write-input-type.json" | "host-key-write-input-unknown.json"
+                | "host-model-maintenance-argv.json" | "host-model-maintenance-params-unknown.json"
+                | "host-model-maintenance-result-unknown.json" | "host-model-maintenance-secret.json")) {
                 assert!(producer_types(&fixture["payload"]).is_err(), "{path}: DTO must reject invalid fields");
             }
             count += 1;
         }
     }
-    assert_eq!(count, 114);
+    assert_eq!(count, 204);
     Ok(())
 }

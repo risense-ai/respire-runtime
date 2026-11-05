@@ -108,9 +108,48 @@ fn receive_and_execute(
     let request: RpcRequest = read_frame()
         .map_err(|_| ("invalid_request", "invalid host control RPC frame"))?;
     response.id = request.id.clone();
+    use respire_protocol::migration_control::{HostMigrationOutcome,
+        HOST_MIGRATION_PROFILE_METHOD, HOST_MIGRATION_RESULT_METHOD};
+    if [HOST_MIGRATION_PROFILE_METHOD, HOST_MIGRATION_RESULT_METHOD].contains(&request.method.as_str()) {
+        let migration = crate::migration_control::MigrationRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private migration request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("migration-control", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        if respire_app::login_transaction::auth_recovery_pending()
+            .map_err(|_| ("auth_recovery_pending", "authentication recovery state is invalid"))? {
+            return Err(("auth_recovery_pending", "finish authentication recovery before migrating a legacy profile"));
+        }
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private migration launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private migration parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(migration.binding(), migration.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private migration ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(migration.binding(), migration.identity())
+            .map_err(|_| ("scope_mismatch", "private migration identity mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private migration deadline unavailable"))?;
+        let result = migration.execute(&ownership)
+            .map_err(|_| ("migration_outcome_unknown", "query the original migration operation before retrying"))?;
+        crate::startup_identity::verify_auth_control_binding(migration.binding(), &result.identity)
+            .map_err(|_| ("migration_outcome_unknown", "migration completion identity could not be verified"))?;
+        *control_ready = true;
+        response.ok = result.outcome != HostMigrationOutcome::Unknown;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("migration_outcome_unknown".into()); }
+        response.envelope = Some(ResultEnvelope::new("migration-control",
+            if response.ok { Status::Ok } else { Status::Fail },
+            serde_json::to_value(result).map_err(|_| ("migration_outcome_unknown", "migration receipt encoding failed"))?,
+            Vec::new()));
+        return Ok(());
+    }
     use respire_protocol::key_control::{HostKeyOutcome, HOST_KEY_SUPER_RESET_METHOD,
-        HOST_KEY_RESULT_METHOD, HOST_KEY_ROLLBACK_METHOD};
-    if [HOST_KEY_SUPER_RESET_METHOD, HOST_KEY_RESULT_METHOD, HOST_KEY_ROLLBACK_METHOD]
+        HOST_KEY_RESULT_METHOD, HOST_KEY_ROLLBACK_METHOD, HOST_KEY_FIVEKEYS_METHOD, HOST_KEY_COMPLETE_METHOD};
+    if [HOST_KEY_SUPER_RESET_METHOD, HOST_KEY_RESULT_METHOD, HOST_KEY_ROLLBACK_METHOD,
+        HOST_KEY_FIVEKEYS_METHOD, HOST_KEY_COMPLETE_METHOD]
         .contains(&request.method.as_str()) {
         let key = crate::key_control::KeyRequest::parse(&request)
             .map_err(|_| ("invalid_request", "invalid private key request"))?;
@@ -119,24 +158,27 @@ fn receive_and_execute(
         response.envelope = Some(ResultEnvelope::new("key-control", Status::Fail,
             serde_json::json!({"outcome":"unknown"}), Vec::new()));
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
-        crate::startup_identity::authorize_auth_control(grant)
+        if key.is_complete() { crate::startup_identity::authorize_account_completion(grant) }
+        else { crate::startup_identity::authorize_auth_control(grant) }
             .map_err(|_| ("unauthorized", "private key launch authorization failed"))?;
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "private key parent watch failed"))?;
-        let ownership = crate::startup_identity::acquire_auth_ownership(key.binding(), key.identity())
-            .map_err(|_| ("auth_ownership_unavailable", "private key ownership unavailable"))?;
+        let ownership = if key.is_complete() { None } else {
+            Some(crate::startup_identity::acquire_auth_ownership(key.binding(), key.identity())
+                .map_err(|_| ("auth_ownership_unavailable", "private key ownership unavailable"))?)
+        };
         crate::startup_identity::verify_auth_control_binding(key.binding(), key.identity())
             .map_err(|_| ("scope_mismatch", "private key identity mismatch"))?;
         events.send(ControlEvent::LongControlStarted)
             .map_err(|_| ("control_unavailable", "private key deadline unavailable"))?;
-        let result = key.execute(&request, ownership)
-            .map_err(|_| ("key_outcome_unknown", "query the original key operation before retrying"))?;
-        crate::startup_identity::verify_auth_control_binding(key.binding(), &result.identity)
-            .map_err(|_| ("key_outcome_unknown", "key operation completion identity could not be verified"))?;
-        if result.source_profile != key.binding().profile
-            || result.target_profile.as_ref().is_some_and(|profile| *profile != key.binding().profile) {
-            return Err(("key_outcome_unknown", "key operation completion profile could not be verified"));
+        let result = if key.is_complete() {
+            key.complete(&request, crate::key_control::verify_target_runtime)
+        } else {
+            key.execute(&request, ownership.ok_or(("auth_ownership_unavailable", "private key ownership missing"))?)
         }
+            .map_err(|_| ("key_outcome_unknown", "query the original key operation before retrying"))?;
+        key.verify_result(&request, &result)
+            .map_err(|_| ("key_outcome_unknown", "key operation completion identity could not be verified"))?;
         *control_ready = true;
         response.ok = result.outcome != HostKeyOutcome::Unknown;
         response.exit = if response.ok { 0 } else { 2 };
