@@ -2740,13 +2740,15 @@ pub struct TreeCureReport {
 }
 
 /// Obtain a tree maintenance proposal from Core; applying it remains public.
+/// P0-2: pass explicit query-log --good counts; Core no longer reads recall_count.
 pub fn float_up_candidates(
     all: &[crate::memory::model::StoredMemory],
     min_hits: i64,
+    good_counts: &HashMap<String, i64>,
 ) -> Result<Vec<(String, String)>> {
     crate::core_sdk::execute(
         "tree_float",
-        serde_json::json!({"snapshots":crate::core_sdk::metadata_snapshots(all), "min_hits":min_hits}),
+        serde_json::json!({"snapshots":crate::core_sdk::metadata_snapshots(all), "min_hits":min_hits, "good_counts":good_counts}),
     )
 }
 
@@ -2754,7 +2756,7 @@ pub fn float_up_candidates(
 pub struct TreeFloatItem {
     pub id: String,
     pub title: String,
-    pub recall_count: i64,
+    pub good_marks: i64,
     pub old_parent: String,
     pub old_parent_title: String,
     pub new_parent: String,
@@ -2777,10 +2779,15 @@ impl App {
     }
 
     /// Ask Core for tree adjustments; `go` applies the returned parent changes and syncs.
+    /// P0-2: candidates float on explicit query-log --good marks (>= min_hits,
+    /// strictly above the parent's marks), never on recall_count.
     pub fn tree_float(&self, go: bool, min_hits: i64) -> Result<TreeFloatReport> {
         let all = self.store.all(false)?;
         require_candidates_ready(&self.store, &all)?;
-        let cands = float_up_candidates(&all, min_hits)?;
+        let good_counts = self
+            .store
+            .query_good_counts(chrono::Utc::now().timestamp())?;
+        let cands = float_up_candidates(&all, min_hits, &good_counts)?;
         let mut items = Vec::new();
         for (child_id, new_parent) in &cands {
             let Some(m) = all.iter().find(|s| &s.id == child_id) else {
@@ -2801,7 +2808,7 @@ impl App {
             items.push(TreeFloatItem {
                 id: m.id.clone(),
                 title: title_of(&m.id),
-                recall_count: m.local_recall_count,
+                good_marks: good_counts.get(&m.id).copied().unwrap_or(0),
                 old_parent: m.local_parent_id.clone(),
                 old_parent_title: title_of(&m.local_parent_id),
                 new_parent: new_parent.clone(),

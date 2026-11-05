@@ -1484,6 +1484,14 @@ pub fn dispatch_deferred(
     tx: &Sender<Job>,
     action: impl FnOnce(RpcResponse) + Send + 'static,
 ) {
+    if request.v != PROTOCOL_V {
+        action(error_response(
+            &request,
+            "protocol_version_mismatch",
+            "protocol version mismatch",
+        ));
+        return;
+    }
     if request.id.trim().is_empty()
         || request.id.len() > 256
         || request.id.chars().any(char::is_whitespace)
@@ -1510,7 +1518,7 @@ pub fn dispatch_deferred(
         ));
         return;
     }
-    if request.method != "cli.exec" || request.v != PROTOCOL_V {
+    if request.method != "cli.exec" {
         action(dispatch(request, tx));
         return;
     }
@@ -3256,6 +3264,25 @@ mod tests {
 
     #[test]
     fn business_scope_rejects_missing_empty_and_stale_identity() {
+        for scope in [None, Some(fixture_scope("", 0))] {
+            let (jobs, queued) = std::sync::mpsc::channel();
+            let (reply, received) = std::sync::mpsc::channel();
+            dispatch_deferred(RpcRequest {
+                v: PROTOCOL_V + 1,
+                id: "wrong-version".to_owned(),
+                method: "cli.exec".to_owned(),
+                args: Vec::new(),
+                scope,
+                operation_id: None,
+                idempotency_key: None,
+                parent_operation_id: None,
+                queue_wait_ms: None,
+                lifecycle: None,
+            }, &jobs, move |response| { let _ = reply.send(response); });
+            assert!(matches!(received.try_recv(), Ok(response)
+                if response.code.as_deref() == Some("protocol_version_mismatch")));
+            assert!(matches!(queued.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        }
         let current = fixture_scope("account-a", 8);
         assert_eq!(scope_generation(&current), Ok(7));
         let initial: u64 = crate::rpc_worker::generation_on_wire(0);

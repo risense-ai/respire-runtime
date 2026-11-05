@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(manifest.entries, 1);
         let pinned:serde_json::Value=serde_json::from_str(include_str!("../../core-sdk/core-sdk.lock.json"))?;
         let targets=pinned["targets"].as_object().context("pinned SDK targets")?;
-        assert_eq!(targets.len(),7);
+        assert_eq!(targets.len(),8);
         assert_eq!(targets.get(&sdk_target()?).context("current SDK target")?["sdk_version"].as_str(), Some(manifest.sdk_version.as_str()));
         assert_eq!(list(directory.path())?.len(), 1);
         let copied = directory

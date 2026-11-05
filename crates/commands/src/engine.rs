@@ -2888,8 +2888,8 @@ pub fn run_tree_float(go: bool, min: i64) -> Result<()> {
                     OutputStatus::Pending
                 },
                 format!(
-                    "{} hits {} {} -> {} {}",
-                    it.recall_count,
+                    "{} good {} {} -> {} {}",
+                    it.good_marks,
                     it.title,
                     respire_app::service::short_id(&it.id),
                     it.new_parent_title,
