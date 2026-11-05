@@ -1006,7 +1006,8 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
         let mut url = WEB_URL.lock().unwrap_or_else(|err| err.into_inner());
         *url = bound.url.clone();
     }
-    write_endpoint(&bound.url)?;
+    let publication = crate::rpc_worker::publish_endpoint(&bound.url)?;
+    let owner = Arc::new(Mutex::new(_owner));
     let (tx, rx) = mpsc::channel();
     let _ = JOB_TX.set(Mutex::new(tx.clone()));
     // Sandboxed clients cannot restart an idle-exited host runtime.
@@ -1014,13 +1015,17 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     let limit = worker_limit();
     WORKERS.store(limit, Ordering::Release);
     RUNNING.store(0, Ordering::Release);
-    std::thread::Builder::new()
+    let startup = StartupEndpoint { owner: owner.clone(), publication: publication.clone() };
+    if let Err(error) = std::thread::Builder::new()
         .name("respire-dispatch".into())
         // Services do not inherit a terminal's RUST_MIN_STACK. Context-query
         // parsing needs the same explicit stack as the command workers.
         .stack_size(16 * 1024 * 1024)
-        .spawn(move || dispatch_loop(rx, limit, idle, library))
-        .context("failed to start the runtime dispatcher")?;
+        .spawn(move || dispatch_loop_inner(rx, limit, idle, library, Some(startup)))
+    {
+        StartupEndpoint { owner: owner.clone(), publication }.revoke();
+        return Err(error).context("failed to start the runtime dispatcher");
+    }
     // Keep the host entry alive on its actual listener. Drain/worker shutdown
     // retains its existing ownership and process-exit path in dispatch_loop.
     crate::runtime_http::serve_loop(bound.server)
@@ -2457,11 +2462,37 @@ impl Drop for ClassifyGuard {
     }
 }
 
+struct StartupEndpoint {
+    owner: Arc<Mutex<respire_app::lock::LibraryLock>>,
+    publication: crate::rpc_worker::EndpointPublication,
+}
+
+impl StartupEndpoint {
+    fn revoke(&self) {
+        let result = self.owner.lock()
+            .map_err(|_| anyhow::anyhow!("installation ownership lock poisoned"))
+            .and_then(|owner| self.publication.revoke_failed_start(&owner));
+        if let Err(error) = result {
+            eprintln!("runtime failed to revoke its startup endpoint: {error:#}");
+        }
+    }
+}
+
 pub fn dispatch_loop(
     rx: Receiver<Job>,
     limit: usize,
     idle: Option<Duration>,
     _lock: respire_app::lock::LibraryLock,
+) {
+    dispatch_loop_inner(rx, limit, idle, _lock, None)
+}
+
+fn dispatch_loop_inner(
+    rx: Receiver<Job>,
+    limit: usize,
+    idle: Option<Duration>,
+    _lock: respire_app::lock::LibraryLock,
+    startup: Option<StartupEndpoint>,
 ) {
     mark_worker();
     let _ = DISPATCH_THREAD.set(std::thread::current());
@@ -2482,6 +2513,9 @@ pub fn dispatch_loop(
             }
             Err(error) => {
                 eprintln!("runtime failed to initialize the library: {error:#}");
+                if let Some(startup) = startup.as_ref() {
+                    startup.revoke();
+                }
                 stop_process(1);
             }
         })
