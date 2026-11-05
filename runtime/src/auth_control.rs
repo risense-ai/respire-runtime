@@ -116,3 +116,19 @@ pub(crate) fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<(
     crate::startup_identity::verify_account_completion_authority()?;
     Ok(())
 }
+
+pub(crate) fn recovery_request(request: &RpcRequest) -> Result<respire_protocol::host_control::HostLoginRecoveryParams> {
+    use respire_protocol::host_control::{HostLoginRecoveryParams,
+        HOST_AUTH_SCHEMA_V, HOST_LOGIN_RECOVERY_METHOD, HOST_LOGIN_RECOVERY_STATUS_METHOD};
+    let id = uuid::Uuid::parse_str(&request.id)?;
+    anyhow::ensure!(request.v == respire_commands::rpc_worker::PROTOCOL_V
+        && id.get_version_num() == 4 && id.to_string() == request.id
+        && [HOST_LOGIN_RECOVERY_METHOD, HOST_LOGIN_RECOVERY_STATUS_METHOD].contains(&request.method.as_str())
+        && request.args.len() == 1 && request.scope.is_none()
+        && request.operation_id.is_none() && request.idempotency_key.is_none()
+        && request.parent_operation_id.is_none() && request.queue_wait_ms.is_none()
+        && request.lifecycle.is_none(), "invalid fixed login recovery request");
+    let params: HostLoginRecoveryParams = serde_json::from_str(&request.args[0])?;
+    anyhow::ensure!(params.schema_version == HOST_AUTH_SCHEMA_V, "unsupported login recovery schema");
+    Ok(params)
+}

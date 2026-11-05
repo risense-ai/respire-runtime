@@ -14,6 +14,10 @@ mod identity;
 pub use identity::{control_identity_write, control_identity_write_result};
 mod keys;
 pub use keys::{control_key, control_key_result, control_key_rollback, control_key_complete, verify_key_receipt};
+mod space;
+pub use space::control_space;
+mod profile;
+pub use profile::control_profile_remove;
 
 #[derive(Serialize, Deserialize)]
 struct Recovery {
@@ -83,6 +87,10 @@ struct AuthRecord {
     identity: Option<identity::IdentityOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_operation: Option<keys::KeyOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    space_operation: Option<space::SpaceOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_remove: Option<profile::ProfileRemoveOperation>,
 }
 
 fn digest(bytes: &[u8]) -> String { hex::encode(sha2::Sha256::digest(bytes)) }
@@ -183,7 +191,7 @@ mod tests {
                 fingerprint: keygen_fingerprint(&canonical_root, &canonical_root, false)?,
                 root: canonical_root.clone(), profile: canonical_root, original_sha256: None,
                 candidate: None, candidate_sha256: None, alias: "login-retained".into(), backend: None,
-                phase: AuthPhase::RolledBack, account: None, identity: None, key_operation: None,
+                phase: AuthPhase::RolledBack, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None,
             }] })?;
             let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":"completed-account","token":"new-token"}), code.clone(), vault, None)?;
             prepared.commit()?;
@@ -214,7 +222,7 @@ mod tests {
         }), operations: vec![AuthRecord {
             operation_id: id.clone(), idempotency_key: id.clone(), fingerprint: keygen_fingerprint(&root, &root, false)?,
             root: root.clone(), profile: root.clone(), original_sha256: None, candidate: None, candidate_sha256: None,
-            alias, backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None,
+            alias, backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None,
         }] };
         save_journal(&journal)?;
         std::fs::write(crate::service::client_config_path(), current_config)?;
@@ -461,6 +469,7 @@ mod tests {
             HostAuthAccountOutcome::RolledBack);
         identity::assert_existing_recovery(&root)?;
         keys::assert_existing_recovery(&root)?;
+        space::assert_existing_recovery(&root)?;
         Ok(())
     }
 
@@ -482,7 +491,7 @@ mod tests {
             operation_id: id.clone(), idempotency_key: id, fingerprint: keygen_fingerprint(&root, &root, false)?,
             root: root.clone(), profile: root.clone(), original_sha256: None,
             candidate: Some(candidate.clone()), candidate_sha256: Some(digest(&candidate)),
-            alias, backend: Some("unavailable-test-backend".into()), phase: AuthPhase::Prepared, account: None, identity: None, key_operation: None,
+            alias, backend: Some("unavailable-test-backend".into()), phase: AuthPhase::Prepared, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None,
         }] };
         save_journal(&journal)?;
         std::fs::write(root.join("session.json"), &candidate)?;
@@ -549,6 +558,16 @@ pub fn recovery_pending() -> bool {
     match load_journal() { Ok(journal) => journal.active.is_some(), Err(_) => true }
 }
 
+pub fn recovery_state() -> Result<respire_protocol::host_control::HostLoginRecoveryState> {
+    use respire_protocol::host_control::HostLoginRecoveryState;
+    let journal = load_journal()?;
+    Ok(match journal.active.as_ref() {
+        None => HostLoginRecoveryState::Clear,
+        Some(active) if active.operation_id.is_none() => HostLoginRecoveryState::LegacyPending,
+        Some(_) => HostLoginRecoveryState::OperationPending,
+    })
+}
+
 pub fn auth_recovery_pending() -> Result<bool> {
     let journal = load_journal()?;
     let Some(active) = journal.active.as_ref() else { return Ok(false); };
@@ -583,7 +602,7 @@ pub fn recover_interrupted() -> Result<()> {
     if record.operation_id.is_some() {
         ensure!(!journal.operations.iter().any(|operation|
             Some(operation.operation_id.as_str()) == record.operation_id.as_deref()
-                && (operation.account.is_some() || operation.identity.is_some() || operation.key_operation.is_some())),
+                && (operation.account.is_some() || operation.identity.is_some() || operation.key_operation.is_some() || operation.space_operation.is_some() || operation.profile_remove.is_some())),
             "account operation requires its original receipt; remote effects must not be automatically retried or rolled back");
         let root = crate::service::main_data_dir().canonicalize()?;
         let profile = crate::service::data_dir().canonicalize()?;
@@ -750,7 +769,7 @@ impl AuthOwnership {
         let mut journal = load_journal()?;
         if journal.active.as_ref().is_some_and(|active| active.operation_id.is_some()) {
             // Identity writes resume only through their own fenced operation/result.
-            if journal.operations.iter().any(|record| (record.identity.is_some() || record.key_operation.is_some())
+            if journal.operations.iter().any(|record| (record.identity.is_some() || record.key_operation.is_some() || record.space_operation.is_some() || record.profile_remove.is_some())
                 && journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(record.operation_id.as_str())) {
                 verify_auth_identity(&self.root, &self.profile, identity)?;
                 return Ok(());
@@ -762,6 +781,18 @@ impl AuthOwnership {
             }
         }
         Ok(())
+    }
+
+    /// Legacy rollback never admits or replays a journaled account operation.
+    pub fn recover_legacy(&self, identity: &HostAuthIdentity) -> Result<bool> {
+        verify_auth_identity(&self.root, &self.profile, identity)?;
+        let mut journal = load_journal()?;
+        let Some(active) = journal.active.as_ref() else { return Ok(false); };
+        ensure!(active.operation_id.is_none(),
+            "query the original authentication operation; automatic recovery is not permitted");
+        rollback_record(active)?;
+        retire_active(&mut journal)?;
+        Ok(true)
     }
 }
 
@@ -830,7 +861,8 @@ fn recover_keygen(journal: &mut Journal, root: &Path, profile: &Path) -> Result<
     let index = journal.operations.iter().position(|record| record.operation_id == id)
         .context("auth recovery has no admission receipt")?;
     let record = &journal.operations[index];
-    ensure!(record.account.is_none() && record.identity.is_none() && record.key_operation.is_none(), "operation is not a keygen transaction");
+    ensure!(record.account.is_none() && record.identity.is_none() && record.key_operation.is_none()
+        && record.space_operation.is_none(), "operation is not a keygen transaction");
     ensure!(record.root == root && record.profile == profile && active.directory == profile
         && record.alias == active.alias && record.original_sha256 == active.original.as_deref().map(digest),
         "auth recovery owner mismatch");
@@ -944,7 +976,7 @@ pub fn control_keygen(
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: operation_id.to_owned(), idempotency_key: idempotency_key.to_owned(),
         fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None });
+        candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None });
     save_journal(&journal)?;
     let mutation = (|| -> Result<()> {
         let (secret, _urk, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
@@ -1041,7 +1073,7 @@ fn admit_account_with_intent(ownership: &AuthOwnership, identity: &HostAuthIdent
     journal.operations.push(AuthRecord { operation_id: operation_id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(),
         original_sha256: original.as_deref().map(digest), candidate: None, candidate_sha256: None,
-        alias, backend: None, phase: AuthPhase::Admitted, identity: None, key_operation: None, account: Some(AccountOperation {
+        alias, backend: None, phase: AuthPhase::Admitted, identity: None, key_operation: None, space_operation: None, profile_remove: None, account: Some(AccountOperation {
             register, addr: addr.to_owned(), user: user.to_owned(), source_identity: identity.clone(),
             target: None, authorization: None, vault: None, published_vault: false, vault_pending: false,
             login: login_intent.map(|(migrate_local, migrate_vault, offer_local_merge)|

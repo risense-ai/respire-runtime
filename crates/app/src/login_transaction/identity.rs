@@ -136,7 +136,7 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostIdentityWr
     journal.operations.push(AuthRecord { operation_id: id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint: fingerprint(&ownership.root, &ownership.profile, &params.source_identity, &params.operation)?,
         root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted, account: None, key_operation: None,
+        candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted, account: None, key_operation: None, space_operation: None, profile_remove: None,
         identity: Some(IdentityOperation { operation: params.operation.clone(), source_identity: params.source_identity.clone(), revoke: None }) });
     save_journal(&journal)?;
     Ok((journal, index))

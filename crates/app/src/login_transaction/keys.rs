@@ -89,7 +89,7 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostKeyParams)
         fingerprint: fingerprint(&ownership.root, &ownership.profile, &params.source_identity, &params.operation)?,
         root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
         candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted,
-        account: None, identity: None, key_operation: Some(KeyOperation { operation: params.operation.clone(),
+        account: None, identity: None, space_operation: None, profile_remove: None, key_operation: Some(KeyOperation { operation: params.operation.clone(),
             source_identity: params.source_identity.clone(), target: None, target_original_sha256: None,
             original_vault: None, credential_ready: false, required_inputs: Vec::new(), fivekeys: None }) });
     save_journal(&journal)?;

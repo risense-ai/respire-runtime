@@ -88,9 +88,84 @@ pub(crate) fn authorize_control(grant: LaunchGrant) -> Result<()> {
     authorize_control_inner(grant, false, false)
 }
 
+/// A fixed read may inspect an absent profile, but cannot create or serve it.
+pub(crate) fn authorize_offline_read(grant: LaunchGrant,
+    kind: respire_protocol::metadata_control::HostOfflineRead) -> Result<()> {
+    anyhow::ensure!(STARTUP.get().is_none(), "offline read grant was already consumed");
+    respire_commands::runtime_policy::require_host("offline configuration read")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::service::validate_client_config()?;
+    if kind != respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight {
+        anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+            "finish authentication recovery before an offline configuration read");
+    }
+    let context = offline_read_context(grant.port, kind)?;
+    validate_grant(&grant, &context, grant.managed_id.is_some(), &grant.nonce, now_ms()?)?;
+    verify_offline_read_authority(&grant, &context, kind)?;
+    STARTUP.set(Startup { context, grant: Some(grant), auth_control: false, paused_control: false })
+        .map_err(|_| anyhow::anyhow!("offline read grant was already consumed"))?;
+    Ok(())
+}
+
+pub(crate) fn verify_offline_read_binding(binding: &respire_protocol::ControlBinding,
+    kind: respire_protocol::metadata_control::HostOfflineRead) -> Result<()> {
+    let startup = STARTUP.get().context("offline read grant is missing")?;
+    let grant = startup.grant.as_ref().context("offline read grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    let current = offline_read_context(startup.context.port, kind)?;
+    anyhow::ensure!(current == startup.context, "offline read selection or installation changed");
+    let account = if kind == respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight { None }
+        else { respire_protocol::metadata_control::offline_read_user(&current.profile)?
+            .map(|user| hash(user.as_bytes())) };
+    validate_control_binding(binding, &current, grant, account.as_deref())?;
+    if kind != respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight {
+        anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+            "authentication recovery interrupted the offline read");
+    }
+    verify_offline_read_authority(grant, &current, kind)
+}
+
+fn offline_read_context(port: u16, kind: respire_protocol::metadata_control::HostOfflineRead) -> Result<LaunchContext> {
+    use respire_protocol::metadata_control::metadata_status_path;
+    let root = metadata_status_path(&respire_app::service::main_data_dir())?;
+    let profile = metadata_status_path(&respire_app::service::data_dir())?;
+    let account_id = if kind == respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight { None }
+        else { respire_protocol::metadata_control::offline_read_user(&profile)?
+            .map(|user| hash(user.as_bytes())) }
+        .unwrap_or_else(|| hash(profile.display().to_string().as_bytes()));
+    let image_path = std::env::current_exe()?.canonicalize()?;
+    Ok(LaunchContext { root, profile, account_id,
+        sync_generation: respire_commands::rpc_worker::sync_generation(),
+        image_sha256: hash_file(&image_path)?, image_path, port })
+}
+
 pub(crate) fn authorize_auth_control(grant: LaunchGrant) -> Result<()> {
     anyhow::ensure!(grant.maintenance.is_some(), "auth control requires a paused maintenance owner");
     authorize_control_inner(grant, true, true)
+}
+
+/// This fixed read reports only journal state and cannot claim a maintenance owner.
+pub(crate) fn verify_login_recovery_status(
+    grant: &LaunchGrant,
+    params: &respire_protocol::host_control::HostLoginRecoveryParams,
+) -> Result<()> {
+    anyhow::ensure!(STARTUP.get().is_none() && grant.maintenance.is_none(),
+        "recovery status cannot inherit a serving or maintenance authorization");
+    respire_commands::runtime_policy::require_host("login recovery status")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::service::validate_client_config()?;
+    let context = current_context(grant.port)?;
+    validate_grant(grant, &context, grant.managed_id.is_some(), &grant.nonce, now_ms()?)?;
+    let registration = read_private_file(&context.root.join("runtime/autostart/registration.json"))?;
+    anyhow::ensure!(grant.registration_sha256 == registration.as_deref().map(hash)
+        && process_birth(grant.supervisor_pid)?.as_deref() == Some(grant.supervisor_birth.as_str()),
+        "recovery status registration or parent changed");
+    let account = match &params.identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(&params.binding, &context, grant, account)?;
+    respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, &params.identity)
 }
 
 pub(crate) fn authorize_account_completion(grant: LaunchGrant) -> Result<()> {
@@ -134,6 +209,33 @@ pub(crate) fn authorize_model_control(grant: LaunchGrant) -> Result<()> {
     anyhow::ensure!(!respire_app::service::off_mode(), "model preparation is unavailable while memory is off");
     respire_app::service::ensure_writable()?;
     respire_app::snapshot::ensure_no_incomplete_restore(&respire_app::service::data_dir())
+}
+
+pub(crate) fn authorize_metadata_control(grant: LaunchGrant) -> Result<()> {
+    anyhow::ensure!(grant.maintenance.is_some(), "metadata requires Paused maintenance ownership");
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+        "finish authentication recovery before metadata maintenance");
+    // Local-only sessions have no cloud user. Their exact bytes are checked by
+    // verify_metadata_control_binding rather than admitted as a business account.
+    authorize_control_inner(grant, true, true)?;
+    anyhow::ensure!(!respire_app::service::off_mode(), "restore normal service before changing metadata");
+    respire_app::service::ensure_writable()?;
+    respire_app::snapshot::ensure_no_incomplete_restore(&respire_app::service::data_dir())
+}
+
+pub(crate) fn verify_metadata_control_binding(binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::metadata_control::HostMetadataIdentity) -> Result<()> {
+    let startup = STARTUP.get().context("metadata grant is missing")?;
+    anyhow::ensure!(startup.auth_control && startup.paused_control, "metadata requires a Paused grant");
+    let grant = startup.grant.as_ref().context("metadata grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    anyhow::ensure!(current_context(startup.context.port)? == startup.context
+        && respire_protocol::metadata_control::metadata_identity(&startup.context.profile, hash)? == *identity,
+        "metadata selection or session identity changed");
+    validate_control_binding(binding, &startup.context, grant, identity.account_id.as_deref())?;
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+        "authentication recovery interrupted metadata maintenance");
+    verify_authority_for_mode(Some(grant), &startup.context, true)
 }
 
 fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Result<()> {
@@ -456,6 +558,24 @@ fn verify_authority(grant: Option<&LaunchGrant>, context: &LaunchContext) -> Res
 }
 
 fn verify_authority_for_mode(grant: Option<&LaunchGrant>, context: &LaunchContext, auth: bool) -> Result<()> {
+    verify_control_authority(grant, context, auth, None)
+}
+
+fn verify_offline_read_authority(
+    grant: &LaunchGrant, context: &LaunchContext,
+    kind: respire_protocol::metadata_control::HostOfflineRead,
+) -> Result<()> {
+    use respire_protocol::metadata_control::HostOfflineRead;
+    match kind {
+        HostOfflineRead::MetadataStatus | HostOfflineRead::AgentConfigRead | HostOfflineRead::SnapshotPreflight => {}
+    }
+    verify_control_authority(Some(grant), context, false, Some(kind))
+}
+
+fn verify_control_authority(
+    grant: Option<&LaunchGrant>, context: &LaunchContext, auth: bool,
+    offline_read: Option<respire_protocol::metadata_control::HostOfflineRead>,
+) -> Result<()> {
     let control = context.root.join("runtime").join("autostart");
     let registration_bytes = read_private_file(&control.join("registration.json"))?;
     let maintenance_bytes = read_private_file(&control.join("maintenance.json"))?;
@@ -478,7 +598,7 @@ fn verify_authority_for_mode(grant: Option<&LaunchGrant>, context: &LaunchContex
         .as_ref()
         .map(|bytes| parse_control(bytes))
         .transpose()?;
-    validate_control_for_mode(
+    validate_control_authority(
         grant,
         context,
         registration.as_ref(),
@@ -486,6 +606,7 @@ fn verify_authority_for_mode(grant: Option<&LaunchGrant>, context: &LaunchContex
         maintenance.as_ref(),
         maintenance_bytes.as_deref(),
         auth,
+        offline_read,
     )?;
     if let Some(grant) = grant {
         anyhow::ensure!(
@@ -524,6 +645,20 @@ fn validate_control_for_mode(
     maintenance: Option<&Value>,
     maintenance_bytes: Option<&[u8]>,
     auth: bool,
+) -> Result<()> {
+    validate_control_authority(grant, context, registration, registration_bytes,
+        maintenance, maintenance_bytes, auth, None)
+}
+
+fn validate_control_authority(
+    grant: Option<&LaunchGrant>,
+    context: &LaunchContext,
+    registration: Option<&Value>,
+    registration_bytes: Option<&[u8]>,
+    maintenance: Option<&Value>,
+    maintenance_bytes: Option<&[u8]>,
+    auth: bool,
+    offline_read: Option<respire_protocol::metadata_control::HostOfflineRead>,
 ) -> Result<()> {
     if let Some(grant) = grant {
         anyhow::ensure!(
@@ -564,7 +699,9 @@ fn validate_control_for_mode(
         } else {
             anyhow::ensure!(
                 (registration["enabled"] == false && registration["manually_stopped"] == false)
-                    || grant.is_some_and(|grant| grant.maintenance.is_some()),
+                    || grant.is_some_and(|grant| grant.maintenance.is_some())
+                    || (offline_read.is_some() && grant.is_some()
+                        && registration["manually_stopped"] == true),
                 "registered runtime requires its host lifecycle coordinator"
             );
         }

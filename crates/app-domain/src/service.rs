@@ -1487,7 +1487,8 @@ pub fn read_agent_config() -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+/// Validate Core-owned settings without publishing configuration or reloading it.
+pub fn validate_agent_runtime_setting(key: &str, value: &serde_json::Value) -> Result<()> {
     let key = key.trim();
     if key == "recall_fusion" {
         crate::recall_fusion::effective(value)?;
@@ -1497,6 +1498,12 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
         crate::read_heat::configured()?;
         crate::read_heat::require_support()?;
     }
+    Ok(())
+}
+
+pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+    let key = key.trim();
+    validate_agent_runtime_setting(key, value)?;
     if matches!(key, "memory_off" | "readonly") {
         let enabled = value.as_bool().ok_or_else(|| anyhow!("{key} must be true or false"))?;
         return set_workspace_mode(if !enabled { "normal" } else if key == "memory_off" { "off" } else { "readonly" });

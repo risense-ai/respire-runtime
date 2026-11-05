@@ -108,6 +108,109 @@ fn receive_and_execute(
     let request: RpcRequest = read_frame()
         .map_err(|_| ("invalid_request", "invalid host control RPC frame"))?;
     response.id = request.id.clone();
+    use respire_protocol::host_control::{HostLoginRecoveryResult, HostLoginRecoveryState,
+        HOST_LOGIN_RECOVERY_METHOD, HOST_LOGIN_RECOVERY_STATUS_METHOD};
+    if [HOST_LOGIN_RECOVERY_METHOD, HOST_LOGIN_RECOVERY_STATUS_METHOD].contains(&request.method.as_str()) {
+        let params = crate::auth_control::recovery_request(&request)
+            .map_err(|_| ("invalid_request", "invalid fixed login recovery request"))?;
+        response.envelope = Some(ResultEnvelope::new("login-recovery", Status::Fail,
+            serde_json::json!({}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "login recovery parent watch failed"))?;
+        let recovered = if request.method == HOST_LOGIN_RECOVERY_STATUS_METHOD {
+            crate::startup_identity::verify_login_recovery_status(&grant, &params)
+                .map_err(|_| ("unauthorized", "login recovery status authorization failed"))?;
+            false
+        } else {
+            crate::startup_identity::authorize_auth_control(grant.clone())
+                .map_err(|_| ("unauthorized", "login recovery maintenance authorization failed"))?;
+            let ownership = crate::startup_identity::acquire_auth_ownership(&params.binding, &params.identity)
+                .map_err(|_| ("auth_ownership_unavailable", "login recovery ownership unavailable"))?;
+            crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
+                .map_err(|_| ("scope_mismatch", "login recovery binding changed"))?;
+            ownership.recover_legacy(&params.identity)
+                .map_err(|_| ("auth_recovery_required", "login recovery incomplete; retain maintenance and query the original operation"))?
+        };
+        let state = respire_app::login_transaction::recovery_state()
+            .map_err(|_| ("auth_recovery_required", "invalid login recovery journal; retain it for recovery"))?;
+        if request.method == HOST_LOGIN_RECOVERY_STATUS_METHOD {
+            crate::startup_identity::verify_login_recovery_status(&grant, &params)
+                .map_err(|_| ("scope_mismatch", "login recovery status binding changed"))?;
+        } else if state != HostLoginRecoveryState::Clear {
+            return Err(("auth_recovery_required", "login recovery did not clear the journal"));
+        }
+        *control_ready = true;
+        response.envelope = Some(ResultEnvelope::new("login-recovery", Status::Ok,
+            serde_json::to_value(HostLoginRecoveryResult { state, recovered })
+                .map_err(|_| ("auth_recovery_required", "login recovery result encoding failed"))?,
+            Vec::new()));
+        response.ok = true;
+        response.exit = 0;
+        return Ok(());
+    }
+    use respire_protocol::metadata_control::{HostMetadataOutcome, HOST_METADATA_ENABLE_METHOD,
+        HOST_METADATA_DISABLE_METHOD, HOST_METADATA_RESULT_METHOD, HOST_METADATA_STATUS_METHOD,
+        HOST_AGENT_CONFIG_READ_METHOD, HOST_SNAPSHOT_PREFLIGHT_METHOD};
+    if [HOST_METADATA_STATUS_METHOD, HOST_AGENT_CONFIG_READ_METHOD, HOST_SNAPSHOT_PREFLIGHT_METHOD]
+        .contains(&request.method.as_str()) {
+        let read = crate::metadata_control::OfflineReadRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid fixed offline configuration read"))?;
+        response.envelope = Some(ResultEnvelope::new(read.kind.command(), Status::Fail,
+            serde_json::json!({}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_offline_read(grant, read.kind)
+            .map_err(|_| ("unauthorized", "offline read launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "offline read parent watch failed"))?;
+        crate::startup_identity::verify_offline_read_binding(read.binding(), read.kind)
+            .map_err(|_| ("scope_mismatch", "offline read binding mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "offline read deadline unavailable"))?;
+        let envelope = read.execute().map_err(|_| {
+            if read.kind == respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight {
+                ("snapshot_preflight_blocked", "snapshot validation failed; inspect snapshot recovery before continuing")
+            } else { ("offline_read_unavailable", "offline configuration read failed") }
+        })?;
+        crate::startup_identity::verify_offline_read_binding(read.binding(), read.kind)
+            .map_err(|_| ("scope_mismatch", "offline read binding changed"))?;
+        *control_ready = true;
+        response.ok = true;
+        response.exit = 0;
+        response.envelope = Some(envelope);
+        return Ok(());
+    }
+    if [HOST_METADATA_ENABLE_METHOD, HOST_METADATA_DISABLE_METHOD, HOST_METADATA_RESULT_METHOD]
+        .contains(&request.method.as_str()) {
+        let metadata = crate::metadata_control::MetadataChange::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private metadata request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("metadata-control", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_metadata_control(grant)
+            .map_err(|_| ("unauthorized", "private metadata maintenance authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private metadata parent watch failed"))?;
+        crate::startup_identity::verify_metadata_control_binding(metadata.binding(), metadata.identity())
+            .map_err(|_| ("scope_mismatch", "private metadata binding mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private metadata deadline unavailable"))?;
+        let result = metadata.execute()
+            .map_err(|_| ("metadata_outcome_unknown", "query the original metadata operation before retrying"))?;
+        crate::startup_identity::verify_metadata_control_binding(metadata.binding(), metadata.identity())
+            .map_err(|_| ("metadata_outcome_unknown", "metadata completion binding changed"))?;
+        *control_ready = true;
+        response.ok = result.outcome == HostMetadataOutcome::Committed;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("metadata_outcome_unknown".into()); }
+        response.envelope = Some(ResultEnvelope::new("metadata-control",
+            if response.ok { Status::Ok } else { Status::Fail },
+            serde_json::to_value(result).map_err(|_| ("metadata_outcome_unknown", "metadata receipt encoding failed"))?,
+            Vec::new()));
+        return Ok(());
+    }
     use respire_protocol::migration_control::{HostMigrationOutcome,
         HOST_MIGRATION_PROFILE_METHOD, HOST_MIGRATION_RESULT_METHOD};
     if [HOST_MIGRATION_PROFILE_METHOD, HOST_MIGRATION_RESULT_METHOD].contains(&request.method.as_str()) {
@@ -205,6 +308,77 @@ fn receive_and_execute(
         *control_ready = true;
         return Ok(());
     }
+    use respire_protocol::space_control::{HostSpaceOutcome, HOST_SPACE_INVITE_METHOD,
+        HOST_SPACE_JOIN_METHOD, HOST_SPACE_KICK_METHOD, HOST_SPACE_RESULT_METHOD};
+    if [HOST_SPACE_INVITE_METHOD, HOST_SPACE_JOIN_METHOD, HOST_SPACE_KICK_METHOD, HOST_SPACE_RESULT_METHOD]
+        .contains(&request.method.as_str()) {
+        let space = crate::space_control::SpaceRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private space request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("space-control", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private space launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private space parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(space.binding(),space.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private space ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(space.binding(),space.identity())
+            .map_err(|_| ("scope_mismatch", "private space identity mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private space deadline unavailable"))?;
+        let result = space.execute(&request,&ownership)
+            .map_err(|_| ("space_outcome_unknown", "query the original space operation before retrying"))?;
+        crate::startup_identity::verify_auth_control_binding(space.binding(),space.identity())
+            .map_err(|_| ("space_outcome_unknown", "space source identity changed"))?;
+        *control_ready = true;
+        response.ok = matches!(result.outcome,HostSpaceOutcome::Committed | HostSpaceOutcome::Pending);
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some(if result.outcome == HostSpaceOutcome::Rejected {
+            "space_rejected" } else { "space_outcome_unknown" }.into()); }
+        let status = match result.outcome { HostSpaceOutcome::Committed => Status::Ok,
+            HostSpaceOutcome::Pending => Status::Pending, HostSpaceOutcome::Unknown | HostSpaceOutcome::Rejected => Status::Fail };
+        // Never publish the secret-bearing result through shared progress or logs.
+        response.envelope = Some(ResultEnvelope::new("space-control",status,
+            serde_json::to_value(result).map_err(|_| ("space_outcome_unknown", "space receipt encoding failed"))?,Vec::new()));
+        return Ok(());
+    }
+    use respire_protocol::profile_maintenance::{HostProfileRemoveOutcome,
+        HOST_PROFILE_REMOVE_METHOD, HOST_PROFILE_RESULT_METHOD};
+    if [HOST_PROFILE_REMOVE_METHOD, HOST_PROFILE_RESULT_METHOD].contains(&request.method.as_str()) {
+        let profile = crate::profile_maintenance::ProfileRemoveRequest::parse(&request)
+            .map_err(|_| ("invalid_request", "invalid private profile removal request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("profile-control", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "private profile launch authorization failed"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "private profile parent watch failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(profile.binding(), profile.identity())
+            .map_err(|_| ("auth_ownership_unavailable", "private profile ownership unavailable"))?;
+        crate::startup_identity::verify_auth_control_binding(profile.binding(), profile.identity())
+            .map_err(|_| ("scope_mismatch", "private profile identity mismatch"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "private profile deadline unavailable"))?;
+        let result = profile.execute(&ownership)
+            .map_err(|_| ("profile_remove_outcome_unknown", "query the original profile operation before retrying"))?;
+        crate::startup_identity::verify_auth_control_binding(profile.binding(), profile.identity())
+            .map_err(|_| ("profile_remove_outcome_unknown", "profile source identity changed"))?;
+        *control_ready = true;
+        response.ok = result.outcome == HostProfileRemoveOutcome::Committed;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("profile_remove_outcome_unknown".into()); }
+        response.envelope = Some(ResultEnvelope::new("profile-control",
+            if response.ok { Status::Ok } else { Status::Fail },
+            serde_json::to_value(result)
+                .map_err(|_| ("profile_remove_outcome_unknown", "profile receipt encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
     use respire_protocol::identity_write_control::{HostIdentityWriteOutcome,
         HOST_IDENTITY_LOGOUT_METHOD, HOST_IDENTITY_SESSION_REVOKE_METHOD,
         HOST_IDENTITY_WRITE_RESULT_METHOD};
@@ -243,6 +417,30 @@ fn receive_and_execute(
         response.envelope = Some(ResultEnvelope::new("identity-write", status,
             serde_json::to_value(result)
                 .map_err(|_| ("identity_write_outcome_unknown", "identity write receipt encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
+    if [respire_protocol::config_control::AGENT_CONFIG_SET_METHOD,
+        respire_protocol::config_control::AGENT_CONFIG_RESULT_METHOD].contains(&request.method.as_str()) {
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("agent-config-control", Status::Fail,
+            serde_json::json!({"outcome":"unknown"}), Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "agent config parent watch failed"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "agent config deadline unavailable"))?;
+        let envelope = crate::config_control::execute_agent_config(grant, &request)
+            .map_err(|_| ("agent_config_outcome_unknown", "query the original agent config operation; do not replay"))?;
+        let receipt: respire_protocol::config_control::AgentConfigReceipt = serde_json::from_value(envelope.summary.clone())
+            .map_err(|_| ("agent_config_outcome_unknown", "invalid agent config receipt"))?;
+        response.data_dir = Some(receipt.review.profile.to_str()
+            .ok_or(("agent_config_outcome_unknown", "agent config profile is not UTF-8"))?.to_owned());
+        *control_ready = true;
+        response.ok = receipt.outcome != respire_protocol::config_control::AgentConfigOutcome::Unknown;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("agent_config_outcome_unknown".into()); }
+        response.envelope = Some(envelope);
         return Ok(());
     }
     if request.method == respire_protocol::config_control::CONFIG_VALIDATE_METHOD {
