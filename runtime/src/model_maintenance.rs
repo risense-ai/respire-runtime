@@ -221,6 +221,10 @@ pub(crate) fn execute(
     crate::startup_identity::authorize_model_control(grant)?;
     respire_spawn::watch_control_parent()?;
     crate::startup_identity::verify_control_binding(&params.binding)?;
+    if params.phase == ModelMaintenancePhase::Verify {
+        respire_commands::model_install::enable_backend_probe_host(
+            respire_commands::model_install::BackendProbeHost::PrivateControl);
+    }
     let root = &params.binding.installation_root;
     let profile = &params.binding.profile;
     let sdk_root = respire_app::env::var_os("RSRS_DATA_DIR")

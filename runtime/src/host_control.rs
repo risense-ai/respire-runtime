@@ -670,6 +670,8 @@ fn receive_and_execute(
         response.envelope = Some(ResultEnvelope::new(command, Status::Pending, serde_json::json!({}), Vec::new()));
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
         if model_verify {
+            respire_commands::model_install::enable_backend_probe_host(
+                respire_commands::model_install::BackendProbeHost::PrivateControl);
             // Only the authenticated Paused operation can extend the initial input deadline.
             events.send(ControlEvent::LongControlStarted)
                 .map_err(|_| ("control_unavailable", "model verification controller unavailable"))?;
