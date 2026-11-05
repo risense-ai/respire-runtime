@@ -30,7 +30,7 @@ use respire_protocol::{RuntimeCompat, RuntimeIdentity};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// CLI compatibility window for this runtime train (runtime-pin.json aligns).
-const MIN_CLI: &str = "1.0.20";
+const MIN_CLI: &str = "1.0.21-dev.5";
 const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
