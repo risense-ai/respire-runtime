@@ -12,7 +12,10 @@ mod confinement;
 pub mod durable;
 pub use confinement::is_restricted;
 mod probe;
-pub use probe::{spawn_probe_helper, watch_probe_parent, ProbeChild};
+pub use probe::{
+    spawn_control_helper, spawn_probe_helper, verify_control_parent, watch_control_parent,
+    watch_probe_parent, ProbeChild,
+};
 
 #[cfg(windows)]
 mod supervisor_job;

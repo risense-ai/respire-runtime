@@ -8,6 +8,13 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod host_control;
+pub use host_control::{
+    ControlBinding, HostControlLaunchGrant, HostControlMaintenanceBinding,
+    HostControlOperation, HostControlParams,
+    HOST_CONTROL_MAX_FRAME_BYTES, HOST_CONTROL_SCHEMA_V,
+};
+
 pub mod metadata;
 pub use metadata::{
     Artifact, ConfirmedBy, ConfirmerKind, Evidence, ExtraFields, MemoryMeta, MetadataError,

@@ -17,6 +17,7 @@
 //! and then removed from this process's environment.
 
 mod startup_identity;
+mod host_control;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -89,6 +90,13 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    if std::env::args().nth(1).as_deref() == Some("--host-control-internal") {
+        anyhow::ensure!(
+            boot_token.is_none() && std::env::args_os().count() == 2,
+            "private host control accepts no boot token or public runtime arguments"
+        );
+        return host_control::run();
+    }
     if std::env::args().nth(1).as_deref() == Some("--backend-load-probe-internal") {
         anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
             "private backend probe accepts no boot token or public runtime arguments");

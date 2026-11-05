@@ -1,6 +1,8 @@
 //! One-shot launch grants. Public instance IDs cannot replay consumed grants.
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use respire_protocol::HostControlLaunchGrant as LaunchGrant;
+#[cfg(test)]
+use respire_protocol::HostControlMaintenanceBinding as MaintenanceBinding;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -10,40 +12,6 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static STARTUP: OnceLock<Startup> = OnceLock::new();
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LaunchGrant {
-    schema_version: u32,
-    protocol_version: u32,
-    nonce: String,
-    instance_id: String,
-    installation_root: PathBuf,
-    installation_id: String,
-    profile: PathBuf,
-    account_id: String,
-    sync_generation: usize,
-    image_path: PathBuf,
-    image_sha256: String,
-    supervisor_pid: u32,
-    supervisor_birth: String,
-    managed_id: Option<String>,
-    registration_sha256: Option<String>,
-    maintenance: Option<MaintenanceBinding>,
-    port: u16,
-    issued_at_ms: u64,
-    expires_at_ms: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct MaintenanceBinding {
-    marker_sha256: String,
-    coordinator_id: String,
-    controller_pid: u32,
-    controller_birth: String,
-    issuer_cli_version: String,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LaunchContext {
@@ -108,6 +76,76 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
 
 pub(crate) fn managed_id() -> Option<&'static str> {
     STARTUP.get()?.grant.as_ref()?.managed_id.as_deref()
+}
+
+/// An owned inherited channel is the capability, not the serialized identity.
+/// Do not consume a serving grant file or create runtime state for a read probe.
+pub(crate) fn authorize_control(grant: LaunchGrant) -> Result<()> {
+    anyhow::ensure!(STARTUP.get().is_none(), "runtime control grant was already consumed");
+    respire_commands::runtime_policy::require_host("offline memory revision")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::service::validate_client_config()?;
+    let resolved_profile = respire_app::service::data_dir();
+    let context = current_context(grant.port)?;
+    anyhow::ensure!(
+        resolved_profile.canonicalize()? == context.profile,
+        "runtime control profile changed during authorization"
+    );
+    validate_grant(
+        &grant,
+        &context,
+        grant.managed_id.is_some(),
+        &grant.nonce,
+        now_ms()?,
+    )?;
+    verify_authority(Some(&grant), &context)?;
+    // Strict parsing must precede accepting the legacy account/path hash.
+    control_account(&context.profile)?;
+    // Pin the exact resolved spelling used by memory_revision before it opens DB.
+    respire_app::service::install_runtime_profile(resolved_profile);
+    STARTUP.set(Startup { context, grant: Some(grant) })
+        .map_err(|_| anyhow::anyhow!("runtime control grant was already consumed"))?;
+    Ok(())
+}
+
+pub(crate) fn verify_control_binding(binding: &respire_protocol::ControlBinding) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    let account = control_account(&startup.context.profile)?;
+    validate_control_binding(binding, &startup.context, grant, account.as_deref())?;
+    verify_managed_boot()
+}
+
+fn validate_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    context: &LaunchContext,
+    grant: &LaunchGrant,
+    account_id: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(
+        binding.installation_root == context.root
+            && binding.profile == context.profile
+            && binding.launch_id == grant.instance_id
+            && binding.expected_account_id.as_deref() == account_id,
+        "runtime control binding does not match the consumed grant or account"
+    );
+    Ok(())
+}
+
+fn control_account(profile: &Path) -> Result<Option<String>> {
+    let Some(bytes) = read_private_file(&profile.join("session.json"))? else {
+        return Ok(None);
+    };
+    let session: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid control session JSON"))?;
+    anyhow::ensure!(session.is_object(), "control session must be an object");
+    match session.get("user") {
+        None => Ok(None),
+        Some(Value::String(user)) if user.is_empty() => Ok(None),
+        Some(Value::String(user)) => Ok(Some(hash(user.as_bytes()))),
+        _ => anyhow::bail!("control session user must be a string"),
+    }
 }
 
 pub(crate) fn verify_managed_boot() -> Result<()> {
@@ -575,6 +613,51 @@ mod tests {
         assert!(validate_grant(&grant, &context, true, &grant.nonce, 2000).is_err());
         assert!(validate_nonce("../../outside").is_err());
         assert!(validate_nonce("12345678-1234-1234-8234-123456789abc").is_err());
+
+        let mut binding = respire_protocol::ControlBinding {
+            installation_root: context.root.clone(),
+            profile: context.profile.clone(),
+            launch_id: grant.instance_id.clone(),
+            expected_account_id: Some(context.account_id.clone()),
+        };
+        validate_control_binding(&binding, &context, &grant, Some(&context.account_id))?;
+        let params = respire_protocol::HostControlParams {
+            schema_version: respire_protocol::HOST_CONTROL_SCHEMA_V,
+            binding: binding.clone(),
+        };
+        let mut request: respire_protocol::RpcRequest = serde_json::from_value(json!({
+            "v": respire_commands::rpc_worker::PROTOCOL_V,
+            "id": grant.instance_id,
+            "method": respire_protocol::HostControlOperation::MemoryRevision.method(),
+            "args": [serde_json::to_string(&params)?],
+        }))?;
+        assert!(request.scope.is_none());
+        assert!(crate::host_control::validate_request(&request).is_ok());
+        request.scope = Some(respire_protocol::RuntimeRequestScope {
+            account_id: context.account_id.clone(),
+            instance_id: grant.instance_id.clone(),
+            generation: 1,
+        });
+        assert!(crate::host_control::validate_request(&request).is_err());
+        let value = serde_json::to_value(&binding)?;
+        for (field, replacement) in [
+            ("installation_root", json!("other-root")),
+            ("profile", json!("other-profile")),
+            ("launch_id", json!("other-launch")),
+            ("expected_account_id", json!("other-account")),
+            ("expected_account_id", Value::Null),
+        ] {
+            let mut changed = value.clone();
+            changed[field] = replacement;
+            let changed = serde_json::from_value(changed)?;
+            assert!(
+                validate_control_binding(&changed, &context, &grant, Some(&context.account_id)).is_err(),
+                "accepted changed control binding {field}"
+            );
+        }
+        binding.expected_account_id = None;
+        validate_control_binding(&binding, &context, &grant, None)?;
+        assert!(validate_control_binding(&binding, &context, &grant, Some(&context.account_id)).is_err());
         Ok(())
     }
 
