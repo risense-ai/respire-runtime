@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://respire.rs/contracts/runtime-control/private-host-control.schema.json",
   "title": "Inherited auth continuation, model preparation, snapshot maintenance and private secret fixtures; fixed identity writes, super-reset and model maintenance; frozen fivekeys/completion and local profile migration",
-  "description": "Frozen model_control.rs DTOs use HostModelParams and ModelPreparation. x-methods selects decoded args/result validation. Selection SHA-256 is opaque: fixtures bind request to response, never claim authoritative recomputation or native execution.",
+  "description": "Frozen model_control.rs DTOs use HostModelParams and ModelPreparation. x-methods selects decoded args/result validation. Selection SHA-256 is opaque: fixtures bind request to response, never claim authoritative recomputation or native execution. Profile and legacy recovery contexts are fixture-only evidence anchors, not grants, journals, or proof of native filesystem exclusion. Recovery methods prohibit operation fields even when legacy recovery has local effects.",
   "type": "object",
   "required": [
     "fixture_type",
@@ -717,7 +717,11 @@
             "control.key.fivekeys",
             "control.key.complete",
             "control.migration.profile",
-            "control.migration.result"
+            "control.migration.result",
+            "control.profile.remove",
+            "control.profile.result",
+            "control.auth.recovery_status",
+            "control.auth.recover_legacy"
           ]
         },
         "args": {
@@ -812,7 +816,16 @@
           "$ref": "#/$defs/migrationContext"
         },
         "progress": {},
-        "ledger": {}
+        "ledger": {},
+        "profile_context": {
+          "$ref": "#/$defs/profileContext"
+        },
+        "recovery_context": {
+          "$ref": "#/$defs/recoveryContext"
+        },
+        "private_rpc_response": {
+          "$ref": "#/$defs/profileRecoveryResponse"
+        }
       },
       "additionalProperties": false
     },
@@ -3337,6 +3350,536 @@
         }
       },
       "additionalProperties": false
+    },
+    "profileOperation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "not": {
+            "const": "main"
+          }
+        },
+        "target_identity": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "key",
+        "installation_root",
+        "profile",
+        "identity",
+        "fingerprint",
+        "name",
+        "target_identity"
+      ],
+      "additionalProperties": false
+    },
+    "profileParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "original": {
+          "$ref": "#/$defs/profileOperation"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "identity",
+        "original"
+      ],
+      "additionalProperties": false
+    },
+    "profileResult": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "outcome": {
+          "enum": [
+            "committed",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "fingerprint",
+        "identity",
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "recoveryParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "identity"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "additionalProperties": false
+    },
+    "recoveryState": {
+      "enum": [
+        "clear",
+        "legacy_pending",
+        "operation_pending"
+      ]
+    },
+    "recoveryResult": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/recoveryState"
+        },
+        "recovered": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "recovered"
+      ],
+      "additionalProperties": false
+    },
+    "profileRecoveryAuthority": {
+      "type": "object",
+      "properties": {
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "grant_maintenance": {
+          "enum": [
+            "none",
+            "Paused",
+            "Verified"
+          ]
+        },
+        "serving_authorized": {
+          "type": "boolean"
+        },
+        "parent_verified": {
+          "type": "boolean"
+        },
+        "binding_verified_before": {
+          "type": "boolean"
+        },
+        "binding_verified_after": {
+          "type": "boolean"
+        },
+        "owns_auth": {
+          "type": "boolean"
+        },
+        "launch_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "installation_root",
+        "profile",
+        "identity",
+        "grant_maintenance",
+        "serving_authorized",
+        "parent_verified",
+        "binding_verified_before",
+        "binding_verified_after",
+        "owns_auth",
+        "launch_id"
+      ],
+      "additionalProperties": false
+    },
+    "profileHistoryEntry": {
+      "type": "object",
+      "properties": {
+        "original": {
+          "$ref": "#/$defs/profileOperation"
+        },
+        "phase": {
+          "enum": [
+            "prepared",
+            "committed"
+          ]
+        }
+      },
+      "required": [
+        "original",
+        "phase"
+      ],
+      "additionalProperties": false
+    },
+    "profileContext": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/profileRecoveryAuthority"
+        },
+        "fingerprint_preimage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/profileHistoryEntry"
+          }
+        },
+        "entry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "delete_attempted": {
+          "type": "boolean"
+        },
+        "target_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "snapshot_clear": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "authority",
+        "fingerprint_preimage",
+        "records",
+        "entry_count",
+        "active",
+        "delete_attempted",
+        "target_path",
+        "target_identity",
+        "snapshot_clear"
+      ],
+      "additionalProperties": false
+    },
+    "recoveryContext": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/profileRecoveryAuthority"
+        },
+        "journal_state": {
+          "$ref": "#/$defs/recoveryState"
+        },
+        "recovery_attempted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "authority",
+        "journal_state",
+        "recovery_attempted"
+      ],
+      "additionalProperties": false
+    },
+    "profileEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "profile-control"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/profileResult"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "recoveryEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "login-recovery"
+        },
+        "status": {
+          "const": "ok"
+        },
+        "summary": {
+          "$ref": "#/$defs/recoveryResult"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "profileRecoveryResponse": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "exit": {
+          "enum": [
+            0,
+            2
+          ]
+        },
+        "bin": {
+          "const": "rsrs-runtime"
+        },
+        "envelope": {
+          "type": "object"
+        },
+        "error": {
+          "type": "null"
+        },
+        "code": {
+          "enum": [
+            null,
+            "profile_remove_outcome_unknown"
+          ]
+        },
+        "web_url": {
+          "type": "null"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "data_dir": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "ok",
+        "exit",
+        "bin",
+        "envelope",
+        "error",
+        "code",
+        "web_url",
+        "pid",
+        "data_dir"
+      ],
+      "additionalProperties": false
     }
   },
   "x-methods": {
@@ -3464,6 +4007,26 @@
       "params": "migrationParams",
       "result": "migrationResult",
       "mutable": true
+    },
+    "control.profile.remove": {
+      "params": "profileParams",
+      "result": "profileResult",
+      "mutable": true
+    },
+    "control.profile.result": {
+      "params": "profileParams",
+      "result": "profileResult",
+      "mutable": true
+    },
+    "control.auth.recovery_status": {
+      "params": "recoveryParams",
+      "result": "recoveryResult",
+      "mutable": false
+    },
+    "control.auth.recover_legacy": {
+      "params": "recoveryParams",
+      "result": "recoveryResult",
+      "mutable": false
     }
   },
   "x-model-envelope": "modelEnvelope"

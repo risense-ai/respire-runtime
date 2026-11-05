@@ -1,0 +1,179 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "error_code": "profile_history_conflict",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "12345678-1234-4234-8234-123456789abc",
+      "method": "control.profile.remove",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"original\":{\"schema_version\":1,\"operation_id\":\"12345678-1234-4234-8234-123456789abc\",\"key\":\"12345678-1234-4234-8234-123456789abc\",\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"name\":\"target\",\"target_identity\":{\"kind\":\"absent\"},\"fingerprint\":\"820966080c4b0f03307447c21e8a82b8ce7fd9821f0625376bd028a540fbafdd\"}}"
+      ]
+    },
+    "finish_maintenance": true,
+    "result": {
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "fingerprint": "820966080c4b0f03307447c21e8a82b8ce7fd9821f0625376bd028a540fbafdd",
+      "identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "outcome": "committed"
+    },
+    "private_response": {
+      "command": "profile-control",
+      "status": "ok",
+      "summary": {
+        "operation_id": "12345678-1234-4234-8234-123456789abc",
+        "fingerprint": "820966080c4b0f03307447c21e8a82b8ce7fd9821f0625376bd028a540fbafdd",
+        "identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outcome": "committed"
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "profile_context": {
+      "authority": {
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "grant_maintenance": "Paused",
+        "serving_authorized": false,
+        "parent_verified": true,
+        "binding_verified_before": true,
+        "binding_verified_after": true,
+        "owns_auth": true,
+        "launch_id": "32345678-1234-4234-a234-123456789abc"
+      },
+      "fingerprint_preimage": "[\"control.profile.remove\",1,\"/isolated/root\",\"/isolated/root/accounts/source\",{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"target\",{\"kind\":\"absent\"}]",
+      "records": [
+        {
+          "original": {
+            "schema_version": 1,
+            "operation_id": "12345678-1234-4234-8234-123456789abc",
+            "key": "12345678-1234-4234-8234-123456789abc",
+            "installation_root": "/isolated/root",
+            "profile": "/isolated/root/accounts/source",
+            "identity": {
+              "kind": "bound",
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "name": "target",
+            "target_identity": {
+              "kind": "bound",
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "fingerprint": "9ba0a414eb47a447bfd910bd8977118ff286fe265d28024a653ce5e921a4f10a"
+          },
+          "phase": "committed"
+        },
+        {
+          "original": {
+            "schema_version": 1,
+            "operation_id": "42345678-1234-4234-9234-123456789abc",
+            "key": "42345678-1234-4234-9234-123456789abc",
+            "installation_root": "/isolated/root",
+            "profile": "/isolated/root/accounts/source",
+            "identity": {
+              "kind": "bound",
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "name": "second",
+            "target_identity": {
+              "kind": "bound",
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "fingerprint": "4ae828dc50b7819a6af2b0a2dc5a650f949958b7eb1c433ae85ec0b546ab38ca"
+          },
+          "phase": "committed"
+        }
+      ],
+      "entry_count": 2,
+      "active": false,
+      "delete_attempted": false,
+      "target_path": "/isolated/root/accounts/target",
+      "target_identity": {
+        "kind": "bound",
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "snapshot_clear": true
+    },
+    "private_rpc_response": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "ok": true,
+      "exit": 0,
+      "bin": "rsrs-runtime",
+      "envelope": {
+        "command": "profile-control",
+        "status": "ok",
+        "summary": {
+          "operation_id": "12345678-1234-4234-8234-123456789abc",
+          "fingerprint": "820966080c4b0f03307447c21e8a82b8ce7fd9821f0625376bd028a540fbafdd",
+          "identity": {
+            "kind": "bound",
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "committed"
+        },
+        "items": [
+          {
+            "name": "control_ready",
+            "status": "ok",
+            "value": "true"
+          },
+          {
+            "name": "store_ready",
+            "status": "skip",
+            "value": "false"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": 1234,
+      "data_dir": null,
+      "operation_id": "12345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "12345678-1234-4234-8234-123456789abc"
+    }
+  }
+}
