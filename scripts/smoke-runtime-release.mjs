@@ -57,6 +57,34 @@ function assertProtocol(health) {
   assert.equal(health.v, 1, 'Runtime wire protocol differs from the frozen contract');
   assert.deepEqual(health.protocol_range, {minimum: 1, maximum: 1});
 }
+function modelRequest(health, phase, args) {
+  return {v: 1, id: `smoke-model-${phase}`, operation_id: `smoke-model-${phase}-operation`,
+    idempotency_key: `smoke-model-${phase}-key`,
+    scope: Object.fromEntries(['account_id', 'instance_id', 'generation'].map(key => [key, health[key]])),
+    method: 'cli.exec', args: ['--json', 'model', 'engine', ...args]};
+}
+function assertModelResponse(reply, request, health) {
+  assert.equal(reply.v, 1);
+  for (const key of ['id', 'operation_id', 'idempotency_key', 'scope']) {
+    assert.deepEqual(reply[key], request[key], `model response differs: ${key}`);
+  }
+  assert.equal(reply.pid, health.pid);
+  assert.equal(reply.ok, true);
+  assert.equal(reply.exit, 0);
+  assert.equal(reply.error, null);
+  assert.equal(reply.code, null);
+  assert.equal(reply.envelope?.command, 'model');
+  assert.equal(reply.envelope?.status, 'ok');
+  assert.deepEqual(reply.envelope?.errors, []);
+  const summary = reply.envelope.summary;
+  assert.equal(summary.engine, 'cpu');
+  assert.equal(summary.model, 'quantized');
+  assert.equal(summary.active_selection, null);
+  assert.ok(Array.isArray(summary.variants));
+  assert.equal(summary.variants.filter(variant => variant.name === 'quantized').length, 1);
+  assert.ok(summary.variants.every(variant => variant.state === 'baseline_missing'));
+  return summary;
+}
 if (process.argv.includes('--self-check')) {
   const windowsImage = 'D:\\payload\\rsrs-runtime.exe';
   assertSamePath('\\\\?\\D:\\payload\\rsrs-runtime.exe', windowsImage, 'win32');
@@ -106,6 +134,24 @@ if (process.argv.includes('--self-check')) {
   assert.throws(() => assertDrained({...receipt, protocol_version: 2}, {...health, v: 2}, 'o'));
   assert.throws(() => assertDrained({...receipt, protocol_version: undefined}, {...health, v: undefined}, 'o'));
   assert.throws(() => assertProtocol({...health, protocol_range: {minimum: 1, maximum: 2}}));
+  const request = modelRequest(health, 'save', ['cpu', '--model', 'quantized']);
+  assert.deepEqual(request, {v: 1, id: 'smoke-model-save', operation_id: 'smoke-model-save-operation',
+    idempotency_key: 'smoke-model-save-key', scope: {account_id: 'a', instance_id: 'n', generation: 1},
+    method: 'cli.exec', args: ['--json', 'model', 'engine', 'cpu', '--model', 'quantized']});
+  assert.deepEqual(modelRequest(health, 'read', []).args, ['--json', 'model', 'engine']);
+  const reply = {...request, pid: health.pid, ok: true, exit: 0, error: null, code: null,
+    envelope: {command: 'model', status: 'ok', errors: [], summary: {engine: 'cpu', model: 'quantized',
+      active_selection: null, variants: [{name: 'quantized', state: 'baseline_missing'}]}}};
+  assertModelResponse(reply, request, health);
+  for (const invalid of [{v: 2}, {id: 'foreign'}, {operation_id: 'foreign'}, {idempotency_key: 'foreign'},
+    {scope: {...request.scope, generation: 2}}, {pid: 3}, {ok: false}, {exit: 1}, {error: 'failed'}, {code: 'failed'}]) {
+    assert.throws(() => assertModelResponse({...reply, ...invalid}, request, health));
+  }
+  for (const invalid of [{command: 'status'}, {status: 'fail'}, {errors: ['failed']},
+    ...[{engine: 'gpu'}, {model: 'fp16'}, {active_selection: {}}, {variants: []},
+      {variants: [{name: 'quantized', state: 'ready'}]}].map(value => ({summary: {...reply.envelope.summary, ...value}}))]) {
+    assert.throws(() => assertModelResponse({...reply, envelope: {...reply.envelope, ...invalid}}, request, health));
+  }
   console.log('Smoke validator self-check passed; no binary, archive or endpoint was accessed.');
   process.exit(0);
 }
@@ -142,15 +188,16 @@ assert.equal(digest(readFileSync(join(assets, metadata.archive_file))), metadata
 const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'respire-runtime-smoke-'));
 const temporaryRelative = relative(normalizedPath(realpathSync(process.env.RUNNER_TEMP)), normalizedPath(realpathSync(root)));
 assert.ok(temporaryRelative && !isAbsolute(temporaryRelative) && temporaryRelative.split(sep).every(part => part !== '..'));
-const payload = join(root, 'payload'), dataDir = join(root, 'data');
+const payload = join(root, 'payload'), dataDir = join(root, 'data'), modelDir = join(root, 'empty-models');
 mkdirSync(payload);
 mkdirSync(dataDir);
+mkdirSync(modelDir);
 let child, exitState, spawnError;
 const reportPath = resolve('smoke-report', `runtime-smoke-${target}.json`);
 const report = {target, version, source_commit: metadata.source_commit,
   run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
   archive_sha256: metadata.archive_sha256, binary_sha256: metadata.binary_sha256,
-  coverage: ['complete-release-payload', 'os-bound-startup-health', 'normal-stop-final-receipt'],
+  coverage: ['complete-release-payload', 'os-bound-startup-health', 'scoped-model-settings-no-assets', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
 try {
   const tar = archiveTool(process.platform, process.env.SystemRoot);
@@ -203,7 +250,8 @@ try {
   chmodSync(executable, 0o755);
   const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^RSRS_/i.test(key) && !/^(GH_TOKEN|GITHUB_TOKEN|RSRS_CORE_SDK_DIR|ONEMEMORY_CORE_SDK_DIR|RESPIRE_CORE_SDK_DIR)$/i.test(key)));
-  Object.assign(environment, {RSRS_DATA_DIR: dataDir, RSRS_BIN_DIR: payload, RSRS_CLIENT_ONLY: '0', RSRS_NO_AUTOSTART: '0'});
+  Object.assign(environment, {RSRS_DATA_DIR: dataDir, RSRS_M3_DIR: modelDir, RSRS_BIN_DIR: payload,
+    RSRS_CLIENT_ONLY: '0', RSRS_NO_AUTOSTART: '0'});
   const port = 15000 + (process.pid % 20000), endpoint = `http://127.0.0.1:${port}`;
   child = spawn(executable, ['serve', '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir],
     {cwd: payload, env: environment, stdio: ['ignore', 'ignore', 'inherit']});
@@ -244,6 +292,32 @@ try {
   assert.match(health.instance_id ?? '', /^[A-Za-z0-9_-]{1,128}$/);
   assert.ok(health.installation_id && health.account_id && health.process_start_id);
   assert.ok(Number.isSafeInteger(health.generation) && health.generation > 0);
+  // Settings must commit without model assets; a self-waiting config lock must time out, not pass health-only smoke.
+  assert.deepEqual(readdirSync(modelDir), []);
+  report.model_settings = {};
+  async function execModel(phase, args) {
+    const request = modelRequest(health, phase, args);
+    const evidence = report.model_settings[phase] = {request};
+    const response = await fetch(`${endpoint}/api/rpc`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: AbortSignal.timeout(30000)});
+    evidence.http_status = response.status;
+    evidence.body = await response.text();
+    assert.ok(response.ok, `model ${phase} HTTP ${response.status}`);
+    const reply = JSON.parse(evidence.body);
+    const summary = assertModelResponse(reply, request, health);
+    assertSamePath(realpathSync(reply.data_dir), realpathSync(dataDir));
+    return summary;
+  }
+  const saved = await execModel('save', ['cpu', '--model', 'quantized']);
+  const settingsBytes = readFileSync(join(dataDir, 'inference.json'));
+  assert.match(saved.revision ?? '', /^[a-f0-9]{64}$/);
+  assert.equal(digest(settingsBytes), saved.revision);
+  const settings = JSON.parse(settingsBytes.toString('utf8'));
+  assert.equal(settings.engine, 'cpu');
+  assert.equal(settings.model, 'quantized');
+  assert.equal(settings.force_cpu, false);
+  await execModel('read', []);
+  assert.deepEqual(readdirSync(modelDir), [], 'model settings unexpectedly installed assets');
   const response = await fetch(`${endpoint}/api/runtime/stop`, {
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-Respire-Lifecycle': 'coordinator-v1'},
     body: JSON.stringify(Object.fromEntries(['installation_id', 'instance_id', 'account_id', 'generation'].map(key => [key, health[key]]))),
