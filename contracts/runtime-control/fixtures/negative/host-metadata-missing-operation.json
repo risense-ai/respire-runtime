@@ -1,0 +1,301 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.metadata.enable",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"original\":{\"schema_version\":1,\"operation_id\":\"42345678-1234-4234-8234-123456789abc\",\"key\":\"42345678-1234-4234-8234-123456789abc\",\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"identity\":{\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"intent\":{\"kind\":\"enable\",\"mode\":\"isolated\",\"deployment_review\":null},\"fingerprint\":\"391c3d22675f6750403d00006c30aba21130a6d9585ac75af567da853285b976\"}}"
+      ],
+      "idempotency_key": "42345678-1234-4234-8234-123456789abc"
+    },
+    "result": {
+      "original": {
+        "schema_version": 1,
+        "operation_id": "42345678-1234-4234-8234-123456789abc",
+        "key": "42345678-1234-4234-8234-123456789abc",
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "intent": {
+          "kind": "enable",
+          "mode": "isolated",
+          "deployment_review": null
+        },
+        "fingerprint": "391c3d22675f6750403d00006c30aba21130a6d9585ac75af567da853285b976"
+      },
+      "outcome": "committed",
+      "details": {
+        "receipt": {
+          "enabled": true,
+          "deployment": {
+            "mode": "isolated"
+          },
+          "backup": {
+            "schema_version": 1,
+            "id": "fixture-backup",
+            "created_at": "2026-11-06T00:00:00Z",
+            "note": "fixture",
+            "database_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 4096,
+            "entries": 0,
+            "source_library": "/isolated/root/accounts/source",
+            "account_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sqlite_user_version": 1,
+            "database_schema_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "sdk_version": "fixture",
+            "sdk_abi": 1,
+            "model": "m3",
+            "witness_head": null,
+            "witness_count": null,
+            "witness_intact": null
+          }
+        },
+        "deployment_review": null,
+        "deployment_assurance": "operator_attestation_only",
+        "old_client_access_enforced": false
+      }
+    },
+    "private_response": {
+      "command": "metadata-control",
+      "status": "ok",
+      "summary": {
+        "original": {
+          "schema_version": 1,
+          "operation_id": "42345678-1234-4234-8234-123456789abc",
+          "key": "42345678-1234-4234-8234-123456789abc",
+          "installation_root": "/isolated/root",
+          "profile": "/isolated/root/accounts/source",
+          "identity": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "intent": {
+            "kind": "enable",
+            "mode": "isolated",
+            "deployment_review": null
+          },
+          "fingerprint": "391c3d22675f6750403d00006c30aba21130a6d9585ac75af567da853285b976"
+        },
+        "outcome": "committed",
+        "details": {
+          "receipt": {
+            "enabled": true,
+            "deployment": {
+              "mode": "isolated"
+            },
+            "backup": {
+              "schema_version": 1,
+              "id": "fixture-backup",
+              "created_at": "2026-11-06T00:00:00Z",
+              "note": "fixture",
+              "database_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "bytes": 4096,
+              "entries": 0,
+              "source_library": "/isolated/root/accounts/source",
+              "account_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "sqlite_user_version": 1,
+              "database_schema_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "sdk_version": "fixture",
+              "sdk_abi": 1,
+              "model": "m3",
+              "witness_head": null,
+              "witness_count": null,
+              "witness_intact": null
+            }
+          },
+          "deployment_review": null,
+          "deployment_assurance": "operator_attestation_only",
+          "old_client_access_enforced": false
+        }
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "private_rpc_response": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "ok": true,
+      "exit": 0,
+      "bin": "rsrs-runtime",
+      "envelope": {
+        "command": "metadata-control",
+        "status": "ok",
+        "summary": {
+          "original": {
+            "schema_version": 1,
+            "operation_id": "42345678-1234-4234-8234-123456789abc",
+            "key": "42345678-1234-4234-8234-123456789abc",
+            "installation_root": "/isolated/root",
+            "profile": "/isolated/root/accounts/source",
+            "identity": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "intent": {
+              "kind": "enable",
+              "mode": "isolated",
+              "deployment_review": null
+            },
+            "fingerprint": "391c3d22675f6750403d00006c30aba21130a6d9585ac75af567da853285b976"
+          },
+          "outcome": "committed",
+          "details": {
+            "receipt": {
+              "enabled": true,
+              "deployment": {
+                "mode": "isolated"
+              },
+              "backup": {
+                "schema_version": 1,
+                "id": "fixture-backup",
+                "created_at": "2026-11-06T00:00:00Z",
+                "note": "fixture",
+                "database_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "bytes": 4096,
+                "entries": 0,
+                "source_library": "/isolated/root/accounts/source",
+                "account_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sqlite_user_version": 1,
+                "database_schema_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sdk_version": "fixture",
+                "sdk_abi": 1,
+                "model": "m3",
+                "witness_head": null,
+                "witness_count": null,
+                "witness_intact": null
+              }
+            },
+            "deployment_review": null,
+            "deployment_assurance": "operator_attestation_only",
+            "old_client_access_enforced": false
+          }
+        },
+        "items": [
+          {
+            "name": "control_ready",
+            "status": "ok",
+            "value": "true"
+          },
+          {
+            "name": "store_ready",
+            "status": "skip",
+            "value": "false"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": 1234,
+      "data_dir": null,
+      "operation_id": "42345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "42345678-1234-4234-8234-123456789abc"
+    },
+    "finish_maintenance": true,
+    "metadata_context": {
+      "authority": {
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "grant_maintenance": "Paused",
+        "serving_authorized": false,
+        "parent_verified": true,
+        "binding_verified_before": true,
+        "binding_verified_after": true,
+        "launch_id": "32345678-1234-4234-a234-123456789abc",
+        "grant_verified": true,
+        "registration_verified": true
+      },
+      "fingerprint_preimage": "[1,\"control.metadata\",\"/isolated/root\",\"/isolated/root/accounts/source\",{\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},{\"kind\":\"enable\",\"mode\":\"isolated\",\"deployment_review\":null}]",
+      "auth_recovery_pending": false,
+      "snapshot_clear": true,
+      "writable": true,
+      "memory_off": false,
+      "locks_owned": true,
+      "gate_enabled": true,
+      "receipt_before": null,
+      "receipt_after": {
+        "original": {
+          "schema_version": 1,
+          "operation_id": "42345678-1234-4234-8234-123456789abc",
+          "key": "42345678-1234-4234-8234-123456789abc",
+          "installation_root": "/isolated/root",
+          "profile": "/isolated/root/accounts/source",
+          "identity": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "intent": {
+            "kind": "enable",
+            "mode": "isolated",
+            "deployment_review": null
+          },
+          "fingerprint": "391c3d22675f6750403d00006c30aba21130a6d9585ac75af567da853285b976"
+        },
+        "outcome": "committed",
+        "details": {
+          "receipt": {
+            "enabled": true,
+            "deployment": {
+              "mode": "isolated"
+            },
+            "backup": {
+              "schema_version": 1,
+              "id": "fixture-backup",
+              "created_at": "2026-11-06T00:00:00Z",
+              "note": "fixture",
+              "database_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "bytes": 4096,
+              "entries": 0,
+              "source_library": "/isolated/root/accounts/source",
+              "account_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "sqlite_user_version": 1,
+              "database_schema_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "sdk_version": "fixture",
+              "sdk_abi": 1,
+              "model": "m3",
+              "witness_head": null,
+              "witness_count": null,
+              "witness_intact": null
+            }
+          },
+          "deployment_review": null,
+          "deployment_assurance": "operator_attestation_only",
+          "old_client_access_enforced": false
+        }
+      },
+      "effect_attempted": true,
+      "fingerprint": "391c3d22675f6750403d00006c30aba21130a6d9585ac75af567da853285b976"
+    }
+  },
+  "error_code": "host_operation_required"
+}

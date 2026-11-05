@@ -405,7 +405,7 @@ fn offline_read_failure(payload: &Value, schema: &Value) -> Option<&'static str>
     let (request, result, c, d) = (&payload["request"], &payload["result"], &payload["offline_context"], &schema["$defs"]);
     if payload.get("public_response").is_some() { return Some("private_secret_exposure"); }
     if ["history", "original_operation_id", "original_fingerprint", "config_context", "write_context", "key_context",
-        "migration_context", "profile_context", "recovery_context", "progress", "ledger"].iter().any(|key| payload.get(key).is_some())
+        "migration_context", "profile_context", "recovery_context", "metadata_context", "progress", "ledger"].iter().any(|key| payload.get(key).is_some())
         || !request["operation_id"].is_null() || !request["idempotency_key"].is_null() { return Some("host_request_invalid"); }
     let params: Value = match request["args"][0].as_str().and_then(|text| serde_json::from_str(text).ok()) {
         Some(value) => value, None => return Some("host_params_invalid"),
@@ -430,8 +430,79 @@ fn offline_read_failure(payload: &Value, schema: &Value) -> Option<&'static str>
     }
     let r = &payload["private_rpc_response"];
     if r.is_null() || r["id"] != request["id"] || !r["operation_id"].is_null() || !r["idempotency_key"].is_null()
-        || r["envelope"] != *result || r["ok"] != true || r["exit"] != 0 || !r["code"].is_null() { return Some("host_result_invalid"); }
+        || r["envelope"] != *result || r["ok"] != true || r["exit"] != 0 || !r["code"].is_null() || !r["data_dir"].is_null() { return Some("host_result_invalid"); }
     None
+}
+
+fn settings_write_response_failure(payload: &Value, schema: &Value, envelope_kind: &str, code: &str, profile: Value) -> Option<&'static str> {
+    let (request, result, e, r, d) = (&payload["request"], &payload["result"], &payload["private_response"],
+        &payload["private_rpc_response"], &schema["$defs"]);
+    let unknown = result["outcome"] == "unknown";
+    if !schema_valid(e, &d[envelope_kind], d) || e["summary"] != *result
+        || e["status"] != if unknown { "fail" } else { "ok" } { return Some("host_result_invalid"); }
+    for (name, status, value) in [("control_ready", "ok", "true"), ("store_ready", "skip", "false")] {
+        let items: Vec<_> = e["items"].as_array()?.iter().filter(|item| item["name"] == name).collect();
+        if items.len() != 1 || items[0]["status"] != status || items[0]["value"] != value { return Some("host_result_invalid"); }
+    }
+    if !schema_valid(r, &d["settingsResponse"], d) || r["id"] != request["id"] || r["operation_id"] != request["operation_id"]
+        || r["idempotency_key"] != request["idempotency_key"] || r["envelope"] != *e || r["ok"] != !unknown
+        || r["exit"] != if unknown { 2 } else { 0 } || r["code"] != if unknown { serde_json::json!(code) } else { Value::Null }
+        || r["data_dir"] != profile { return Some("host_result_invalid"); }
+    if payload["finish_maintenance"] == true && unknown { return Some("maintenance_not_terminal"); }
+    None
+}
+
+fn metadata_failure(payload: &Value, schema: &Value) -> Option<&'static str> {
+    let (request, result, c, d) = (&payload["request"], &payload["result"], &payload["metadata_context"], &schema["$defs"]);
+    if payload.get("public_response").is_some() { return Some("private_secret_exposure"); }
+    if ["history", "original_operation_id", "original_fingerprint", "config_context", "write_context", "key_context",
+        "migration_context", "profile_context", "recovery_context", "offline_context", "progress", "ledger"]
+        .iter().any(|key| payload.get(key).is_some()) { return Some("host_request_invalid"); }
+    if request["operation_id"].is_null() || request["idempotency_key"].is_null() { return Some("host_operation_required"); }
+    let params: Value = match request["args"][0].as_str().and_then(|text| serde_json::from_str(text).ok()) {
+        Some(value) => value, None => return Some("host_params_invalid"),
+    };
+    if !schema_valid(&params, &d["metadataParams"], d) { return Some("host_params_invalid"); }
+    let o = &params["original"];
+    let original: respire_protocol::metadata_control::HostMetadataOperation = match serde_json::from_value(o.clone()) {
+        Ok(value) => value, Err(_) => return Some("host_params_invalid"),
+    };
+    let query = request["method"] == "control.metadata.result";
+    if original.intent.validate().is_err() || !query && request["method"] != format!("control.metadata.{}", o["intent"]["kind"].as_str()?) {
+        return Some("host_params_invalid");
+    }
+    if o["operation_id"] != request["operation_id"] || o["key"] != o["operation_id"] || o["key"] != request["idempotency_key"] {
+        return Some("host_operation_mismatch");
+    }
+    if o["installation_root"] != params["binding"]["installation_root"] || o["profile"] != params["binding"]["profile"]
+        || o["identity"] != params["identity"] { return Some("settings_binding_mismatch"); }
+    if !schema_valid(c, &d["metadataContext"], d) { return Some("settings_context_mismatch"); }
+    if let Some(error) = settings_authority_failure(payload, &params["binding"], c, &params["identity"], false) { return Some(error); }
+    // Node recomputes SHA-256; Rust checks the typed preimage and frozen digest anchor.
+    if o["fingerprint"] != c["fingerprint"] || original.fingerprint_bytes().ok().as_deref()
+        != c["fingerprint_preimage"].as_str().map(str::as_bytes) { return Some("host_fingerprint_mismatch"); }
+    if c["auth_recovery_pending"] != false || c["snapshot_clear"] != true || c["writable"] != true
+        || c["memory_off"] != false || c["locks_owned"] != true { return Some("metadata_admission_blocked"); }
+    if !schema_valid(result, &d["metadataResult"], d) || result["original"] != *o { return Some("host_result_invalid"); }
+    let (before, after) = (&c["receipt_before"], &c["receipt_after"]);
+    if !before.is_null() {
+        if before["original"] != *o || before["outcome"] != "committed" || before != after { return Some("metadata_history_conflict"); }
+        if c["effect_attempted"] != false { return Some("metadata_replay_forbidden"); }
+        if result != before { return Some("metadata_receipt_mismatch"); }
+    } else if query {
+        if c["effect_attempted"] != false || !after.is_null() { return Some("metadata_replay_forbidden"); }
+        if result["outcome"] != "unknown" || !result["details"].is_null() { return Some("metadata_receipt_mismatch"); }
+    } else if c["effect_attempted"] != true || after.is_null() || after["outcome"] != "committed" || after != result {
+        return Some("metadata_receipt_mismatch");
+    }
+    if result["outcome"] == "committed" && if o["intent"]["kind"] == "disable" {
+        result["details"]["enabled"] != false || result["details"]["sync_isolation_retained"] != true
+    } else {
+        result["details"]["deployment_assurance"] != "operator_attestation_only" || result["details"]["old_client_access_enforced"] != false
+            || result["details"]["deployment_review"] != o["intent"]["deployment_review"] || result["details"]["receipt"]["enabled"] != true
+            || result["details"]["receipt"]["deployment"]["mode"] != o["intent"]["mode"]
+    } { return Some("metadata_receipt_mismatch"); }
+    settings_write_response_failure(payload, schema, "metadataEnvelope", "metadata_outcome_unknown", Value::Null)
 }
 
 fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
@@ -442,7 +513,8 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let method = request["method"].as_str()?;
     let spec = &schema["x-methods"][method];
     if spec["params"] == "offlineReadParams" { return offline_read_failure(payload, schema); }
-    if payload.get("offline_context").is_some() { return Some("host_request_invalid"); }
+    if spec["params"] == "metadataParams" { return metadata_failure(payload, schema); }
+    if ["offline_context", "metadata_context"].iter().any(|key| payload.get(key).is_some()) { return Some("host_request_invalid"); }
     if !matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult"))
         && ["profile_context", "recovery_context", "private_rpc_response"].iter().any(|key| payload.get(key).is_some()) {
         return Some("host_request_invalid");
@@ -585,6 +657,15 @@ fn producer_types(payload: &Value) -> Result<()> {
         assert_eq!(serde_json::to_value(parsed)?, params);
         let parsed: respire_protocol::RpcResponse<Value> = serde_json::from_value(payload["private_rpc_response"].clone())?;
         assert_eq!(serde_json::to_value(parsed)?, payload["private_rpc_response"]);
+        return Ok(());
+    }
+    if matches!(request.method.as_str(), "control.metadata.enable" | "control.metadata.disable" | "control.metadata.result") {
+        let parsed: respire_protocol::metadata_control::HostMetadataParams = serde_json::from_value(params.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, params);
+        let result: respire_protocol::metadata_control::HostMetadataResult = serde_json::from_value(payload["result"].clone())?;
+        assert_eq!(serde_json::to_value(result)?, payload["result"]);
+        let response: respire_protocol::RpcResponse<Value> = serde_json::from_value(payload["private_rpc_response"].clone())?;
+        assert_eq!(serde_json::to_value(response)?, payload["private_rpc_response"]);
         return Ok(());
     }
     match request.method.as_str() {
@@ -738,18 +819,21 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
     }
     assert_eq!(count, 303);
     assert_eq!(extension_count, 153);
-    let settings = &manifest["extensions"]["settings"];
-    assert_eq!(settings["schema"], "schema/private-host-control.schema.json");
-    assert_eq!(settings["consumer"], "consumers/private_host_control.rs");
-    for (group, count) in [("positive", 7), ("negative", 26)] {
-        let paths = settings["fixtures"][group].as_array().context("settings fixtures")?;
-        assert_eq!(paths.len(), count);
-        for path in paths {
-            let path = path.as_str().context("settings fixture path")?;
-            let fixture: Value = serde_json::from_slice(&std::fs::read(root.join(path))?)?;
-            let expected = if group == "positive" { None } else { fixture["error_code"].as_str() };
-            assert_eq!(failure(&fixture["payload"], &schema), expected, "{path}");
-            if group == "positive" { producer_types(&fixture["payload"])?; }
+    for (extension_name, positive_count, negative_count) in [("settings", 7, 26), ("metadata", 7, 18)] {
+        let extension = &manifest["extensions"][extension_name];
+        assert_eq!(extension["schema"], "schema/private-host-control.schema.json");
+        assert_eq!(extension["consumer"], "consumers/private_host_control.rs");
+        for (group, count) in [("positive", positive_count), ("negative", negative_count)] {
+            let paths = extension["fixtures"][group].as_array().context("settings fixture group")?;
+            assert_eq!(paths.len(), count);
+            for path in paths {
+                let path = path.as_str().context("settings fixture path")?;
+                let fixture: Value = serde_json::from_slice(&std::fs::read(root.join(path))?)?;
+                let expected = if group == "positive" { None } else { fixture["error_code"].as_str() };
+                assert_eq!(failure(&fixture["payload"], &schema), expected, "{path}");
+                if group == "positive" { producer_types(&fixture["payload"])?; }
+                if path.ends_with("/host-metadata-params-unknown.json") { assert!(producer_types(&fixture["payload"]).is_err()); }
+            }
         }
     }
     Ok(())
