@@ -52,7 +52,7 @@ The runtime `/health` body carries, in addition to the existing fields:
 ```json
 {
   "runtime_version": "1.4.0",
-  "runtime_compat": { "min_cli": "1.0.20", "max_cli": "*" }
+  "runtime_compat": { "min_cli": "1.0.21-dev.5", "max_cli": "*" }
 }
 ```
 
@@ -62,8 +62,13 @@ The runtime `/health` body carries, in addition to the existing fields:
   the same window into every `runtime-build-<triple>.json`; the values are
   defined once as workflow-level environment variables (`RUNTIME_MIN_CLI`,
   `RUNTIME_MAX_CLI`).
-- The CLI's `runtime_acceptable(health)` check is the sole consumer: version
-  in the CLI's accept window, expected managed path, and no stalled inference.
+- The scoped request and lifecycle identity contract requires CLI
+  `1.0.21-dev.5` or later. Released CLI `1.0.20` sends unscoped business requests
+  and an empty stop body, so it is not compatible with this Runtime train.
+- The CLI installer validates the metadata's CLI window before installation.
+  Its `runtime_acceptable(health)` check additionally requires the Runtime's
+  version to be in the CLI's accept window, the expected managed path, and no
+  stalled inference.
 
 ## PROTOCOL_V hard gate
 

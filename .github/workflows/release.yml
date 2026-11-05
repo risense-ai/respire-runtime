@@ -37,7 +37,7 @@ concurrency:
 env:
   # CLI compatibility window embedded into every runtime-build-<triple>.json.
   # Source of truth for the contract: docs/version-contract.md.
-  RUNTIME_MIN_CLI: '1.0.20'
+  RUNTIME_MIN_CLI: '1.0.21-dev.5'
   RUNTIME_MAX_CLI: '*'
 
 jobs:

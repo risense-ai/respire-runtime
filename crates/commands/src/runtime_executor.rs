@@ -27,6 +27,7 @@ fn is_allowed(command: Option<&Command>) -> bool {
             Command::Model {
                 action: ModelAction::Engine { .. }
                     | ModelAction::Load { .. }
+                    | ModelAction::Activate { .. }
                     | ModelAction::Probe { .. },
             } | Command::Sync
                 | Command::SyncConflicts { .. }
