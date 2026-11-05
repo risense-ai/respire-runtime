@@ -452,16 +452,13 @@ jobs:
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
-      - name: Require native Intel Mac hardware
-        if: matrix.os == 'macos-15-intel'
-        shell: bash
-        run: |
-          test "$RUNNER_ARCH" = 'X64'
-          test "$(uname -s)" = 'Darwin'
-          test "$(sysctl -n hw.optional.arm64)" = '0'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Require native Intel Mac hardware
+        if: matrix.os == 'macos-15-intel'
+        shell: bash
+        run: node scripts/smoke-runtime-release.mjs --check-native-intel
       - name: Wait for this platform's build artifacts
         timeout-minutes: 16
         shell: bash
@@ -529,6 +526,7 @@ jobs:
           EXPECTED_MIN_CLI: ${{ env.RUNTIME_MIN_CLI }}
           EXPECTED_MAX_CLI: ${{ env.RUNTIME_MAX_CLI }}
         run: |
+          node scripts/smoke-runtime-release.mjs --self-check
           node scripts/smoke-runtime-release.mjs
       - uses: actions/upload-artifact@v4
         if: always()

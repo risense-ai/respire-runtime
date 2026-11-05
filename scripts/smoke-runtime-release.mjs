@@ -11,6 +11,18 @@ function safePath(value) {
     !/[\\:\x00-\x1f\x7f]/.test(value) &&
     value.split('/').every(part => part && part !== '.' && part !== '..');
 }
+function archiveArgs(mode, archiveFile, destination) {
+  // GNU tar treats a drive-letter archive path as a remote host.
+  assert.ok(safePath(archiveFile) && !archiveFile.includes('/'), 'archive must be a relative filename');
+  return [mode, archiveFile, ...(destination ? ['-C', destination] : [])];
+}
+function assertNativeIntel({runnerArch, platform, arch, arm64, translated}) {
+  assert.equal(runnerArch, 'X64', 'Intel acceptance requires an X64 runner');
+  assert.equal(platform, 'darwin', 'Intel acceptance requires macOS');
+  assert.equal(arch, 'x64', 'Intel acceptance requires an x64 process');
+  assert.ok(['', '0'].includes(arm64), 'Intel acceptance forbids ARM64 hardware');
+  assert.ok(['', '0'].includes(translated), 'Intel acceptance forbids Rosetta');
+}
 function assertDrained(receipt, health, operationID) {
   assertProtocol(health);
   assert.equal(receipt.schema_version, 1);
@@ -29,6 +41,22 @@ function assertProtocol(health) {
   assert.deepEqual(health.protocol_range, {minimum: 1, maximum: 1});
 }
 if (process.argv.includes('--self-check')) {
+  const archiveFile = 'rsrs-runtime-x86_64-pc-windows-msvc.tar.gz';
+  for (const mode of ['-tzf', '-tvzf', '-xzf']) {
+    assert.deepEqual(archiveArgs(mode, archiveFile), [mode, archiveFile]);
+    for (const unsafe of [`D:\\assets\\${archiveFile}`, `C:/assets/${archiveFile}`, '../escape', '/absolute']) {
+      assert.throws(() => archiveArgs(mode, unsafe));
+    }
+  }
+  assert.deepEqual(archiveArgs('-xzf', archiveFile, 'D:\\temp\\payload'),
+    ['-xzf', archiveFile, '-C', 'D:\\temp\\payload']);
+  const intel = {runnerArch: 'X64', platform: 'darwin', arch: 'x64', arm64: '', translated: ''};
+  assertNativeIntel(intel);
+  assertNativeIntel({...intel, arm64: '0', translated: '0'});
+  for (const invalid of [{runnerArch: 'ARM64'}, {platform: 'linux'}, {arch: 'arm64'},
+    {arm64: '1'}, {translated: '1'}, {arm64: 'unknown'}, {translated: 'unknown'}]) {
+    assert.throws(() => assertNativeIntel({...intel, ...invalid}));
+  }
   for (const value of ['../escape', '/absolute', 'a\\b', 'a/../b', 'C:stream', 'a\nb', 'a//b']) {
     assert.equal(safePath(value), false);
   }
@@ -44,6 +72,16 @@ if (process.argv.includes('--self-check')) {
   assert.throws(() => assertDrained({...receipt, protocol_version: undefined}, {...health, v: undefined}, 'o'));
   assert.throws(() => assertProtocol({...health, protocol_range: {minimum: 1, maximum: 2}}));
   console.log('Smoke validator self-check passed; no binary, archive or endpoint was accessed.');
+  process.exit(0);
+}
+if (process.argv.includes('--check-native-intel')) {
+  assert.equal(process.env.GITHUB_ACTIONS, 'true', 'native Intel evidence requires a GitHub runner');
+  assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted', 'native Intel evidence requires a hosted runner');
+  // -i ignores an absent OID; other sysctl failures still abort the guard.
+  const sysctl = name => execFileSync('/usr/sbin/sysctl', ['-in', name], {encoding: 'utf8'}).trim();
+  assertNativeIntel({runnerArch: process.env.RUNNER_ARCH, platform: process.platform, arch: process.arch,
+    arm64: sysctl('hw.optional.arm64'), translated: sysctl('sysctl.proc_translated')});
+  console.log('Native Intel macOS evidence verified; ARM64 hardware and Rosetta are forbidden.');
   process.exit(0);
 }
 
@@ -80,8 +118,8 @@ const report = {target, version, source_commit: metadata.source_commit,
   coverage: ['complete-release-payload', 'os-bound-startup-health', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
 try {
-  const archive = join(assets, metadata.archive_file);
-  const names = execFileSync('tar', ['-tzf', archive], {encoding: 'utf8', maxBuffer: 2 << 20})
+  const archive = metadata.archive_file;
+  const names = execFileSync('tar', archiveArgs('-tzf', archive), {cwd: assets, encoding: 'utf8', maxBuffer: 2 << 20})
     .trim().split(/\r?\n/).filter(Boolean);
   assert.ok(names.length > 0 && names.length <= 4096);
   const seen = new Set();
@@ -92,13 +130,13 @@ try {
     assert.ok(!seen.has(name.toLowerCase()), `duplicate archive path: ${name}`);
     seen.add(name.toLowerCase());
   }
-  const listing = execFileSync('tar', ['-tvzf', archive], {encoding: 'utf8', maxBuffer: 4 << 20}).trim().split(/\r?\n/);
+  const listing = execFileSync('tar', archiveArgs('-tvzf', archive), {cwd: assets, encoding: 'utf8', maxBuffer: 4 << 20}).trim().split(/\r?\n/);
   assert.equal(listing.length, names.length);
   for (const line of listing) {
     assert.ok(/^[d-]/.test(line) && !line.includes(' -> ') && !line.includes(' link to '),
       'release smoke accepts only regular files and directories');
   }
-  execFileSync('tar', ['-xzf', archive, '-C', payload], {stdio: 'pipe'});
+  execFileSync('tar', archiveArgs('-xzf', archive, payload), {cwd: assets, stdio: 'pipe'});
   assert.ok(Array.isArray(metadata.files) && metadata.files.length > 0);
   const expected = new Set();
   for (const entry of metadata.files) {
