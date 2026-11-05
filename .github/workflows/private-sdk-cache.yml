@@ -1,11 +1,11 @@
 name: Prepare reviewed private SDK dependencies
 
 # Populates the Actions cache holding the exact pinned closed-source Core SDK
-# bytes for all seven release targets. Reads BOTH SDK locks from a reviewed
+# bytes for all eight release targets. Reads BOTH SDK locks from a reviewed
 # main commit of this repository (sdk/core-sdk.lock.json and
 # crates/core-sdk/core-sdk.lock.json); the plan refuses when the copies differ.
 # The credential-bearing download job runs only on trusted main dispatches;
-# native validation afterwards is token-free (token-free-sdk-check.yml).
+# source validation afterwards is token-free; Intel cross-build is not native acceptance.
 on:
   workflow_dispatch:
     inputs:
@@ -48,9 +48,9 @@ jobs:
           node --input-type=module - <<'JS'
           import {readFileSync,appendFileSync} from 'node:fs';
           const matrix=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/sdk-locks/plan.json'));
-          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
+          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-apple-darwin':'macos-15','x86_64-pc-windows-msvc':'windows-latest'};
           const native={include:matrix.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
-          if(native.include.length!==matrix.include.length-1)throw Error('Expected every selected native SDK consumer except Windows ARM64');
+          if(native.include.length!==matrix.include.length-1)throw Error('Expected every selected SDK source check except Windows ARM64');
           appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\nnative=${JSON.stringify(native)}\n`);
           JS
   download:
