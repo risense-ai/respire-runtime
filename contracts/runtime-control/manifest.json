@@ -691,7 +691,7 @@
     },
     {
       "path": "schema/private-host-control.schema.json",
-      "sha256": "d90da0c17f85c68ecbc9b684cbf1dadabe51d7daaf8e2ab2f5d0fe1811e92169"
+      "sha256": "78bb8b1cee86267c3b10d069fd7643613c246086500b10ba86fc82d4b1117c4e"
     },
     {
       "path": "fixtures/positive/host-auth-keygen-unbound.json",
@@ -815,7 +815,7 @@
     },
     {
       "path": "consumers/private_host_control.rs",
-      "sha256": "b67476a11ecf6d270877575daf8c5fd3653a8dde2c9854b60050c192cc479cb0"
+      "sha256": "954b2ba0dad03c2da99d07bdff7319ae456cdded0be5dfe80d04325fef0b72b3"
     },
     {
       "path": "fixtures/positive/host-model-verify-loaded.json",
