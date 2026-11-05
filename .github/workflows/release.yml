@@ -523,6 +523,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -596,6 +597,80 @@ jobs:
             fi
           fi
           gh release upload "$RUNTIME_TAG" release-assets/* --clobber
+      - name: Require successful Runtime source CI for the exact release SHA
+        shell: bash
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          node - <<'NODE'
+          const assert = require('node:assert/strict'), cp = require('child_process');
+          const repo = process.env.GITHUB_REPOSITORY, sha = process.env.RUNTIME_SHA;
+          assert.match(repo || '', /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+          assert.match(sha || '', /^[a-f0-9]{40}$/);
+          const read = (path, paginate = false) => JSON.parse(cp.execFileSync('gh',
+            ['api', ...(paginate ? ['--paginate', '--slurp'] : []), `repos/${repo}/${path}`],
+            {encoding: 'utf8', timeout: 30000}));
+          function inventory(path, field) {
+            const pages = read(path, true);
+            assert.ok(Array.isArray(pages) && pages.length > 0, 'Missing CI API pages');
+            const entries = pages.flatMap(page => {
+              assert.ok(Array.isArray(page[field]), `Missing CI ${field}`);
+              return page[field];
+            });
+            for (const page of pages) assert.equal(page.total_count, entries.length, 'Incomplete CI inventory');
+            return entries;
+          }
+          function latestPush() {
+            const runs = inventory(`actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&per_page=100`, 'workflow_runs');
+            const matching = runs.filter(run => run.head_sha === sha && run.event === 'push');
+            assert.ok(matching.length > 0, 'No push source CI for the release SHA');
+            for (const run of matching) assert.ok(Number.isSafeInteger(run.id) && run.id > 0, 'Invalid CI run ID');
+            return matching.sort((a, b) => b.id - a.id)[0];
+          }
+          function validateRun(run) {
+            assert.equal(run.repository?.full_name, repo, 'CI belongs to another repository');
+            assert.equal(run.head_repository?.full_name, repo, 'CI source belongs to another repository');
+            assert.equal(run.head_sha, sha, 'CI source SHA differs');
+            assert.equal(run.event, 'push', 'CI is not a push run');
+            assert.equal(run.path, '.github/workflows/ci.yml', 'CI workflow differs');
+            assert.equal(run.status, 'completed', 'CI is not terminal');
+            assert.ok(['success', 'failure'].includes(run.conclusion), 'CI must finish without cancellation');
+            assert.ok(Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0, 'Invalid CI attempt');
+          }
+          const selected = latestPush();
+          validateRun(selected);
+          const runPath = `actions/runs/${selected.id}`, run = read(runPath);
+          validateRun(run);
+          assert.equal(run.id, selected.id, 'CI run differs');
+          assert.equal(run.run_attempt, selected.run_attempt, 'CI attempt changed');
+          const jobs = inventory(`${runPath}/attempts/${run.run_attempt}/jobs?per_page=100`, 'jobs');
+          for (const job of jobs) {
+            assert.equal(job.run_id, run.id, 'CI job belongs to another run');
+            assert.equal(job.run_attempt, run.run_attempt, 'CI job belongs to another attempt');
+            assert.equal(job.head_sha, sha, 'CI job source SHA differs');
+            assert.equal(job.status, 'completed', 'CI job is not terminal');
+            // DEV source acceptance does not grant full G1; only these two gates may fail.
+            assert.ok(['success', 'skipped', 'neutral'].includes(job.conclusion) ||
+              (['required-tests', 'ci-complete'].includes(job.name) &&
+               ['failure', 'cancelled', 'timed_out'].includes(job.conclusion)),
+              `Unexpected CI job failure: ${job.name} (${job.conclusion})`);
+          }
+          for (const name of ['detect', 'workspace-tests', 'control-contract']) {
+            const matching = jobs.filter(job => job.name === name);
+            assert.equal(matching.length, 1, `Missing or duplicate required CI job: ${name}`);
+            assert.equal(matching[0].status, 'completed', `CI job is not terminal: ${name}`);
+            assert.equal(matching[0].conclusion, 'success', `CI job did not succeed: ${name}`);
+          }
+          // Refuse a rerun or a newer push run that appeared while jobs were read.
+          for (const current of [read(runPath), latestPush()]) {
+            validateRun(current);
+            assert.equal(current.id, run.id, 'Latest push CI changed');
+            assert.equal(current.run_attempt, run.run_attempt, 'Latest CI attempt changed');
+          }
+          console.log(`Verified source CI ${run.id} attempt ${run.run_attempt} for ${sha}; this is not aggregate or full G1 evidence`);
+          NODE
       - name: Make the release public
         env:
           GH_TOKEN: ${{ github.token }}
