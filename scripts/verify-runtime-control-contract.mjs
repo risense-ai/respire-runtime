@@ -718,17 +718,92 @@ function keyMigrationFailure(payload, params, kind) {
   return null;
 }
 
+// Fixture contexts are inputs, not grants, production journals, or native proof.
+function profileRecoveryFailure(payload, params, kind) {
+  const profile = kind === "profileResult";
+  if (!profile && kind !== "recoveryResult") return null;
+  const context = payload[profile ? "profile_context" : "recovery_context"];
+  if (!context || !hostSchemaValid(context, hostSchema.$defs[profile ? "profileContext" : "recoveryContext"])) return "profile_recovery_context_mismatch";
+  const {request, result} = payload, binding = params.binding, authority = context.authority;
+  const same = isDeepStrictEqual, statusRead = request.method === "control.auth.recovery_status";
+  if (authority.installation_root !== binding.installation_root || authority.profile !== binding.profile || authority.launch_id !== binding.launch_id ||
+      !same(authority.identity, params.identity) ||
+      (binding.expected_account_id ?? null) !== (params.identity.kind === "bound" ? params.identity.account_id : null)) return "profile_recovery_binding_mismatch";
+  if (authority.grant_maintenance !== (statusRead ? "none" : "Paused") || authority.owns_auth !== !statusRead ||
+      authority.serving_authorized !== false || ["parent_verified", "binding_verified_before"].some(key => authority[key] !== true) ||
+      (profile || statusRead) && authority.binding_verified_after !== true) return "profile_recovery_authority_mismatch";
+  if (payload.history != null || payload.original_fingerprint != null || !profile && payload.original_operation_id != null ||
+      payload[profile ? "recovery_context" : "profile_context"] != null) return "host_request_invalid";
+  if (profile) {
+    const original = params.original;
+    if (original.operation_id !== request.operation_id || original.key !== request.idempotency_key || original.key !== original.operation_id) return "host_operation_mismatch";
+    if (original.installation_root !== binding.installation_root || original.profile !== binding.profile ||
+        !same(original.identity, params.identity) || !same(result.identity, original.identity)) return "profile_recovery_binding_mismatch";
+    const identity = value => value.kind === "bound" ? {kind: "bound", account_id: value.account_id, session_sha256: value.session_sha256}
+      : value.kind === "unbound" ? {kind: "unbound", operation_id: value.operation_id, session_sha256: value.session_sha256} : {kind: "absent"};
+    const preimage = JSON.stringify(["control.profile.remove", original.schema_version, original.installation_root, original.profile,
+      identity(original.identity), original.name, identity(original.target_identity)]);
+    const fingerprint = createHash("sha256").update(preimage).digest("hex");
+    if (original.fingerprint !== fingerprint || result.fingerprint !== fingerprint || context.fingerprint_preimage !== preimage) return "host_fingerprint_mismatch";
+    const records = context.records;
+    if (context.entry_count < records.length || records.some((entry, index) => records.slice(0, index).some(previous =>
+        previous.original.operation_id === entry.original.operation_id || previous.original.key === entry.original.key))) return "profile_history_conflict";
+    const previous = records.find(entry => entry.original.operation_id === original.operation_id || entry.original.key === original.key);
+    let expected;
+    if (previous) {
+      if (!same(previous.original, original)) return "profile_history_conflict";
+      if (context.delete_attempted !== false) return "profile_replay_forbidden";
+      expected = previous.phase === "committed" ? "committed" : "unknown";
+    } else if (request.method === "control.profile.result") {
+      if (context.delete_attempted !== false) return "profile_replay_forbidden";
+      expected = "unknown";
+    } else {
+      if (context.entry_count === 4096 || context.active === true) return "profile_admission_blocked";
+      if (context.snapshot_clear !== true) return "profile_snapshot_pending";
+      const target = original.installation_root + "/accounts/" + original.name;
+      if (context.target_path !== target || context.target_path === original.profile || !same(context.target_identity, original.target_identity)) return "profile_target_mismatch";
+      if (context.delete_attempted !== true) return "profile_receipt_mismatch";
+      expected = "committed";
+    }
+    if (result.outcome !== expected) return "profile_receipt_mismatch";
+  } else if (statusRead) {
+    if (result.state !== context.journal_state || result.recovered !== false || context.recovery_attempted !== false) return "legacy_recovery_mismatch";
+  } else {
+    if (context.journal_state === "operation_pending") return "legacy_recovery_forbidden";
+    const recovered = context.journal_state === "legacy_pending";
+    if (result.state !== "clear" || result.recovered !== recovered || context.recovery_attempted !== recovered) return "legacy_recovery_mismatch";
+  }
+  const envelope = payload.private_response, status = profile && result.outcome === "unknown" ? "fail" : "ok";
+  if (!envelope || !hostSchemaValid(envelope, hostSchema.$defs[profile ? "profileEnvelope" : "recoveryEnvelope"]) ||
+      !same(envelope.summary, result) || envelope.status !== status) return "host_result_invalid";
+  for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
+    const items = envelope.items.filter(item => item.name === name);
+    if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "host_result_invalid";
+  }
+  const response = payload.private_rpc_response, unknown = profile && result.outcome === "unknown";
+  if (!response || !hostSchemaValid(response, hostSchema.$defs.profileRecoveryResponse) ||
+      response.id !== request.id || (response.operation_id ?? null) !== (request.operation_id ?? null) ||
+      (response.idempotency_key ?? null) !== (request.idempotency_key ?? null) || !same(response.envelope, envelope) ||
+      response.ok !== !unknown || response.exit !== (unknown ? 2 : 0) ||
+      response.code !== (unknown ? "profile_remove_outcome_unknown" : null)) return "host_result_invalid";
+  return null;
+}
+
 function privateHostFailure(payload) {
   if (payload.channel !== "inherited_pipe") return "private_channel_required";
   if (!hostSchemaValid(payload, hostSchema.$defs.case)) return "host_request_invalid";
   const request = payload.request, method = hostSchema["x-methods"][request.method];
-  if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult", "migrationResult"].includes(method.result) &&
+  if (!["profileResult", "recoveryResult"].includes(method.result) &&
+      ["profile_context", "recovery_context", "private_rpc_response"].some(key => Object.hasOwn(payload, key))) return "host_request_invalid";
+  if (["secretResult", "keysExportResult", "identityWriteResult", "keyResult", "migrationResult", "profileResult", "recoveryResult"].includes(method.result) &&
       Object.hasOwn(payload, "public_response")) return "private_secret_exposure";
   if (method.mutable && (!request.operation_id || !request.idempotency_key)) return "host_operation_required";
   if (!method.mutable && (request.operation_id != null || request.idempotency_key != null)) return "host_request_invalid";
   let params;
   try { params = JSON.parse(request.args[0]); } catch { return "host_params_invalid"; }
   if (!hostSchemaValid(params, hostSchema.$defs[method.params])) return "host_params_invalid";
+  if (["profileResult", "recoveryResult"].includes(method.result) &&
+      ["config_context", "write_context", "key_context", "migration_context"].some(key => Object.hasOwn(payload, key))) return "host_request_invalid";
   if ((Object.hasOwn(payload, "progress") || Object.hasOwn(payload, "ledger")) &&
       method.result !== "migrationResult" && !(method.result === "keyResult" && params.operation.kind === "fivekeys")) return "host_request_invalid";
   if (method.params === "keyParams" && ((request.method === "control.key.super_reset" && params.operation.kind !== "super_reset") ||
@@ -741,7 +816,7 @@ function privateHostFailure(payload) {
       ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
   const snapshot = request.method === "control.snapshot_maintenance";
   const verified = ["control.auth.account_complete", "control.key.complete"].includes(request.method) || snapshot && ["commit", "release"].includes(params.action);
-  if (payload.maintenance_phase !== (verified ? "Verified" : "Paused")) return "maintenance_phase_mismatch";
+  if (payload.maintenance_phase !== (request.method === "control.auth.recovery_status" ? "Idle" : verified ? "Verified" : "Paused")) return "maintenance_phase_mismatch";
   if (payload.original_operation_id && payload.original_operation_id !== request.operation_id) return "host_operation_mismatch";
   if (snapshot) {
     if (params.operation_id !== request.operation_id) return "host_operation_mismatch";
@@ -755,9 +830,11 @@ function privateHostFailure(payload) {
     if (failure) return failure;
   }
   const result = payload.result;
-  if (!result) return payload.finish_maintenance ? "maintenance_not_terminal" : null;
+  if (!result) return ["profileResult", "recoveryResult"].includes(method.result) ? "host_result_invalid" : payload.finish_maintenance ? "maintenance_not_terminal" : null;
   if (!hostSchemaValid(result, hostSchema.$defs[method.result])) return "host_result_invalid";
   if (method.mutable && result.operation_id !== request.operation_id) return "host_operation_mismatch";
+  const profileRecoveryError = profileRecoveryFailure(payload, params, method.result);
+  if (profileRecoveryError) return profileRecoveryError;
   const extension = method.result === "migrationResult" || method.result === "keyResult" && params.operation.kind === "fivekeys";
   const fixedFailure = extension ? keyMigrationFailure(payload, params, method.result) : fixedWriteModelFailure(payload, params, method.result);
   if (fixedFailure) return fixedFailure;
@@ -809,7 +886,9 @@ function privateHostFailure(payload) {
           previous.state === "verified" && !["verified", "released"].includes(result.state)) return "terminal_history_conflict";
     }
   }
-  const terminal = method.result === "accountResult" && ["committed", "rolled_back"].includes(result.outcome) ||
+  const terminal = method.result === "profileResult" && result.outcome === "committed" ||
+    method.result === "recoveryResult" && request.method === "control.auth.recover_legacy" && result.state === "clear" ||
+    method.result === "accountResult" && ["committed", "rolled_back"].includes(result.outcome) ||
     extension && (method.result === "migrationResult" ? ["completed", "already_migrated"].includes(result.outcome) :
       ["committed", "rolled_back"].includes(result.outcome) && !result.verification_required) ||
     snapshot && ["released", "rolled_back"].includes(result.state);
@@ -817,10 +896,19 @@ function privateHostFailure(payload) {
   return null;
 }
 
-for (const [group, legacyCount, newCount] of [[positive, 25, 64], [negative, 48, 239]]) {
+const profileRecoveryExtension = manifest.extensions.profile_recovery;
+if (profileRecoveryExtension.schema !== "schema/private-host-control.schema.json" ||
+    profileRecoveryExtension.consumer !== "consumers/private_host_control.rs") fail("profile/recovery must reuse the shared schema and consumer");
+for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive", positive, 25, 64, 21], ["negative", negative, 48, 239, 132]]) {
   let checked = 0;
-  for (const name of group) {
+  const extra = profileRecoveryExtension.fixtures[groupName];
+  if (!Array.isArray(extra) || extra.length !== extraCount) fail("profile/recovery fixture count drift");
+  if (new Set([...group, ...extra]).size !== group.length + extra.length) fail("duplicate profile/recovery fixture");
+  for (const name of [...group, ...extra]) {
+    if (!boundPaths.has(name)) fail(`unbound host fixture: ${name}`);
     const fixture = readJSON(fixturePath(name));
+    if (extra.includes(name) && (fixture.fixture_type !== "private_host_control" ||
+        fixture.expected !== (groupName === "positive" ? "accept" : "reject"))) fail(`profile/recovery fixture kind: ${name}`);
     if (fixture.fixture_type !== "private_host_control") continue;
     if (fixture.expected === "accept" && !hostSchemaValid(fixture, hostSchema)) fail(`${name}: invalid host fixture container`);
     const expected = fixture.expected === "accept" ? null : fixture.error_code;
@@ -828,7 +916,7 @@ for (const [group, legacyCount, newCount] of [[positive, 25, 64], [negative, 48,
     if (actual !== expected) fail(`${name}: host rejection ${actual}, expected ${expected}`);
     checked++;
   }
-  if (checked !== newCount || group.length - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
+  if (checked !== newCount + extraCount || group.length + extraCount - checked !== legacyCount) fail("legacy/private host fixture counts drifted");
 }
 
 const spaceExtension = manifest.extensions.space;
@@ -925,4 +1013,4 @@ for (const [group, count] of [["positive", 7], ["negative", 24]]) {
     if (actual !== expected) fail(`${name}: space rejection ${actual}, expected ${expected}`);
   }
 }
-console.log(`runtime control contract verified: ${boundPaths.size} bound files (original 380 retained; 7 positive / 24 negative space cases)`);
+console.log(`runtime control contract verified: ${boundPaths.size} bound files (413 prior bindings retained with schema/consumer digest updates; 21 positive / 132 negative profile/recovery cases; 7 positive / 24 negative space cases)`);

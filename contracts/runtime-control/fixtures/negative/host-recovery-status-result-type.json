@@ -1,0 +1,102 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "error_code": "host_result_invalid",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Idle",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.auth.recovery_status",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"identity\":{\"kind\":\"bound\",\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
+      ]
+    },
+    "result": {
+      "state": "legacy_pending",
+      "recovered": "true"
+    },
+    "finish_maintenance": false,
+    "private_response": {
+      "command": "login-recovery",
+      "status": "ok",
+      "summary": {
+        "state": "legacy_pending",
+        "recovered": "true"
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "recovery_context": {
+      "authority": {
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "kind": "bound",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "grant_maintenance": "none",
+        "serving_authorized": false,
+        "parent_verified": true,
+        "binding_verified_before": true,
+        "binding_verified_after": true,
+        "owns_auth": false,
+        "launch_id": "32345678-1234-4234-a234-123456789abc"
+      },
+      "journal_state": "legacy_pending",
+      "recovery_attempted": false
+    },
+    "private_rpc_response": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "ok": true,
+      "exit": 0,
+      "bin": "rsrs-runtime",
+      "envelope": {
+        "command": "login-recovery",
+        "status": "ok",
+        "summary": {
+          "state": "legacy_pending",
+          "recovered": "true"
+        },
+        "items": [
+          {
+            "name": "control_ready",
+            "status": "ok",
+            "value": "true"
+          },
+          {
+            "name": "store_ready",
+            "status": "skip",
+            "value": "false"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": 1234,
+      "data_dir": null
+    }
+  }
+}

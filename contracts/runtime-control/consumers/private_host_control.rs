@@ -286,6 +286,103 @@ fn key_migration_failure(payload: &Value, params: &Value, kind: &str, schema: &V
     None
 }
 
+// Contexts describe fixture inputs; they are never production grants or journals.
+fn profile_recovery_failure(payload: &Value, params: &Value, kind: &str, schema: &Value) -> Option<&'static str> {
+    let profile = kind == "profileResult";
+    if !profile && kind != "recoveryResult" { return None; }
+    let definitions = &schema["$defs"];
+    let context = &payload[if profile { "profile_context" } else { "recovery_context" }];
+    if !schema_valid(context, &definitions[if profile { "profileContext" } else { "recoveryContext" }], definitions) {
+        return Some("profile_recovery_context_mismatch");
+    }
+    let (request, result, binding, authority) = (&payload["request"], &payload["result"], &params["binding"], &context["authority"]);
+    let status_read = request["method"] == "control.auth.recovery_status";
+    if authority["installation_root"] != binding["installation_root"] || authority["profile"] != binding["profile"]
+        || authority["launch_id"] != binding["launch_id"]
+        || authority["identity"] != params["identity"]
+        || binding["expected_account_id"] != if params["identity"]["kind"] == "bound" { params["identity"]["account_id"].clone() } else { Value::Null } {
+        return Some("profile_recovery_binding_mismatch");
+    }
+    if authority["grant_maintenance"] != if status_read { "none" } else { "Paused" }
+        || authority["owns_auth"] != !status_read || authority["serving_authorized"] != false
+        || ["parent_verified", "binding_verified_before"].iter().any(|key| authority[key] != true)
+        || (profile || status_read) && authority["binding_verified_after"] != true {
+        return Some("profile_recovery_authority_mismatch");
+    }
+    if !payload["history"].is_null() || !payload["original_fingerprint"].is_null()
+        || !profile && !payload["original_operation_id"].is_null()
+        || !payload[if profile { "recovery_context" } else { "profile_context" }].is_null() {
+        return Some("host_request_invalid");
+    }
+    if profile {
+        let original = &params["original"];
+        if original["operation_id"] != request["operation_id"] || original["key"] != request["idempotency_key"]
+            || original["key"] != original["operation_id"] { return Some("host_operation_mismatch"); }
+        if original["installation_root"] != binding["installation_root"] || original["profile"] != binding["profile"]
+            || original["identity"] != params["identity"] || result["identity"] != original["identity"] {
+            return Some("profile_recovery_binding_mismatch");
+        }
+        let operation: respire_protocol::profile_maintenance::HostProfileRemoveOperation = match serde_json::from_value(original.clone()) {
+            Ok(value) => value, Err(_) => return Some("host_params_invalid"),
+        };
+        if original["fingerprint"] != result["fingerprint"] || operation.fingerprint_bytes().ok().as_deref()
+            != context["fingerprint_preimage"].as_str().map(str::as_bytes) { return Some("host_fingerprint_mismatch"); }
+        let records = context["records"].as_array()?;
+        if context["entry_count"].as_u64()? < records.len() as u64
+            || records.iter().enumerate().any(|(index, entry)| records[..index].iter().any(|previous|
+                previous["original"]["operation_id"] == entry["original"]["operation_id"]
+                    || previous["original"]["key"] == entry["original"]["key"])) { return Some("profile_history_conflict"); }
+        let previous = records.iter().find(|entry| entry["original"]["operation_id"] == original["operation_id"]
+            || entry["original"]["key"] == original["key"]);
+        let expected = if let Some(previous) = previous {
+            if previous["original"] != *original { return Some("profile_history_conflict"); }
+            if context["delete_attempted"] != false { return Some("profile_replay_forbidden"); }
+            if previous["phase"] == "committed" { "committed" } else { "unknown" }
+        } else if request["method"] == "control.profile.result" {
+            if context["delete_attempted"] != false { return Some("profile_replay_forbidden"); }
+            "unknown"
+        } else {
+            if context["entry_count"] == 4096 || context["active"] == true { return Some("profile_admission_blocked"); }
+            if context["snapshot_clear"] != true { return Some("profile_snapshot_pending"); }
+            let target = format!("{}/accounts/{}", original["installation_root"].as_str()?, original["name"].as_str()?);
+            if context["target_path"] != target || context["target_path"] == original["profile"]
+                || context["target_identity"] != original["target_identity"] { return Some("profile_target_mismatch"); }
+            // Failed effects return an error, not a fabricated typed Unknown receipt.
+            if context["delete_attempted"] != true { return Some("profile_receipt_mismatch"); }
+            "committed"
+        };
+        if result["outcome"] != expected { return Some("profile_receipt_mismatch"); }
+    } else if status_read {
+        if result["state"] != context["journal_state"] || result["recovered"] != false || context["recovery_attempted"] != false {
+            return Some("legacy_recovery_mismatch");
+        }
+    } else {
+        if context["journal_state"] == "operation_pending" { return Some("legacy_recovery_forbidden"); }
+        let recovered = context["journal_state"] == "legacy_pending";
+        if result["state"] != "clear" || result["recovered"] != recovered || context["recovery_attempted"] != recovered {
+            return Some("legacy_recovery_mismatch");
+        }
+    }
+    let envelope = &payload["private_response"];
+    let status = if profile && result["outcome"] == "unknown" { "fail" } else { "ok" };
+    if !schema_valid(envelope, &definitions[if profile { "profileEnvelope" } else { "recoveryEnvelope" }], definitions)
+        || envelope["summary"] != *result || envelope["status"] != status { return Some("host_result_invalid"); }
+    for (name, status, value) in [("control_ready", "ok", "true"), ("store_ready", "skip", "false")] {
+        let items: Vec<_> = envelope["items"].as_array()?.iter().filter(|item| item["name"] == name).collect();
+        if items.len() != 1 || items[0]["status"] != status || items[0]["value"] != value { return Some("host_result_invalid"); }
+    }
+    let response = &payload["private_rpc_response"];
+    let unknown = profile && result["outcome"] == "unknown";
+    if !schema_valid(response, &definitions["profileRecoveryResponse"], definitions)
+        || response["id"] != request["id"] || response["operation_id"] != request["operation_id"]
+        || response["idempotency_key"] != request["idempotency_key"] || response["envelope"] != *envelope
+        || response["ok"] != !unknown || response["exit"] != if unknown { 2 } else { 0 }
+        || response["code"] != if unknown { serde_json::json!("profile_remove_outcome_unknown") } else { Value::Null } {
+        return Some("host_result_invalid");
+    }
+    None
+}
+
 fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     if payload["channel"] != "inherited_pipe" { return Some("private_channel_required"); }
     let definitions = &schema["$defs"];
@@ -293,7 +390,11 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     let request = &payload["request"];
     let method = request["method"].as_str()?;
     let spec = &schema["x-methods"][method];
-    if matches!(spec["result"].as_str(), Some("secretResult" | "keysExportResult" | "identityWriteResult" | "keyResult" | "migrationResult"))
+    if !matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult"))
+        && ["profile_context", "recovery_context", "private_rpc_response"].iter().any(|key| payload.get(key).is_some()) {
+        return Some("host_request_invalid");
+    }
+    if matches!(spec["result"].as_str(), Some("secretResult" | "keysExportResult" | "identityWriteResult" | "keyResult" | "migrationResult" | "profileResult" | "recoveryResult"))
         && payload.get("public_response").is_some() { return Some("private_secret_exposure"); }
     let mutable = spec["mutable"] == true;
     if mutable && (request["operation_id"].is_null() || request["idempotency_key"].is_null()) { return Some("host_operation_required"); }
@@ -302,6 +403,10 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         Some(params) => params, None => return Some("host_params_invalid"),
     };
     if !schema_valid(&params, &definitions[spec["params"].as_str()?], definitions) { return Some("host_params_invalid"); }
+    if matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult"))
+        && ["config_context", "write_context", "key_context", "migration_context"].iter().any(|key| payload.get(key).is_some()) {
+        return Some("host_request_invalid");
+    }
     if (payload.get("progress").is_some() || payload.get("ledger").is_some()) && spec["result"] != "migrationResult"
         && !(spec["result"] == "keyResult" && params["operation"]["kind"] == "fivekeys") { return Some("host_request_invalid"); }
     if spec["params"] == "keyParams" && (method == "control.key.super_reset" && params["operation"]["kind"] != "super_reset"
@@ -316,7 +421,7 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
     } else { params["selection_sha256"].is_null() } { return Some("host_params_invalid"); }
     let snapshot = method == "control.snapshot_maintenance";
     let verified = matches!(method, "control.auth.account_complete" | "control.key.complete") || snapshot && matches!(params["action"].as_str(), Some("commit" | "release"));
-    if payload["maintenance_phase"] != if verified { "Verified" } else { "Paused" } { return Some("maintenance_phase_mismatch"); }
+    if payload["maintenance_phase"] != if method == "control.auth.recovery_status" { "Idle" } else if verified { "Verified" } else { "Paused" } { return Some("maintenance_phase_mismatch"); }
     if !payload["original_operation_id"].is_null() && payload["original_operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
     if snapshot {
         if params["operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
@@ -327,11 +432,13 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         if let Some(error) = config_fixture_failure(&params, &payload["config_context"]) { return Some(error); }
     }
     let Some(result) = payload.get("result") else {
+        if matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult")) { return Some("host_result_invalid"); }
         return if payload["finish_maintenance"] == true { Some("maintenance_not_terminal") } else { None };
     };
     let kind = spec["result"].as_str()?;
     if !schema_valid(result, &definitions[kind], definitions) { return Some("host_result_invalid"); }
     if mutable && result["operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
+    if let Some(error) = profile_recovery_failure(payload, &params, kind, schema) { return Some(error); }
     let extension = kind == "migrationResult" || kind == "keyResult" && params["operation"]["kind"] == "fivekeys";
     if let Some(error) = if extension { key_migration_failure(payload, &params, kind, schema) }
         else { fixed_write_model_failure(payload, &params, kind, schema) } { return Some(error); }
@@ -401,7 +508,9 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
             }
         }
     }
-    let terminal = kind == "accountResult" && matches!(outcome, Some("committed" | "rolled_back"))
+    let terminal = kind == "profileResult" && outcome == Some("committed")
+        || kind == "recoveryResult" && method == "control.auth.recover_legacy" && result["state"] == "clear"
+        || kind == "accountResult" && matches!(outcome, Some("committed" | "rolled_back"))
         || extension && if kind == "migrationResult" { matches!(outcome, Some("completed" | "already_migrated")) }
             else { matches!(outcome, Some("committed" | "rolled_back")) && result["verification_required"] != true }
         || snapshot && matches!(result["state"].as_str(), Some("released" | "rolled_back"));
@@ -413,8 +522,21 @@ fn producer_types(payload: &Value) -> Result<()> {
     use respire_protocol::host_control::*;
     let request: respire_protocol::RpcRequest = serde_json::from_value(payload["request"].clone())?;
     let params: Value = serde_json::from_str(request.args.first().context("one host argument")?)?;
+    if matches!(request.method.as_str(), HOST_LOGIN_RECOVERY_STATUS_METHOD | HOST_LOGIN_RECOVERY_METHOD
+        | "control.profile.remove" | "control.profile.result") {
+        let parsed: respire_protocol::RpcResponse<Value> = serde_json::from_value(payload["private_rpc_response"].clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, payload["private_rpc_response"]);
+    }
     match request.method.as_str() {
         HOST_AUTH_KEYGEN_METHOD | HOST_AUTH_RESULT_METHOD => { serde_json::from_value::<HostAuthKeygenParams>(params)?; }
+        HOST_LOGIN_RECOVERY_STATUS_METHOD | HOST_LOGIN_RECOVERY_METHOD => {
+            let parsed: HostLoginRecoveryParams = serde_json::from_value(params.clone())?;
+            assert_eq!(serde_json::to_value(parsed)?, params);
+        }
+        "control.profile.remove" | "control.profile.result" => {
+            let parsed: respire_protocol::profile_maintenance::HostProfileRemoveParams = serde_json::from_value(params.clone())?;
+            assert_eq!(serde_json::to_value(parsed)?, params);
+        }
         HOST_AUTH_REGISTER_METHOD => { serde_json::from_value::<HostAuthRegisterParams>(params)?; }
         HOST_AUTH_LOGIN_METHOD => {
             let parsed: HostAuthLoginParams = serde_json::from_value(params.clone())?;
@@ -461,6 +583,14 @@ fn producer_types(payload: &Value) -> Result<()> {
     if let Some(result) = payload.get("result") {
         match request.method.as_str() {
             HOST_AUTH_KEYGEN_METHOD | HOST_AUTH_RESULT_METHOD => { serde_json::from_value::<HostAuthResult>(result.clone())?; }
+            HOST_LOGIN_RECOVERY_STATUS_METHOD | HOST_LOGIN_RECOVERY_METHOD => {
+                let parsed: HostLoginRecoveryResult = serde_json::from_value(result.clone())?;
+                assert_eq!(serde_json::to_value(parsed)?, *result);
+            }
+            "control.profile.remove" | "control.profile.result" => {
+                let parsed: respire_protocol::profile_maintenance::HostProfileRemoveResult = serde_json::from_value(result.clone())?;
+                assert_eq!(serde_json::to_value(parsed)?, *result);
+            }
             "control.model_install_plan" => {
                 let plan: respire_protocol::ModelPreparation = serde_json::from_value(result.clone())?;
                 assert!(!plan.assets.complete && plan.assets.backend_load.is_none() && plan.assets.assets == plan.assets.missing);
@@ -500,11 +630,22 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
     let root = super::contract_root()?;
     let schema: Value = serde_json::from_slice(&std::fs::read(root.join("schema/private-host-control.schema.json"))?)?;
     let manifest: Value = serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
+    let extension = &manifest["extensions"]["profile_recovery"];
+    assert_eq!(extension["schema"], "schema/private-host-control.schema.json");
+    assert_eq!(extension["consumer"], "consumers/private_host_control.rs");
     let mut count = 0;
+    let mut extension_count = 0;
     for group in ["positive", "negative"] {
-        for path in manifest["fixtures"][group].as_array().context("fixture group")? {
+        let original_paths = manifest["fixtures"][group].as_array().context("fixture group")?;
+        let new_paths = extension["fixtures"][group].as_array().context("profile/recovery fixture group")?;
+        assert_eq!(new_paths.len(), if group == "positive" { 21 } else { 132 });
+        for (index, path) in original_paths.iter().chain(new_paths).enumerate() {
             let path = path.as_str().context("fixture path")?;
             let fixture: Value = serde_json::from_slice(&std::fs::read(root.join(path))?)?;
+            if index >= original_paths.len() {
+                assert_eq!(fixture["fixture_type"], "private_host_control");
+                assert_eq!(fixture["expected"], if group == "positive" { "accept" } else { "reject" });
+            }
             if fixture["fixture_type"] != "private_host_control" { continue; }
             let expected = if fixture["expected"] == "accept" { None } else { fixture["error_code"].as_str() };
             assert_eq!(failure(&fixture["payload"], &schema), expected, "{path}");
@@ -523,13 +664,19 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
                 | "host-fivekeys-input-secret-type.json" | "host-fivekeys-operation-unknown.json"
                 | "host-fivekeys-result-unknown.json" | "host-fivekeys-params-unknown.json"
                 | "host-migration-params-unknown.json" | "host-migration-original-unknown.json" | "host-migration-result-unknown.json"
+                | "host-profile-argv.json" | "host-profile-params-unknown.json" | "host-profile-result-unknown.json"
+                | "host-profile-original-unknown.json" | "host-recovery-argv.json" | "host-recovery-params-unknown.json"
+                | "host-recovery-result-unknown.json" | "host-recovery-status-identity-unknown.json"
+                | "host-recovery-status-result-type.json" | "host-recovery-legacy-identity-unknown.json"
+                | "host-recovery-legacy-result-type.json"
                 | "host-model-maintenance-argv.json" | "host-model-maintenance-params-unknown.json"
                 | "host-model-maintenance-result-unknown.json" | "host-model-maintenance-secret.json")) {
                 assert!(producer_types(&fixture["payload"]).is_err(), "{path}: DTO must reject invalid fields");
             }
-            count += 1;
+            if index < original_paths.len() { count += 1; } else { extension_count += 1; }
         }
     }
     assert_eq!(count, 303);
+    assert_eq!(extension_count, 153);
     Ok(())
 }
