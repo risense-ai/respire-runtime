@@ -39,6 +39,22 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     let mut unknown = wire;
     unknown["binding"]["generation"] = json!(0);
     assert!(serde_json::from_value::<HostControlParams>(unknown).is_err());
+    use respire_protocol::{HostAuthIdentity, HostAuthKeygenParams, HOST_AUTH_SCHEMA_V};
+    let mut auth = json!({
+        "schema_version": HOST_AUTH_SCHEMA_V,
+        "binding": serde_json::to_value(&params.binding)?,
+        "identity": {"kind":"absent"},
+        "force": false,
+    });
+    let parsed: HostAuthKeygenParams = serde_json::from_value(auth.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, auth);
+    auth["identity"] = json!({"kind":"unbound","operation_id":"12345678-1234-4234-8234-123456789abc","session_sha256":"a".repeat(64)});
+    let parsed: HostAuthKeygenParams = serde_json::from_value(auth.clone())?;
+    assert!(matches!(&parsed.identity, HostAuthIdentity::Unbound { .. }));
+    assert_eq!(serde_json::to_value(parsed)?, auth);
+    auth["identity"]["generation"] = json!(0);
+    assert!(serde_json::from_value::<HostAuthKeygenParams>(auth).is_err());
+    assert!(serde_json::from_value::<HostAuthIdentity>(json!({"kind":"anonymous"})).is_err());
     Ok(())
 }
 

@@ -208,6 +208,16 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
     ))
 }
 
+/// Read exactly the checkpointed backend, without environment overrides or fallback.
+pub fn read_imported(account: &str, slot: &str, backend_name: &str) -> Result<String> {
+    let backend = backends().iter().find(|backend| backend.name() == backend_name)
+        .ok_or_else(|| anyhow!("credential backend is unavailable during recovery"))?;
+    let value = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?
+        .get_password().map_err(|_| anyhow!("recovery credential is unavailable"))?;
+    anyhow::ensure!(!value.is_empty(), "recovery credential is empty");
+    Ok(value)
+}
+
 /// Remove only the entry created by this login when its transaction rolls back.
 pub fn remove_imported(account: &str, slot: &str, backend_name: &str) -> Result<()> {
     let backend = backends().iter().find(|backend| backend.name() == backend_name)

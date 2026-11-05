@@ -141,7 +141,7 @@ pub fn wrap_with_rsrs(super_pass: &str, urk: &[u8; 32]) -> Result<(String, Strin
 }
 
 /// v4 key material: generate a super password (A3- recovery code) and a fresh URK.
-fn new_vault_v4() -> Result<(String, [u8; 32], String, String, String)> {
+pub fn new_vault_v4() -> Result<(String, [u8; 32], String, String, String)> {
     let super_pass = crypto::generate_secret_key();
     let urk = crypto::generate_key();
     let (kdf_salt, wrapped_urk, urk_nonce) = wrap_with_rsrs(&super_pass, &urk)?;

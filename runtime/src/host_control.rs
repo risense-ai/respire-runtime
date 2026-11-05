@@ -1,41 +1,55 @@
 //! One-shot offline control, dispatched before serving or opening a business store.
 use std::io::{Read, Write};
 use std::time::Duration;
+use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result};
 use respire_commands::output::{Item, ResultEnvelope, Status};
 use respire_protocol::{
     HostControlLaunchGrant, HostControlOperation, HostControlParams, RpcRequest, RpcResponse,
     HOST_CONTROL_MAX_FRAME_BYTES, HOST_CONTROL_SCHEMA_V,
+    HostAuthKeygenParams, HostAuthOutcome, HOST_AUTH_SCHEMA_V,
+    HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
 };
 
 const PROTOCOL_V: u32 = respire_commands::rpc_worker::PROTOCOL_V;
 const CONTROL_DEADLINE: Duration = Duration::from_secs(10);
 
+enum ControlEvent {
+    Finished(RpcResponse<ResultEnvelope>),
+    ParentRevoked,
+}
+
 pub(crate) fn run() -> Result<i32> {
-    // This process only reads: hard exit bounds blocked input/output and teardown.
-    // Pipe revocation handles parent loss; no mutable business state exists.
-    std::thread::Builder::new().name("control-deadline".into()).spawn(|| {
-        std::thread::sleep(CONTROL_DEADLINE);
+    let progress = Arc::new(Mutex::new(response("")));
+    let worker_progress = Arc::clone(&progress);
+    let (sent, received) = mpsc::sync_channel(1);
+    std::thread::Builder::new().name("control-operation".into()).spawn(move || {
+        let response = execute(&worker_progress, &sent);
+        let _ = sent.send(ControlEvent::Finished(response));
+    })?;
+    let response = match received.recv_timeout(CONTROL_DEADLINE) {
+        Ok(ControlEvent::Finished(response)) => response,
+        Ok(ControlEvent::ParentRevoked) | Err(_) => {
+            let mut response = progress.lock().map_err(|_| anyhow::anyhow!("control progress unavailable"))?.clone();
+            response.code = Some("control_outcome_unknown".into());
+            response.error = Some("control deadline or parent revocation; query the same operation ID before retrying".into());
+            response.envelope = Some(ResultEnvelope::new(
+                if response.operation_id.is_some() { "keygen" } else { "memory-revision" },
+                Status::Fail, serde_json::json!({"outcome":"unknown"}), vec![
+                    Item::new("control_ready", Status::Skip, "unknown"),
+                    Item::new("store_ready", Status::Skip, "false"),
+                ],
+            ));
+            response
+        }
+    };
+    // All writes are journaled before effects. Main exits after the response;
+    // a deadline never claims rollback or authorizes a replacement operation.
+    std::thread::Builder::new().name("control-output-deadline".into()).spawn(|| {
+        std::thread::sleep(Duration::from_secs(2));
         std::process::exit(2);
     })?;
-    let mut response = response("");
-    let mut control_ready = false;
-    let result = receive_and_execute(&mut response, &mut control_ready);
-    if let Err((code, message)) = result {
-        response.code = Some(code.to_owned());
-        let diagnostic = response.error.take().unwrap_or_else(|| message.to_owned());
-        response.error = Some(diagnostic.clone());
-        let mut envelope = ResultEnvelope::new(
-            "memory-revision", Status::Fail, serde_json::json!({}), Vec::new(),
-        );
-        envelope.errors.push(diagnostic);
-        response.envelope = Some(envelope);
-    }
-    if let Some(envelope) = &mut response.envelope {
-        envelope.items.push(Item::new("control_ready", if control_ready { Status::Ok } else { Status::Fail }, control_ready.to_string()));
-        envelope.items.push(Item::new("store_ready", Status::Skip, "false"));
-    }
     let bytes = serde_json::to_vec(&response)?;
     anyhow::ensure!(bytes.len() <= HOST_CONTROL_MAX_FRAME_BYTES, "host control response too large");
     let mut output = std::io::stdout().lock();
@@ -45,22 +59,78 @@ pub(crate) fn run() -> Result<i32> {
     Ok(response.exit)
 }
 
+fn execute(progress: &Mutex<RpcResponse<ResultEnvelope>>, events: &mpsc::SyncSender<ControlEvent>) -> RpcResponse<ResultEnvelope> {
+    let mut response = response("");
+    let mut control_ready = false;
+    let result = receive_and_execute(&mut response, &mut control_ready, progress, events);
+    if let Err((code, message)) = result {
+        response.code = Some(code.to_owned());
+        let diagnostic = response.error.take().unwrap_or_else(|| message.to_owned());
+        response.error = Some(diagnostic.clone());
+        let mut envelope = ResultEnvelope::new(
+            if response.operation_id.is_some() { "keygen" } else { "memory-revision" },
+            Status::Fail, serde_json::json!({}), Vec::new(),
+        );
+        envelope.errors.push(diagnostic);
+        response.envelope = Some(envelope);
+    }
+    if let Some(envelope) = &mut response.envelope {
+        envelope.items.push(Item::new("control_ready", if control_ready { Status::Ok } else { Status::Fail }, control_ready.to_string()));
+        envelope.items.push(Item::new("store_ready", Status::Skip, "false"));
+    }
+    response
+}
+
 type ControlFailure = (&'static str, &'static str);
 
 fn receive_and_execute(
     response: &mut RpcResponse<ResultEnvelope>,
     control_ready: &mut bool,
+    progress: &Mutex<RpcResponse<ResultEnvelope>>,
+    events: &mpsc::SyncSender<ControlEvent>,
 ) -> std::result::Result<(), ControlFailure> {
     let grant: HostControlLaunchGrant = read_frame()
         .map_err(|_| ("invalid_request", "invalid host control grant frame"))?;
     if grant.protocol_version != PROTOCOL_V {
         return Err(("protocol_version_mismatch", "protocol_version_mismatch"));
     }
-    crate::startup_identity::authorize_control(grant)
-        .map_err(|_| ("unauthorized", "host control launch authorization failed"))?;
     let request: RpcRequest = read_frame()
         .map_err(|_| ("invalid_request", "invalid host control RPC frame"))?;
     response.id = request.id.clone();
+    let auth = request.method == HOST_AUTH_KEYGEN_METHOD || request.method == HOST_AUTH_RESULT_METHOD;
+    if auth {
+        let params = validate_auth_request(&request)?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        crate::startup_identity::authorize_auth_control(grant)
+            .map_err(|_| ("unauthorized", "auth control launch authorization failed"))?;
+        let ownership = crate::startup_identity::acquire_auth_ownership(&params.binding, &params.identity)
+            .map_err(|_| ("auth_ownership_unavailable", "auth control could not acquire the authorized library"))?;
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "auth control parent watch failed"))?;
+        ownership.recover(&params.identity).map_err(|_| ("auth_recovery_required", "auth transaction recovery requires attention"))?;
+        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
+            .map_err(|_| ("scope_mismatch", "auth control identity does not match the consumed grant"))?;
+        *control_ready = true;
+        let result = respire_app::login_transaction::control_keygen(&ownership, &params.identity,
+            request.operation_id.as_deref().ok_or(("invalid_request", "auth operation ID is missing"))?,
+            request.idempotency_key.as_deref().ok_or(("invalid_request", "auth idempotency key is missing"))?,
+            params.force, request.method == HOST_AUTH_RESULT_METHOD)
+            .map_err(|failure| {
+                // Diagnostics stay in this private response, never stderr or argv.
+                response.error = Some(format!("{failure:#}"));
+                ("auth_outcome_unknown", "query the same auth operation ID before retrying")
+            })?;
+        response.ok = result.outcome == HostAuthOutcome::Committed;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("auth_not_committed".into()); }
+        response.envelope = Some(ResultEnvelope::new("keygen", if response.ok { Status::Ok } else { Status::Fail },
+            serde_json::to_value(result).map_err(|_| ("auth_outcome_unknown", "auth result encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
+    crate::startup_identity::authorize_control(grant)
+        .map_err(|_| ("unauthorized", "host control launch authorization failed"))?;
     let params = validate_request(&request)?;
     // Read both frames before letting the watcher own stdin. No further request
     // or argv dispatch is accepted; EOF/extra bytes revoke this read-only child.
@@ -93,6 +163,40 @@ fn receive_and_execute(
     response.ok = true;
     response.exit = 0;
     Ok(())
+}
+
+fn watch_auth_parent(events: mpsc::SyncSender<ControlEvent>) -> std::io::Result<()> {
+    std::thread::Builder::new().name("auth-control-parent".into()).spawn(move || {
+        let mut input = std::io::stdin();
+        let mut byte = [0u8; 1];
+        loop {
+            match input.read(&mut byte) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => { let _ = events.send(ControlEvent::ParentRevoked); break; }
+            }
+        }
+    })?;
+    Ok(())
+}
+
+pub(crate) fn validate_auth_request(request: &RpcRequest) -> std::result::Result<HostAuthKeygenParams, ControlFailure> {
+    if request.v != PROTOCOL_V { return Err(("protocol_version_mismatch", "protocol_version_mismatch")); }
+    let uuid = |value: &str| uuid::Uuid::parse_str(value)
+        .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value);
+    if !uuid(&request.id) || !request.operation_id.as_deref().is_some_and(uuid)
+        || request.idempotency_key.as_ref().is_none_or(|key| key.is_empty() || key.len() > 128
+            || !key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
+        || ![HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD].contains(&request.method.as_str())
+        || request.args.len() != 1 || request.scope.is_some() || request.parent_operation_id.is_some()
+        || request.queue_wait_ms.is_some() || request.lifecycle.is_some() {
+        return Err(("invalid_request", "unsupported auth control RPC shape"));
+    }
+    let params: HostAuthKeygenParams = serde_json::from_str(&request.args[0])
+        .map_err(|_| ("invalid_request", "invalid auth control params"))?;
+    if params.schema_version != HOST_AUTH_SCHEMA_V {
+        return Err(("invalid_request", "unsupported auth control schema"));
+    }
+    Ok(params)
 }
 
 pub(crate) fn validate_request(

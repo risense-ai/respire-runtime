@@ -27,9 +27,12 @@ struct LaunchContext {
 struct Startup {
     context: LaunchContext,
     grant: Option<LaunchGrant>,
+    auth_control: bool,
 }
 
 pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -> Result<()> {
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+        "interrupted auth control must be recovered before serving");
     anyhow::ensure!(
         STARTUP.get().is_none(),
         "runtime startup was authorized twice"
@@ -69,7 +72,7 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     };
     respire_commands::rpc_serve::set_launch_instance_id(&instance_id)?;
     STARTUP
-        .set(Startup { context, grant })
+        .set(Startup { context, grant, auth_control: false })
         .map_err(|_| anyhow::anyhow!("runtime startup identity was installed twice"))?;
     Ok(())
 }
@@ -81,8 +84,16 @@ pub(crate) fn managed_id() -> Option<&'static str> {
 /// An owned inherited channel is the capability, not the serialized identity.
 /// Do not consume a serving grant file or create runtime state for a read probe.
 pub(crate) fn authorize_control(grant: LaunchGrant) -> Result<()> {
+    authorize_control_inner(grant, false)
+}
+
+pub(crate) fn authorize_auth_control(grant: LaunchGrant) -> Result<()> {
+    authorize_control_inner(grant, true)
+}
+
+fn authorize_control_inner(grant: LaunchGrant, auth: bool) -> Result<()> {
     anyhow::ensure!(STARTUP.get().is_none(), "runtime control grant was already consumed");
-    respire_commands::runtime_policy::require_host("offline memory revision")?;
+    respire_commands::runtime_policy::require_host("offline host control")?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
     respire_app::service::validate_client_config()?;
     let resolved_profile = respire_app::service::data_dir();
@@ -98,14 +109,47 @@ pub(crate) fn authorize_control(grant: LaunchGrant) -> Result<()> {
         &grant.nonce,
         now_ms()?,
     )?;
-    verify_authority(Some(&grant), &context)?;
+    verify_authority_for_mode(Some(&grant), &context, auth)?;
     // Strict parsing must precede accepting the legacy account/path hash.
-    control_account(&context.profile)?;
+    if !auth { control_account(&context.profile)?; }
     // Pin the exact resolved spelling used by memory_revision before it opens DB.
-    respire_app::service::install_runtime_profile(resolved_profile);
-    STARTUP.set(Startup { context, grant: Some(grant) })
+    if !auth { respire_app::service::install_runtime_profile(resolved_profile); }
+    STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth })
         .map_err(|_| anyhow::anyhow!("runtime control grant was already consumed"))?;
     Ok(())
+}
+
+pub(crate) fn verify_auth_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::login_transaction::verify_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    verify_managed_boot()
+}
+
+pub(crate) fn acquire_auth_ownership(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<respire_app::login_transaction::AuthOwnership> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    let ownership = respire_app::login_transaction::AuthOwnership::acquire(&startup.context.root, &startup.context.profile)?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    verify_managed_boot()?;
+    Ok(ownership)
 }
 
 pub(crate) fn verify_control_binding(binding: &respire_protocol::ControlBinding) -> Result<()> {
@@ -152,11 +196,15 @@ pub(crate) fn verify_managed_boot() -> Result<()> {
     let startup = STARTUP
         .get()
         .context("runtime startup authorization is missing")?;
+    if !startup.auth_control {
+        anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+            "interrupted auth control must be recovered before opening the store");
+    }
     anyhow::ensure!(
         current_context(startup.context.port)? == startup.context,
         "runtime launch context changed before opening the store"
     );
-    verify_authority(startup.grant.as_ref(), &startup.context)
+    verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.auth_control)
 }
 
 fn current_context(port: u16) -> Result<LaunchContext> {
@@ -233,6 +281,10 @@ fn validate_grant(
 }
 
 fn verify_authority(grant: Option<&LaunchGrant>, context: &LaunchContext) -> Result<()> {
+    verify_authority_for_mode(grant, context, false)
+}
+
+fn verify_authority_for_mode(grant: Option<&LaunchGrant>, context: &LaunchContext, auth: bool) -> Result<()> {
     let control = context.root.join("runtime").join("autostart");
     let registration_bytes = read_private_file(&control.join("registration.json"))?;
     let maintenance_bytes = read_private_file(&control.join("maintenance.json"))?;
@@ -255,13 +307,14 @@ fn verify_authority(grant: Option<&LaunchGrant>, context: &LaunchContext) -> Res
         .as_ref()
         .map(|bytes| parse_control(bytes))
         .transpose()?;
-    validate_control(
+    validate_control_for_mode(
         grant,
         context,
         registration.as_ref(),
         registration_bytes.as_deref(),
         maintenance.as_ref(),
         maintenance_bytes.as_deref(),
+        auth,
     )?;
     if let Some(grant) = grant {
         anyhow::ensure!(
@@ -280,6 +333,7 @@ fn verify_authority(grant: Option<&LaunchGrant>, context: &LaunchContext) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_control(
     grant: Option<&LaunchGrant>,
     context: &LaunchContext,
@@ -287,6 +341,18 @@ fn validate_control(
     registration_bytes: Option<&[u8]>,
     maintenance: Option<&Value>,
     maintenance_bytes: Option<&[u8]>,
+) -> Result<()> {
+    validate_control_for_mode(grant, context, registration, registration_bytes, maintenance, maintenance_bytes, false)
+}
+
+fn validate_control_for_mode(
+    grant: Option<&LaunchGrant>,
+    context: &LaunchContext,
+    registration: Option<&Value>,
+    registration_bytes: Option<&[u8]>,
+    maintenance: Option<&Value>,
+    maintenance_bytes: Option<&[u8]>,
+    auth: bool,
 ) -> Result<()> {
     if let Some(grant) = grant {
         anyhow::ensure!(
@@ -361,7 +427,8 @@ fn validate_control(
                     && binding.controller_pid > 0
                     && marker["expected_profile"].as_str().map(Path::new)
                         == Some(context.profile.as_path())
-                    && matches!(marker["phase"].as_str(), Some("Starting" | "Verified")),
+                    && if auth { marker["phase"] == "Paused" }
+                        else { matches!(marker["phase"].as_str(), Some("Starting" | "Verified")) },
                 "runtime maintenance does not authorize this launch"
             );
             Ok(())
@@ -658,6 +725,29 @@ mod tests {
         binding.expected_account_id = None;
         validate_control_binding(&binding, &context, &grant, None)?;
         assert!(validate_control_binding(&binding, &context, &grant, Some(&context.account_id)).is_err());
+        let mut auth: respire_protocol::RpcRequest = serde_json::from_value(json!({
+            "v": respire_commands::rpc_worker::PROTOCOL_V,
+            "id": grant.instance_id,
+            "operation_id": grant.instance_id,
+            "idempotency_key": grant.instance_id,
+            "method": respire_protocol::HOST_AUTH_KEYGEN_METHOD,
+            "args": [serde_json::to_string(&respire_protocol::HostAuthKeygenParams {
+                schema_version: respire_protocol::HOST_AUTH_SCHEMA_V,
+                binding, identity: respire_protocol::HostAuthIdentity::Absent, force: false,
+            })?],
+        }))?;
+        assert!(crate::host_control::validate_auth_request(&auth).is_ok());
+        assert!(crate::host_control::validate_request(&auth).is_err());
+        let mut changed = auth.clone();
+        changed.operation_id = None;
+        assert!(crate::host_control::validate_auth_request(&changed).is_err());
+        changed = auth.clone();
+        changed.idempotency_key = None;
+        assert!(crate::host_control::validate_auth_request(&changed).is_err());
+        auth.scope = Some(respire_protocol::RuntimeRequestScope {
+            account_id: context.account_id.clone(), instance_id: grant.instance_id, generation: 1,
+        });
+        assert!(crate::host_control::validate_auth_request(&auth).is_err());
         Ok(())
     }
 
@@ -763,6 +853,18 @@ mod tests {
             Some(&changed)
         )
         .is_err());
+        grant.maintenance.as_mut().context("maintenance binding is missing")?.marker_sha256 = hash(&changed);
+        assert!(validate_control(Some(&grant), &context, Some(&registration), Some(&bytes), Some(&marker), Some(&changed)).is_err());
+        validate_control_for_mode(Some(&grant), &context, Some(&registration), Some(&bytes), Some(&marker), Some(&changed), true)?;
+        marker["phase"] = json!("Starting");
+        let changed = serde_json::to_vec(&marker)?;
+        grant.maintenance.as_mut().context("maintenance binding is missing")?.marker_sha256 = hash(&changed);
+        assert!(validate_control_for_mode(Some(&grant), &context, Some(&registration), Some(&bytes), Some(&marker), Some(&changed), true).is_err());
+        marker["phase"] = json!("Paused");
+        marker["expected_profile"] = json!("other-profile");
+        let changed = serde_json::to_vec(&marker)?;
+        grant.maintenance.as_mut().context("maintenance binding is missing")?.marker_sha256 = hash(&changed);
+        assert!(validate_control_for_mode(Some(&grant), &context, Some(&registration), Some(&bytes), Some(&marker), Some(&changed), true).is_err());
         Ok(())
     }
 

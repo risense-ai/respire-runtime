@@ -74,3 +74,46 @@ pub struct HostControlParams {
     pub schema_version: u32,
     pub binding: ControlBinding,
 }
+
+/// Auth-only identity. A valid unbound session needs its committed keygen receipt.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostAuthIdentity {
+    Absent,
+    Unbound { operation_id: String, session_sha256: String },
+    Bound { account_id: String, session_sha256: String },
+}
+
+/// Operation ID and idempotency key are mandatory in the outer RpcRequest.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthKeygenParams {
+    pub schema_version: u32,
+    pub binding: ControlBinding,
+    pub identity: HostAuthIdentity,
+    pub force: bool,
+}
+
+pub const HOST_AUTH_SCHEMA_V: u32 = 1;
+pub const HOST_AUTH_KEYGEN_METHOD: &str = "control.auth.keygen";
+pub const HOST_AUTH_RESULT_METHOD: &str = "control.auth.result";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAuthOutcome {
+    Committed,
+    RolledBack,
+    Unknown,
+}
+
+/// The recovery code is returned only over the inherited private response pipe.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthResult {
+    pub operation_id: String,
+    pub outcome: HostAuthOutcome,
+    pub session_sha256: Option<String>,
+    pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub super_password: Option<String>,
+}

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod host_control;
 pub use host_control::{
+    HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
+    HOST_AUTH_SCHEMA_V, HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
     ControlBinding, HostControlLaunchGrant, HostControlMaintenanceBinding,
     HostControlOperation, HostControlParams,
     HOST_CONTROL_MAX_FRAME_BYTES, HOST_CONTROL_SCHEMA_V,
