@@ -230,7 +230,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     let v1_secret = crate::memory::crypto::generate_account_secret();
     let v1_salt = crate::memory::crypto::random_hex(16);
     let v1_urk = crate::memory::crypto::generate_key();
-    let (v1_wrap, v1_nonce) = crate::memory::crypto::wrap_key(&v1_urk,
+    let (v1_nonce, v1_wrap) = crate::memory::crypto::wrap_key(&v1_urk,
         &crate::memory::crypto::derive_kek("", &v1_secret, &v1_salt)?)?;
     let v1_intent = HostKeyOperation::Fivekeys { addr: String::new(), user: "fivekeys-v1-fixture".to_owned(),
         kdf_salt: v1_salt, wrapped_urk: v1_wrap, urk_nonce: v1_nonce, use_super: false };
