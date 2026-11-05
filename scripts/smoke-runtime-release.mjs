@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawn, execFileSync} from 'node:child_process';
 import {chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
-import {isAbsolute, join, relative, resolve, sep} from 'node:path';
+import {isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -15,6 +15,13 @@ function archiveArgs(mode, archiveFile, destination) {
   // GNU tar treats a drive-letter archive path as a remote host.
   assert.ok(safePath(archiveFile) && !archiveFile.includes('/'), 'archive must be a relative filename');
   return [mode, archiveFile, ...(destination ? ['-C', destination] : [])];
+}
+function archiveTool(platform, systemRoot) {
+  if (platform !== 'win32') return 'tar';
+  assert.ok(typeof systemRoot === 'string' && systemRoot.trim() && win32.isAbsolute(systemRoot),
+    'Windows smoke requires an absolute SystemRoot; refusing PATH tar');
+  // Git's GNU tar cannot interpret native Windows extraction directories.
+  return win32.join(systemRoot, 'System32', 'tar.exe');
 }
 function assertNativeIntel({runnerArch, platform, arch, arm64, translated}) {
   assert.equal(runnerArch, 'X64', 'Intel acceptance requires an X64 runner');
@@ -41,6 +48,12 @@ function assertProtocol(health) {
   assert.deepEqual(health.protocol_range, {minimum: 1, maximum: 1});
 }
 if (process.argv.includes('--self-check')) {
+  assert.equal(archiveTool('win32', 'C:\\Windows'), 'C:\\Windows\\System32\\tar.exe');
+  assert.equal(archiveTool('win32', 'D:/Windows'), 'D:\\Windows\\System32\\tar.exe');
+  for (const root of [undefined, null, '', ' ', 'Windows', 'C:Windows']) {
+    assert.throws(() => archiveTool('win32', root), /requires an absolute SystemRoot/);
+  }
+  for (const platform of ['linux', 'darwin']) assert.equal(archiveTool(platform, undefined), 'tar');
   const archiveFile = 'rsrs-runtime-x86_64-pc-windows-msvc.tar.gz';
   for (const mode of ['-tzf', '-tvzf', '-xzf']) {
     assert.deepEqual(archiveArgs(mode, archiveFile), [mode, archiveFile]);
@@ -118,8 +131,9 @@ const report = {target, version, source_commit: metadata.source_commit,
   coverage: ['complete-release-payload', 'os-bound-startup-health', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
 try {
+  const tar = archiveTool(process.platform, process.env.SystemRoot);
   const archive = metadata.archive_file;
-  const names = execFileSync('tar', archiveArgs('-tzf', archive), {cwd: assets, encoding: 'utf8', maxBuffer: 2 << 20})
+  const names = execFileSync(tar, archiveArgs('-tzf', archive), {cwd: assets, encoding: 'utf8', maxBuffer: 2 << 20})
     .trim().split(/\r?\n/).filter(Boolean);
   assert.ok(names.length > 0 && names.length <= 4096);
   const seen = new Set();
@@ -130,13 +144,13 @@ try {
     assert.ok(!seen.has(name.toLowerCase()), `duplicate archive path: ${name}`);
     seen.add(name.toLowerCase());
   }
-  const listing = execFileSync('tar', archiveArgs('-tvzf', archive), {cwd: assets, encoding: 'utf8', maxBuffer: 4 << 20}).trim().split(/\r?\n/);
+  const listing = execFileSync(tar, archiveArgs('-tvzf', archive), {cwd: assets, encoding: 'utf8', maxBuffer: 4 << 20}).trim().split(/\r?\n/);
   assert.equal(listing.length, names.length);
   for (const line of listing) {
     assert.ok(/^[d-]/.test(line) && !line.includes(' -> ') && !line.includes(' link to '),
       'release smoke accepts only regular files and directories');
   }
-  execFileSync('tar', archiveArgs('-xzf', archive, payload), {cwd: assets, stdio: 'pipe'});
+  execFileSync(tar, archiveArgs('-xzf', archive, payload), {cwd: assets, stdio: 'pipe'});
   assert.ok(Array.isArray(metadata.files) && metadata.files.length > 0);
   const expected = new Set();
   for (const entry of metadata.files) {
