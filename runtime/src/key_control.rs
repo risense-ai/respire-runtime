@@ -12,7 +12,7 @@ impl KeyRequest {
     pub(crate) fn parse(request: &RpcRequest) -> Result<Self> {
         let canonical = |value: &str| uuid::Uuid::parse_str(value)
             .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value);
-        ensure!(request.v == respire_commands::rpc_client::PROTOCOL_V && canonical(&request.id)
+        ensure!(request.v == respire_commands::rpc_worker::PROTOCOL_V && canonical(&request.id)
             && request.operation_id.as_deref().is_some_and(canonical)
             && request.idempotency_key.as_ref().is_some_and(|key| !key.is_empty() && key.len() <= 128
                 && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))

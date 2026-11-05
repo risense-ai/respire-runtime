@@ -18,7 +18,7 @@ pub(crate) enum SecretRequest {
 impl SecretRequest {
     pub(crate) fn parse(request: &RpcRequest) -> Result<Self> {
         let id = uuid::Uuid::parse_str(&request.id).context("invalid secret read request ID")?;
-        anyhow::ensure!(request.v == respire_commands::rpc_client::PROTOCOL_V
+        anyhow::ensure!(request.v == respire_commands::rpc_worker::PROTOCOL_V
             && id.get_version_num() == 4 && id.to_string() == request.id
             && request.args.len() == 1 && request.scope.is_none()
             && request.operation_id.is_none() && request.idempotency_key.is_none()

@@ -18,7 +18,7 @@ pub(crate) enum IdentityRequest {
 impl IdentityRequest {
     pub(crate) fn parse(request: &RpcRequest) -> Result<Self> {
         let id = uuid::Uuid::parse_str(&request.id).context("invalid identity read request ID")?;
-        ensure!(request.v == respire_commands::rpc_client::PROTOCOL_V
+        ensure!(request.v == respire_commands::rpc_worker::PROTOCOL_V
             && id.get_version_num() == 4 && id.to_string() == request.id
             && request.method == HOST_IDENTITY_SESSION_LIST_METHOD
             && request.args.len() == 1 && request.scope.is_none()
