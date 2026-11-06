@@ -1,24 +1,28 @@
 //! Same-directory file publication used by host snapshot transactions.
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
-fn same_parent(source: &Path, destination: &Path) -> io::Result<()> {
+fn same_parent(source: &Path, destination: &Path) -> io::Result<PathBuf> {
     let source_parent = source
         .parent()
         .ok_or_else(|| io::Error::other("source has no parent"))?;
     let destination_parent = destination
         .parent()
         .ok_or_else(|| io::Error::other("destination has no parent"))?;
-    if fs::canonicalize(source_parent)? != fs::canonicalize(destination_parent)? {
+    let parent = fs::canonicalize(source_parent)?;
+    if parent != fs::canonicalize(destination_parent)? {
         return Err(io::Error::other(
             "durable publication requires the same directory",
         ));
     }
-    Ok(())
+    Ok(parent)
 }
 
 /// Publish an already-flushed regular file without overwriting an existing name.
 pub fn publish_new_file(source: &Path, destination: &Path) -> io::Result<()> {
-    same_parent(source, destination)?;
+    let _parent = same_parent(source, destination)?;
     #[cfg(unix)]
     {
         fs::hard_link(source, destination)?;
@@ -31,13 +35,13 @@ pub fn publish_new_file(source: &Path, destination: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        move_windows(source, destination, false)
+        move_windows(source, destination, &_parent, false)
     }
 }
 
 /// Replace a regular file in the same directory and flush namespace changes.
 pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    same_parent(source, destination)?;
+    let _parent = same_parent(source, destination)?;
     #[cfg(unix)]
     {
         fs::rename(source, destination)?;
@@ -49,7 +53,7 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        move_windows(source, destination, true)
+        move_windows(source, destination, &_parent, true)
     }
 }
 
@@ -68,7 +72,7 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn move_windows(source: &Path, destination: &Path, replace: bool) -> io::Result<()> {
+fn move_windows(source: &Path, destination: &Path, parent: &Path, replace: bool) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -84,8 +88,19 @@ fn move_windows(source: &Path, destination: &Path, replace: bool) -> io::Result<
         value.push(0);
         Ok(value)
     };
-    let source = wide(source)?;
-    let destination = wide(destination)?;
+    // The checked canonical parent carries Windows' long-path prefix; the target may not exist.
+    let source = parent.join(
+        source
+            .file_name()
+            .ok_or_else(|| io::Error::other("source has no file name"))?,
+    );
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| io::Error::other("destination has no file name"))?,
+    );
+    let source = wide(&source)?;
+    let destination = wide(&destination)?;
     let flags = MOVEFILE_WRITE_THROUGH
         | if replace {
             MOVEFILE_REPLACE_EXISTING

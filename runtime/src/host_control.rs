@@ -514,6 +514,65 @@ fn receive_and_execute(
         *control_ready = true;
         return Ok(());
     }
+    if request.method == respire_protocol::maintenance_control::LEGACY_SNAPSHOT_RECOVERY_METHOD {
+        use respire_protocol::maintenance_control::{LegacySnapshotRecoveryResult, MaintenanceState};
+        let params = crate::snapshot_authority::legacy_request(&request)
+            .map_err(|_| ("invalid_request", "invalid legacy snapshot recovery request"))?;
+        response.operation_id = request.operation_id.clone();
+        response.idempotency_key = request.idempotency_key.clone();
+        response.envelope = Some(ResultEnvelope::new("snapshot", Status::Fail,
+            serde_json::json!({}), Vec::new()));
+        let marker = crate::startup_identity::read_private_file(
+            &grant.installation_root.join("runtime/autostart/maintenance.json"))
+            .map_err(|_| ("unauthorized", "legacy snapshot maintenance marker unavailable"))?
+            .ok_or(("unauthorized", "legacy snapshot maintenance marker missing"))?;
+        crate::snapshot_authority::validate_legacy_launch(&grant, &marker, &params)
+            .map_err(|_| ("unauthorized", "invalid legacy snapshot recovery capability"))?;
+        crate::startup_identity::authorize_snapshot_control(grant, false)
+            .map_err(|_| ("unauthorized", "legacy snapshot launch authorization failed"))?;
+        let verified_grant = crate::startup_identity::consumed_control_grant()
+            .map_err(|_| ("unauthorized", "legacy snapshot authorized grant unavailable"))?;
+        response.data_dir = Some(verified_grant.profile.to_str()
+            .ok_or(("scope_mismatch", "legacy snapshot profile is not UTF-8"))?.to_owned());
+        let mut result = LegacySnapshotRecoveryResult {
+            recovery_operation_id: params.recovery_operation_id.clone(),
+            request_fingerprint: params.request_fingerprint.clone(),
+            journal_sha256: params.journal_sha256.clone(),
+            state: MaintenanceState::Unknown,
+            cleanup_pending: false,
+            cleanup_warning: None,
+        };
+        response.envelope = Some(ResultEnvelope::new("snapshot", Status::Pending,
+            serde_json::to_value(&result)
+                .map_err(|_| ("control_unavailable", "legacy snapshot progress encoding failed"))?, Vec::new()));
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
+        watch_auth_parent(events.clone())
+            .map_err(|_| ("unauthorized", "legacy snapshot parent watch failed"))?;
+        events.send(ControlEvent::LongControlStarted)
+            .map_err(|_| ("control_unavailable", "legacy snapshot controller unavailable"))?;
+        let session = respire_app::auth::read_session_json()
+            .map_err(|_| ("scope_mismatch", "legacy snapshot session is invalid"))?;
+        let account = session["user"].as_str().filter(|value| !value.is_empty())
+            .ok_or(("scope_mismatch", "legacy snapshot account is missing"))?;
+        match crate::snapshot_authority::dispatch_legacy_recovery(&params, account) {
+            Ok(receipt) => result = receipt,
+            Err(_) => {
+                response.code = Some("snapshot_outcome_unknown".into());
+                response.error = Some("legacy snapshot recovery unconfirmed; retain maintenance and query the same recovery operation".into());
+            }
+        }
+        *control_ready = true;
+        response.ok = result.state != MaintenanceState::Unknown;
+        response.exit = if response.ok { 0 } else { 2 };
+        if !response.ok { response.code = Some("snapshot_outcome_unknown".into()); }
+        let status = if !response.ok { Status::Fail }
+            else if result.cleanup_pending { Status::Warn }
+            else { Status::Ok };
+        response.envelope = Some(ResultEnvelope::new("snapshot", status,
+            serde_json::to_value(result)
+                .map_err(|_| ("snapshot_outcome_unknown", "legacy snapshot receipt encoding failed"))?, Vec::new()));
+        return Ok(());
+    }
     if request.method == respire_protocol::maintenance_control::MAINTENANCE_CONTROL_METHOD {
         use respire_protocol::maintenance_control::{MaintenanceAction, MaintenanceControlParams, MaintenanceState};
         if request.args.len() != 1 { return Err(("invalid_request", "invalid snapshot maintenance shape")); }
@@ -538,6 +597,12 @@ fn receive_and_execute(
         }.map_err(|_| ("unauthorized", "snapshot capability or role is invalid"))?;
         crate::startup_identity::authorize_snapshot_control(grant, finalize)
             .map_err(|_| ("unauthorized", "snapshot launch authorization failed"))?;
+        let verified_grant = crate::startup_identity::consumed_control_grant()
+            .map_err(|_| ("unauthorized", "snapshot authorized grant unavailable"))?;
+        response.data_dir = Some(verified_grant.profile.to_str()
+            .ok_or(("scope_mismatch", "snapshot authorized profile is not UTF-8"))?.to_owned());
+        // Preserve the authorized profile in deadline and parent-revocation responses too.
+        *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "snapshot parent watch failed"))?;
         events.send(ControlEvent::LongControlStarted)

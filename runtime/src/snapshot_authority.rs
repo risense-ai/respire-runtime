@@ -28,6 +28,8 @@ struct SnapshotBinding {
     offline: Option<OfflineProof>,
     #[serde(default)]
     verified_runtime: Option<VerifiedRuntime>,
+    #[serde(default)]
+    legacy_recovery: Option<respire_protocol::maintenance_control::LegacySnapshotRecoveryBinding>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +55,157 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+pub(crate) fn legacy_request(
+    request: &RpcRequest,
+) -> Result<respire_protocol::maintenance_control::LegacySnapshotRecoveryParams> {
+    use respire_protocol::maintenance_control::LEGACY_SNAPSHOT_RECOVERY_METHOD;
+    anyhow::ensure!(
+        request.v == respire_commands::rpc_worker::PROTOCOL_V
+            && request.method == LEGACY_SNAPSHOT_RECOVERY_METHOD
+            && request.args.len() == 1
+            && canonical_operation(&request.id)
+            && request.scope.is_none()
+            && request.parent_operation_id.is_none()
+            && request.queue_wait_ms.is_none()
+            && request.lifecycle.is_none(),
+        "invalid legacy snapshot recovery request shape"
+    );
+    let params: respire_protocol::maintenance_control::LegacySnapshotRecoveryParams =
+        serde_json::from_str(&request.args[0])?;
+    anyhow::ensure!(
+        params.schema_version == MAINTENANCE_CONTROL_SCHEMA_V
+            && canonical_operation(&params.recovery_operation_id)
+            && request.operation_id.as_deref() == Some(params.recovery_operation_id.as_str())
+            && request.idempotency_key == request.operation_id
+            && digest_shape(&params.journal_sha256)
+            && digest_shape(&params.request_fingerprint)
+            && legacy_fingerprint(&params)? == params.request_fingerprint,
+        "invalid legacy snapshot recovery identity"
+    );
+    Ok(params)
+}
+
+fn canonical_operation(value: &str) -> bool {
+    uuid::Uuid::parse_str(value)
+        .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value)
+}
+
+fn digest_shape(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn legacy_fingerprint(
+    params: &respire_protocol::maintenance_control::LegacySnapshotRecoveryParams,
+) -> Result<String> {
+    Ok(hash(&serde_json::to_vec(&(
+        "snapshot-legacy-recovery-v1",
+        &params.binding.installation_root,
+        &params.binding.profile,
+        &params.binding.expected_account_id,
+        &params.recovery_operation_id,
+        &params.journal_sha256,
+    ))?))
+}
+
+pub(crate) fn validate_legacy_launch(
+    grant: &HostControlLaunchGrant,
+    bytes: &[u8],
+    params: &respire_protocol::maintenance_control::LegacySnapshotRecoveryParams,
+) -> Result<()> {
+    let snapshot = validate_marker_ownership(grant, bytes, false)?;
+    let recovery = snapshot.legacy_recovery.as_ref()
+        .context("legacy recovery requires its own marker binding")?;
+    anyhow::ensure!(
+        snapshot.operation_id.is_empty() && snapshot.request_fingerprint.is_empty()
+            && snapshot.sync_generation == 0 && snapshot.snapshot_id.is_empty()
+            && params.schema_version == MAINTENANCE_CONTROL_SCHEMA_V
+            && canonical_operation(&params.recovery_operation_id)
+            && digest_shape(&params.journal_sha256)
+            && legacy_fingerprint(params)? == params.request_fingerprint
+            && params.binding.installation_root == grant.installation_root
+            && params.binding.profile == grant.profile
+            && params.binding.launch_id == grant.instance_id
+            && params.binding.expected_account_id.as_deref() == Some(grant.account_id.as_str())
+            && recovery.account_id == grant.account_id
+            && recovery.recovery_operation_id == params.recovery_operation_id
+            && recovery.request_fingerprint == params.request_fingerprint
+            && recovery.journal_sha256 == params.journal_sha256,
+        "legacy recovery differs from its exact capability or impersonates an original operation"
+    );
+    Ok(())
+}
+
+pub(crate) fn authorize_legacy_recovery(
+    params: &respire_protocol::maintenance_control::LegacySnapshotRecoveryParams,
+) -> Result<()> {
+    let grant = crate::startup_identity::consumed_control_grant()?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    crate::startup_identity::verify_managed_boot()?;
+    let bytes = crate::startup_identity::read_private_file(&marker_path(grant))?
+        .context("legacy snapshot maintenance marker disappeared")?;
+    validate_legacy_launch(grant, &bytes, params)
+}
+
+pub(crate) fn dispatch_legacy_recovery(
+    params: &respire_protocol::maintenance_control::LegacySnapshotRecoveryParams,
+    account: &str,
+) -> Result<respire_protocol::maintenance_control::LegacySnapshotRecoveryResult> {
+    use respire_protocol::maintenance_control::{LegacySnapshotRecoveryAction, LegacySnapshotRecoveryResult};
+    use respire_protocol::maintenance_control::MaintenanceState;
+    authorize_legacy_recovery(params)?;
+    let grant = crate::startup_identity::consumed_control_grant()?;
+    anyhow::ensure!(!account.is_empty() && hash(account.as_bytes()) == grant.account_id,
+        "legacy snapshot account differs from the authorized grant");
+    // Keep the same installation-before-profile lock order as original snapshot maintenance.
+    let _owner = respire_app::lock::LibraryLock::acquire(
+        &grant.installation_root.join("runtime"), std::time::Duration::ZERO)?;
+    let ownership = respire_app::lock::LibraryLock::acquire(
+        &grant.profile, std::time::Duration::from_secs(15))?;
+    authorize_legacy_recovery(params)?;
+    let operation = respire_app::snapshot::SnapshotOperation {
+        operation_id: params.recovery_operation_id.clone(),
+        request_fingerprint: params.request_fingerprint.clone(),
+    };
+    let mut status = respire_app::snapshot::legacy_recovery_status(
+        &grant.profile, account, &operation, &params.journal_sha256)?;
+    // A recorded recovery is query-only even when the caller repeats Recover.
+    if status.is_none() && params.action == LegacySnapshotRecoveryAction::Recover {
+        let description = respire_app::snapshot::describe_legacy_recovery(&grant.profile, account)?;
+        anyhow::ensure!(description.journal_sha256 == params.journal_sha256
+            && description.account_fingerprint == grant.account_id,
+            "legacy journal differs from the approved recovery description");
+        respire_app::service::ensure_writable()?;
+        authorize_legacy_recovery(params)?;
+        status = Some(respire_app::snapshot::recover_legacy_locked(
+            &grant.profile, account, &description, &operation, &ownership)?);
+    }
+    authorize_legacy_recovery(params)?;
+    let (state, cleanup_pending, cleanup_warning) = match status {
+        Some(status) => (legacy_stage(&status.phase)?, status.cleanup_pending, status.cleanup_warning),
+        None => (MaintenanceState::Unknown, false, None),
+    };
+    Ok(LegacySnapshotRecoveryResult {
+        recovery_operation_id: params.recovery_operation_id.clone(),
+        request_fingerprint: params.request_fingerprint.clone(),
+        journal_sha256: params.journal_sha256.clone(),
+        state,
+        cleanup_pending,
+        cleanup_warning,
+    })
+}
+
+fn legacy_stage(phase: &str) -> Result<respire_protocol::maintenance_control::MaintenanceState> {
+    use respire_protocol::maintenance_control::MaintenanceState;
+    match phase {
+        "prepared" => Ok(MaintenanceState::Prepared),
+        "installed" => Ok(MaintenanceState::Installed),
+        "verified" => Ok(MaintenanceState::Verified),
+        "released" => Ok(MaintenanceState::Released),
+        "rolled_back" => Ok(MaintenanceState::RolledBack),
+        _ => anyhow::bail!("unsupported legacy snapshot journal stage"),
+    }
+}
+
 fn marker_path(grant: &HostControlLaunchGrant) -> PathBuf {
     grant
         .installation_root
@@ -72,6 +225,39 @@ pub(crate) fn validate_finalize_launch(grant: &HostControlLaunchGrant, bytes: &[
 }
 
 fn validate_marker(
+    grant: &HostControlLaunchGrant,
+    bytes: &[u8],
+    finalize: bool,
+) -> Result<SnapshotBinding> {
+    let snapshot = validate_marker_ownership(grant, bytes, finalize)?;
+    anyhow::ensure!(snapshot.legacy_recovery.is_none(),
+        "legacy recovery cannot impersonate an original snapshot operation");
+    let params = Params {
+        schema_version: MAINTENANCE_CONTROL_SCHEMA_V,
+        binding: respire_protocol::ControlBinding {
+            installation_root: grant.installation_root.clone(),
+            profile: grant.profile.clone(),
+            launch_id: grant.instance_id.clone(),
+            expected_account_id: Some(snapshot.account_id.clone()),
+        },
+        operation_id: snapshot.operation_id.clone(),
+        request_fingerprint: snapshot.request_fingerprint.clone(),
+        sync_generation: snapshot.sync_generation,
+        snapshot_id: snapshot.snapshot_id.clone(),
+        action: Action::Query,
+    };
+    anyhow::ensure!(
+        uuid::Uuid::parse_str(&snapshot.operation_id)
+            .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == snapshot.operation_id)
+            && snapshot.snapshot_id.len() == 32
+            && snapshot.snapshot_id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && crate::maintenance_control::fingerprint(&params)? == snapshot.request_fingerprint,
+        "invalid snapshot marker operation identity"
+    );
+    Ok(snapshot)
+}
+
+fn validate_marker_ownership(
     grant: &HostControlLaunchGrant,
     bytes: &[u8],
     finalize: bool,
@@ -178,31 +364,6 @@ fn validate_marker(
             "snapshot stop receipt differs from published drain"
         );
     }
-    let params = Params {
-        schema_version: MAINTENANCE_CONTROL_SCHEMA_V,
-        binding: respire_protocol::ControlBinding {
-            installation_root: grant.installation_root.clone(),
-            profile: grant.profile.clone(),
-            launch_id: grant.instance_id.clone(),
-            expected_account_id: Some(snapshot.account_id.clone()),
-        },
-        operation_id: snapshot.operation_id.clone(),
-        request_fingerprint: snapshot.request_fingerprint.clone(),
-        sync_generation: snapshot.sync_generation,
-        snapshot_id: snapshot.snapshot_id.clone(),
-        action: Action::Query,
-    };
-    anyhow::ensure!(
-        uuid::Uuid::parse_str(&snapshot.operation_id)
-            .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == snapshot.operation_id)
-            && snapshot.snapshot_id.len() == 32
-            && snapshot
-                .snapshot_id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            && crate::maintenance_control::fingerprint(&params)? == snapshot.request_fingerprint,
-        "invalid snapshot marker operation identity"
-    );
     Ok(snapshot)
 }
 

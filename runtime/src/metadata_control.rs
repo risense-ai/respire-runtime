@@ -102,6 +102,8 @@ impl OfflineReadRequest {
         let params: HostMetadataReadParams = serde_json::from_str(&request.args[0])
             .context("invalid offline read parameters")?;
         anyhow::ensure!(params.schema_version == HOST_METADATA_SCHEMA_V, "invalid offline read schema");
+        anyhow::ensure!(!params.legacy_snapshot_discovery || kind == HostOfflineRead::SnapshotPreflight,
+            "legacy snapshot discovery requires snapshot preflight");
         Ok(Self { kind, params })
     }
 
@@ -112,6 +114,34 @@ impl OfflineReadRequest {
             HostOfflineRead::MetadataStatus => respire_commands::engine::metadata_status_result(),
             HostOfflineRead::AgentConfigRead => respire_commands::engine::agent_config_read_result(),
             HostOfflineRead::SnapshotPreflight => {
+                if self.params.legacy_snapshot_discovery {
+                    use respire_protocol::maintenance_control::{LegacySnapshotDescriptor, MaintenanceState};
+                    let profile = &self.params.binding.profile;
+                    let legacy_recovery = if respire_app::snapshot::ensure_no_incomplete_restore(profile).is_ok() {
+                        None
+                    } else {
+                        let account = offline_read_user(profile)?
+                            .context("legacy snapshot discovery requires an existing account")?;
+                        let description = respire_app::snapshot::describe_legacy_recovery(profile, &account)?;
+                        let stage = match description.phase.as_str() {
+                            "prepared" => MaintenanceState::Prepared,
+                            "installed" => MaintenanceState::Installed,
+                            "verified" => MaintenanceState::Verified,
+                            _ => anyhow::bail!("unsupported legacy snapshot recovery stage"),
+                        };
+                        Some(LegacySnapshotDescriptor {
+                            journal_sha256: description.journal_sha256,
+                            stage,
+                            account_id: description.account_fingerprint,
+                        })
+                    };
+                    let payload = SnapshotPreflightPayload {
+                        allowed: legacy_recovery.is_none(),
+                        legacy_recovery,
+                    };
+                    return Ok(respire_commands::output::ResultEnvelope::new("snapshot-preflight",
+                        respire_commands::output::Status::Ok, serde_json::to_value(payload)?, Vec::new()));
+                }
                 respire_app::snapshot::ensure_no_incomplete_restore(&self.params.binding.profile)?;
                 Ok(respire_commands::output::ResultEnvelope::new("snapshot-preflight",
                     respire_commands::output::Status::Ok, serde_json::json!({"allowed":true}), Vec::new()))
