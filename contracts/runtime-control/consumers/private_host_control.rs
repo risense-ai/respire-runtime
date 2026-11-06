@@ -106,12 +106,24 @@ fn config_fixture_failure(params: &Value, context: &Value) -> Option<&'static st
         Some(text) => match serde_json::from_str(text) { Ok(value) => value, Err(_) => return Some("config_intent_mismatch") },
         None => serde_json::json!({}),
     };
-    let candidate: Value = match context["candidate_config"].as_str().and_then(|text| serde_json::from_str(text).ok()) {
+    let mut candidate: Value = match context["candidate_config"].as_str().and_then(|text| serde_json::from_str(text).ok()) {
         Some(value) => value, None => return Some("config_intent_mismatch"),
     };
-    let intent: respire_protocol::config_control::ConfigChangeIntent = match serde_json::from_value(params["intent"].clone()) {
+    let mut intent: respire_protocol::config_control::ConfigChangeIntent = match serde_json::from_value(params["intent"].clone()) {
         Ok(value) => value, Err(_) => return Some("config_intent_mismatch"),
     };
+    // Map shared POSIX fixture paths for Windows validation, after binding the reviewed bytes.
+    if cfg!(windows) {
+        if let Some(dir) = intent.data_dir.as_mut() {
+            let path = dir.trim();
+            if path.starts_with('/') && !path.starts_with("//") {
+                if candidate["data_dir"] != path { return Some("config_intent_mismatch"); }
+                let native = format!("C:{path}");
+                *dir = native.clone();
+                candidate["data_dir"] = Value::String(native);
+            }
+        }
+    }
     if intent.apply(&original).ok().as_ref() != Some(&candidate) { return Some("config_intent_mismatch"); }
     None
 }
@@ -415,7 +427,9 @@ fn offline_read_failure(payload: &Value, schema: &Value) -> Option<&'static str>
     if let Some(error) = settings_authority_failure(payload, &params["binding"], c, &c["authority"]["identity"], true) { return Some(error); }
     let snapshot = request["method"] == "control.snapshot.preflight";
     let metadata = request["method"] == "control.metadata.status";
-    if if snapshot { c["snapshot_clear"] != true } else { c["auth_recovery_pending"] != false } { return Some("offline_read_blocked"); }
+    let discovery = params["legacy_snapshot_discovery"] == true;
+    if discovery && !snapshot { return Some("host_params_invalid"); }
+    if if snapshot { !discovery && c["snapshot_clear"] != true } else { c["auth_recovery_pending"] != false } { return Some("offline_read_blocked"); }
     if c["mutated"] != false { return Some("offline_read_mutation"); }
     if payload["finish_maintenance"] == true { return Some("maintenance_not_terminal"); }
     if !schema_valid(result, &d["offlineEnvelope"], d) || *result != payload["private_response"]
@@ -424,6 +438,8 @@ fn offline_read_failure(payload: &Value, schema: &Value) -> Option<&'static str>
         || if metadata { !schema_valid(&result["details"], &d["metadataStatusDetails"], d)
             || result["summary"]["enabled"] != result["details"]["enabled"] || result["summary"]["mode"] != result["details"]["mode"] }
             else { !result["details"].is_null() } { return Some("host_result_invalid"); }
+    if snapshot && (if discovery { result["summary"]["allowed"] != c["snapshot_clear"] }
+        else { result["summary"]["allowed"] != true || !result["summary"]["legacy_recovery"].is_null() }) { return Some("host_result_invalid"); }
     for (name, status, value) in [("control_ready", "ok", "true"), ("store_ready", "skip", "false")] {
         let items: Vec<_> = result["items"].as_array()?.iter().filter(|item| item["name"] == name).collect();
         if items.len() != 1 || items[0]["status"] != status || items[0]["value"] != value { return Some("host_result_invalid"); }
@@ -629,9 +645,14 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         !params["selection_sha256"].is_null()
     } else { params["selection_sha256"].is_null() } { return Some("host_params_invalid"); }
     let snapshot = method == "control.snapshot_maintenance";
+    let legacy_snapshot = method == "control.snapshot_legacy_recovery";
     let verified = matches!(method, "control.auth.account_complete" | "control.key.complete") || snapshot && matches!(params["action"].as_str(), Some("commit" | "release"));
     if payload["maintenance_phase"] != if method == "control.auth.recovery_status" { "Idle" } else if verified { "Verified" } else { "Paused" } { return Some("maintenance_phase_mismatch"); }
     if !payload["original_operation_id"].is_null() && payload["original_operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
+    if legacy_snapshot {
+        if params["recovery_operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
+        if params["request_fingerprint"] != payload["original_fingerprint"] { return Some("host_fingerprint_mismatch"); }
+    }
     if snapshot {
         if params["operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
         // Node independently recomputes the SHA-256 tuple; Rust binds the frozen anchor.
@@ -641,12 +662,14 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         if let Some(error) = config_fixture_failure(&params, &payload["config_context"]) { return Some(error); }
     }
     let Some(result) = payload.get("result") else {
-        if matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult")) { return Some("host_result_invalid"); }
+        if matches!(spec["result"].as_str(), Some("profileResult" | "recoveryResult" | "legacySnapshotRecoveryResult")) { return Some("host_result_invalid"); }
         return if payload["finish_maintenance"] == true { Some("maintenance_not_terminal") } else { None };
     };
     let kind = spec["result"].as_str()?;
     if !schema_valid(result, &definitions[kind], definitions) { return Some("host_result_invalid"); }
-    if mutable && result["operation_id"] != request["operation_id"] { return Some("host_operation_mismatch"); }
+    if mutable && result[if legacy_snapshot { "recovery_operation_id" } else { "operation_id" }] != request["operation_id"] { return Some("host_operation_mismatch"); }
+    if legacy_snapshot && (result["request_fingerprint"] != params["request_fingerprint"]
+        || result["journal_sha256"] != params["journal_sha256"]) { return Some("host_fingerprint_mismatch"); }
     if let Some(error) = profile_recovery_failure(payload, &params, kind, schema) { return Some(error); }
     let extension = kind == "migrationResult" || kind == "keyResult" && params["operation"]["kind"] == "fivekeys";
     if let Some(error) = if extension { key_migration_failure(payload, &params, kind, schema) }
@@ -722,7 +745,7 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         || kind == "accountResult" && matches!(outcome, Some("committed" | "rolled_back"))
         || extension && if kind == "migrationResult" { matches!(outcome, Some("completed" | "already_migrated")) }
             else { matches!(outcome, Some("committed" | "rolled_back")) && result["verification_required"] != true }
-        || snapshot && matches!(result["state"].as_str(), Some("released" | "rolled_back"));
+        || (snapshot || legacy_snapshot) && matches!(result["state"].as_str(), Some("released" | "rolled_back"));
     if payload["finish_maintenance"] == true && !terminal { return Some("maintenance_not_terminal"); }
     None
 }
@@ -738,7 +761,16 @@ fn producer_types(payload: &Value) -> Result<()> {
     }
     if matches!(request.method.as_str(), "control.metadata.status" | "control.agent_config.read" | "control.snapshot.preflight") {
         let parsed: respire_protocol::metadata_control::HostMetadataReadParams = serde_json::from_value(params.clone())?;
-        assert_eq!(serde_json::to_value(parsed)?, params);
+        let mut normalized = params.clone();
+        if !parsed.legacy_snapshot_discovery { normalized.as_object_mut().context("offline read params")?.remove("legacy_snapshot_discovery"); }
+        assert_eq!(serde_json::to_value(parsed)?, normalized);
+        if request.method == "control.snapshot.preflight" {
+            let summary = &payload["result"]["summary"];
+            let parsed: respire_protocol::SnapshotPreflightPayload = serde_json::from_value(summary.clone())?;
+            let mut normalized = summary.clone();
+            if parsed.legacy_recovery.is_none() { normalized.as_object_mut().context("snapshot preflight payload")?.insert("legacy_recovery".into(), Value::Null); }
+            assert_eq!(serde_json::to_value(parsed)?, normalized);
+        }
         let parsed: respire_protocol::RpcResponse<Value> = serde_json::from_value(payload["private_rpc_response"].clone())?;
         assert_eq!(serde_json::to_value(parsed)?, payload["private_rpc_response"]);
         return Ok(());
@@ -797,6 +829,10 @@ fn producer_types(payload: &Value) -> Result<()> {
         HOST_AUTH_ACCOUNT_RESULT_METHOD | HOST_AUTH_ACCOUNT_COMPLETE_METHOD | HOST_AUTH_ACCOUNT_ROLLBACK_METHOD => { serde_json::from_value::<HostAuthAccountParams>(params)?; }
         "control.model_install_plan" | "control.model_install_verify" => { serde_json::from_value::<respire_protocol::HostModelParams>(params)?; }
         "control.snapshot_maintenance" => { serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlParams>(params)?; }
+        "control.snapshot_legacy_recovery" => {
+            let parsed: respire_protocol::LegacySnapshotRecoveryParams = serde_json::from_value(params.clone())?;
+            assert_eq!(serde_json::to_value(parsed)?, params);
+        }
         "control.secret.read" => { serde_json::from_value::<respire_protocol::secret_control::HostSecretReadParams>(params)?; }
         "control.keys_export.read" => { serde_json::from_value::<respire_protocol::secret_control::HostKeysExportReadParams>(params)?; }
         "control.identity.session_list" => { serde_json::from_value::<respire_protocol::identity_control::HostIdentitySessionListParams>(params)?; }
@@ -836,6 +872,10 @@ fn producer_types(payload: &Value) -> Result<()> {
             }
             "control.model_install_verify" => { serde_json::from_value::<respire_protocol::ModelPreparation>(result.clone())?; }
             "control.snapshot_maintenance" => { serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlResult>(result.clone())?; }
+            "control.snapshot_legacy_recovery" => {
+                let parsed: respire_protocol::LegacySnapshotRecoveryResult = serde_json::from_value(result.clone())?;
+                assert_eq!(serde_json::to_value(parsed)?, *result);
+            }
             "control.secret.read" => { serde_json::from_value::<respire_protocol::secret_control::HostSecretReadResult>(result.clone())?; }
             "control.keys_export.read" => { serde_json::from_value::<respire_protocol::secret_control::HostKeysExportReadResult>(result.clone())?; }
             "control.identity.session_list" => { serde_json::from_value::<respire_protocol::identity_control::HostIdentitySessionListResult>(result.clone())?; }
@@ -909,15 +949,17 @@ fn frozen_private_host_control_fixtures() -> Result<()> {
                 | "host-recovery-status-result-type.json" | "host-recovery-legacy-identity-unknown.json"
                 | "host-recovery-legacy-result-type.json"
                 | "host-model-maintenance-argv.json" | "host-model-maintenance-params-unknown.json"
-                | "host-model-maintenance-result-unknown.json" | "host-model-maintenance-secret.json")) {
+                | "host-model-maintenance-result-unknown.json" | "host-model-maintenance-secret.json"
+                | "host-snapshot-legacy-params-unknown.json" | "host-snapshot-legacy-result-unknown.json"
+                | "host-snapshot-legacy-invalid-action.json")) {
                 assert!(producer_types(&fixture["payload"]).is_err(), "{path}: DTO must reject invalid fields");
             }
             if index < original_paths.len() { count += 1; } else { extension_count += 1; }
         }
     }
-    assert_eq!(count, 303);
+    assert_eq!(count, 320);
     assert_eq!(extension_count, 153);
-    for (extension_name, positive_count, negative_count) in [("settings", 7, 26), ("metadata", 7, 18), ("agent_config", 6, 14)] {
+    for (extension_name, positive_count, negative_count) in [("settings", 10, 35), ("metadata", 7, 18), ("agent_config", 6, 14)] {
         let extension = &manifest["extensions"][extension_name];
         assert_eq!(extension["schema"], "schema/private-host-control.schema.json");
         assert_eq!(extension["consumer"], "consumers/private_host_control.rs");

@@ -729,7 +729,8 @@
             "control.metadata.disable",
             "control.metadata.result",
             "control.agent_config.set",
-            "control.agent_config.result"
+            "control.agent_config.result",
+            "control.snapshot_legacy_recovery"
           ]
         },
         "args": {
@@ -4008,6 +4009,10 @@
         },
         "binding": {
           "$ref": "#/$defs/binding"
+        },
+        "legacy_snapshot_discovery": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
@@ -4202,7 +4207,17 @@
       "type": "object",
       "properties": {
         "allowed": {
-          "const": true
+          "type": "boolean"
+        },
+        "legacy_recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/legacySnapshotDescriptor"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -5094,6 +5109,121 @@
         "data_dir"
       ],
       "additionalProperties": false
+    },
+    "legacySnapshotRecoveryParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "binding",
+        "recovery_operation_id",
+        "request_fingerprint",
+        "journal_sha256",
+        "action"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "recovery_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "request_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "journal_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "action": {
+          "enum": [
+            "query",
+            "recover"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "legacySnapshotRecoveryResult": {
+      "type": "object",
+      "required": [
+        "recovery_operation_id",
+        "request_fingerprint",
+        "journal_sha256",
+        "state",
+        "cleanup_pending"
+      ],
+      "properties": {
+        "recovery_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "request_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "journal_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "enum": [
+            "unknown",
+            "prepared",
+            "installed",
+            "verified",
+            "released",
+            "rolled_back"
+          ]
+        },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
+        "cleanup_warning": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "legacySnapshotDescriptor": {
+      "type": "object",
+      "properties": {
+        "journal_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "stage": {
+          "enum": [
+            "unknown",
+            "prepared",
+            "installed",
+            "verified",
+            "released",
+            "rolled_back"
+          ]
+        },
+        "account_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "journal_sha256",
+        "stage",
+        "account_id"
+      ],
+      "additionalProperties": false
     }
   },
   "x-methods": {
@@ -5280,6 +5410,11 @@
     "control.agent_config.result": {
       "params": "agentConfigParams",
       "result": "agentConfigReceipt",
+      "mutable": true
+    },
+    "control.snapshot_legacy_recovery": {
+      "params": "legacySnapshotRecoveryParams",
+      "result": "legacySnapshotRecoveryResult",
       "mutable": true
     }
   },

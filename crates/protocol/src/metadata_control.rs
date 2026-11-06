@@ -83,6 +83,16 @@ pub struct HostMetadataParams {
 pub struct HostMetadataReadParams {
     pub schema_version: u32,
     pub binding: ControlBinding,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_snapshot_discovery: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotPreflightPayload {
+    pub allowed: bool,
+    #[serde(default)]
+    pub legacy_recovery: Option<crate::maintenance_control::LegacySnapshotDescriptor>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
