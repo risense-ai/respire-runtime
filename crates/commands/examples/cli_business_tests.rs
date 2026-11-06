@@ -1,5 +1,5 @@
-//! Runtime-owned business fixtures exercising the exact independently built CLI.
-//! Run with `cargo test -p respire_commands --example cli_business_tests`.
+//! Cross-repository integration fixtures owned by Runtime, invoking a real CLI.
+//! See docs/testing.md for exact CLI/official Runtime/model binding and CI execution.
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
