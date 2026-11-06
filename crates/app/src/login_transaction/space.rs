@@ -498,7 +498,7 @@ fn result(journal: &Journal, index: usize) -> Result<HostSpaceResult> {
         else if matches!(record.phase,AuthPhase::RemotePending | AuthPhase::RemoteUnknown) {
             HostSpaceOutcome::Unknown
         } else { HostSpaceOutcome::Pending }, invite_code, session_id: operation.session_id.clone(),
-        target_profile: operation.target.clone(),
+        target_profile: if record.phase == AuthPhase::RolledBack { None } else { operation.target.clone() },
         target_account_id: if committed { match &operation.intent { HostSpaceOperation::Join { user, .. } => Some(digest(user.as_bytes())), _ => None } } else { None },
         target_session_sha256: if committed && operation.target.is_some() { record.candidate_sha256.clone() } else { None },
         kick: operation.kick.clone(), remaining: if operation.target.is_none() && operation.members_candidate.is_some() {
@@ -541,7 +541,28 @@ pub fn control_space(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
     if !query_only && journal.operations[index].phase == AuthPhase::Admitted || resume_join {
         match params.operation {
             HostSpaceOperation::Invite { .. } => invite(&mut journal,index)?,
-            HostSpaceOperation::Join { .. } => join(&mut journal,index,params)?,
+            HostSpaceOperation::Join { .. } => {
+                if let Err(error) = join(&mut journal,index,params) {
+                    if !error.is::<RemoteRejected>() { return Err(error); }
+                    ensure!(owned_index(&journal,ownership,id,key,params)? == Some(index), "rejected join owner changed");
+                    let record = &journal.operations[index];
+                    let operation = op(&journal,index)?;
+                    let active = journal.active.as_ref().context("rejected join recovery missing")?;
+                    let target = operation.target.as_ref().context("rejected join target missing")?;
+                    safe_path(target)?;
+                    ensure!(record.phase == AuthPhase::Admitted && record.candidate.is_none()
+                        && record.candidate_sha256.is_none() && record.backend.is_none()
+                        && !operation.credential_ready && operation.code_backend.is_none()
+                        && operation.code_sha256.is_none() && operation.session_id.is_none()
+                        && operation.members_candidate.is_none() && operation.kick.is_empty()
+                        && active.backends.is_empty() && active.pass_backends.is_empty()
+                        && active.totp_backends.is_empty() && !target.try_exists()?,
+                        "rejected join may already own effects; retain the original operation");
+                    // Publish the terminal receipt and clear only this admission in one journal write.
+                    journal.operations[index].phase = AuthPhase::RolledBack;
+                    retire_active(&mut journal)?;
+                }
+            }
             HostSpaceOperation::Kick { .. } => kick(&mut journal,index)?,
         }
     }
@@ -584,6 +605,46 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     assert!(control_space(&ownership,&rejected_id,&rejected_id,&params,false)?.outcome == HostSpaceOutcome::Rejected);
     assert!(control_space(&ownership,&rejected_id,&rejected_id,&params,true)?.outcome == HostSpaceOutcome::Rejected);
     assert!(!auth_recovery_pending()?);
+    let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!(error.to_string()))?;
+    let addr = format!("http://{}",server.server_addr());
+    let code = format!("{PREFIX}{}",hex::encode(serde_json::to_vec(&json!({"space":"rejected-join",
+        "addr":addr,"user":"rejected-user","token":"revoked-token","super":"synthetic-super"}))?));
+    params.operation = HostSpaceOperation::Join { invite_sha256:digest(code.as_bytes()),space:"rejected-join".into(),
+        addr,user:"rejected-user".into(),readonly:false };
+    params.invite_code = Some(code);
+    let worker = std::thread::spawn(move || -> std::result::Result<tiny_http::Server,String> {
+        let request = server.recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|error| error.to_string())?.ok_or("rejected join never fetched its identity")?;
+        assert_eq!(request.method(),&tiny_http::Method::Get);
+        assert_eq!(request.url(),"/api/self");
+        request.respond(tiny_http::Response::empty(401)).map_err(|error| error.to_string())?;
+        Ok(server)
+    });
+    let join_id = uuid::Uuid::new_v4().to_string();
+    let rejected = control_space(&ownership,&join_id,&join_id,&params,false);
+    let server = worker.join().map_err(|_| anyhow!("rejected join fixture panicked"))?
+        .map_err(|error| anyhow!(error))?;
+    let rejected = rejected?;
+    assert!(rejected.outcome == HostSpaceOutcome::Rejected);
+    assert_eq!(rejected.operation_id,join_id);
+    assert!(rejected.target_profile.is_none() && rejected.target_account_id.is_none()
+        && rejected.target_session_sha256.is_none());
+    let rejected_journal = load_journal()?;
+    let index = owned_index(&rejected_journal,&ownership,&join_id,&join_id,&params)?
+        .context("rejected join receipt missing")?;
+    assert!(rejected_journal.operations[index].phase == AuthPhase::RolledBack);
+    assert!(rejected_journal.active.is_none() && !auth_recovery_pending()?);
+    assert!(!root.join("accounts/rejected-join").try_exists()?);
+    let rejected_bytes = std::fs::read(recovery_path())?;
+    for query_only in [true,false] {
+        let queried = control_space(&ownership,&join_id,&join_id,&params,query_only)?;
+        assert_eq!(serde_json::to_value(&queried)?,serde_json::to_value(&rejected)?);
+    }
+    assert!(server.recv_timeout(std::time::Duration::from_millis(50))?.is_none(), "terminal join was sent again");
+    assert_eq!(std::fs::read(recovery_path())?,rejected_bytes);
+    assert_eq!(std::fs::read(root.join("session.json"))?,original);
+    assert_eq!(std::fs::read(crate::service::client_config_path())?,config);
+    params.invite_code = None;
     params.operation = HostSpaceOperation::Kick { session_id:None,all:true };
     let (mut journal,index) = admit(&ownership,&id,&id,&params)?;
     op_mut(&mut journal,index)?.kick[0].state = HostSpaceKickState::Revoked;
@@ -601,6 +662,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     assert_eq!(members(read_optional(&root.join(MEMBERS))?.as_deref())?[0].session_id,second);
     // Repeating even the execute method cannot repeat the unknown remote POST.
     assert!(control_space(&ownership,&id,&id,&params,false)?.outcome == HostSpaceOutcome::Unknown);
+    assert_eq!(load_journal()?.active.as_ref().and_then(|active| active.operation_id.as_deref()),Some(id.as_str()));
     assert!(control_space(&ownership,&id,"foreign-key",&params,true).is_err());
     params.operation = HostSpaceOperation::Kick { session_id:Some(first),all:false };
     assert!(control_space(&ownership,&id,&id,&params,true).is_err());

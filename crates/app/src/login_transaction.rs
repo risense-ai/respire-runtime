@@ -295,6 +295,44 @@ mod tests {
         assert!(!recovery_pending());
         assert_eq!(load_journal()?.operations.len(), 2);
 
+        #[cfg(windows)]
+        {
+            use std::path::{Component, Prefix};
+            let mut ordinary_root = match root.components().next() {
+                Some(Component::Prefix(prefix)) => match prefix.kind() {
+                    Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+                    _ => anyhow::bail!("canonical account fixture requires a local drive"),
+                },
+                _ => anyhow::bail!("canonical account fixture requires an absolute root"),
+            };
+            ordinary_root.extend(root.components().skip(2).map(|part| part.as_os_str()));
+            assert_eq!(ordinary_root.canonicalize()?, root);
+            let ordinary_target = ordinary_root.join("canonical-account-target");
+            std::fs::create_dir(&ordinary_target)?;
+            let canonical_target = ordinary_target.canonicalize()?;
+            assert_ne!(ordinary_target, canonical_target);
+            let candidate = serde_json::to_vec(&json!({"user":"receipt-user","addr":"https://never-contact.invalid"}))?;
+            private_write(&ordinary_target.join("session.json"), &candidate)?;
+            let durable_before = std::fs::read(recovery_path())?;
+            let mut target_journal = load_journal()?;
+            let record = &mut target_journal.operations[account_index];
+            record.phase = AuthPhase::AwaitingVerification;
+            record.candidate = Some(candidate.clone());
+            record.candidate_sha256 = Some(digest(&candidate));
+            record.account.as_mut().context("canonical account receipt missing")?.target = Some(ordinary_target.clone());
+            assert_eq!(owned_account_index(&target_journal, &root, &canonical_target, &account_id, &account_id)?, account_index);
+            target_journal.operations[account_index].account.as_mut().context("canonical account receipt missing")?.target = Some(canonical_target.clone());
+            assert_eq!(owned_account_index(&target_journal, &root, &canonical_target, &account_id, &account_id)?, account_index);
+            assert!(owned_account_index(&target_journal, &root, &canonical_target, &account_id, "wrong-key").is_err());
+            private_write(&ordinary_target.join("session.json"), br#"{"user":"changed-owner"}"#)?;
+            assert!(owned_account_index(&target_journal, &root, &canonical_target, &account_id, &account_id).is_err());
+            assert_eq!(std::fs::read(recovery_path())?, durable_before);
+            assert_eq!(std::fs::read(crate::service::client_config_path())?, owned_config);
+            assert!(!root.join("session.json").exists());
+            std::fs::remove_file(ordinary_target.join("session.json"))?;
+            std::fs::remove_dir(ordinary_target)?;
+        }
+
         // Login intents are admission identity, not supplemental credentials.
         let ownership = AuthOwnership::acquire(&root, &root)?;
         let login_id = uuid::Uuid::new_v4().to_string();
@@ -1207,7 +1245,8 @@ pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIden
         let active = journal.active.as_ref().context("account recovery is missing")?;
         ensure!(active.operation_id.as_deref() == Some(operation_id) && active.directory == *target
             && active.alias == record.alias && active.owns_config, "account recovery binding mismatch");
-        let _target_lock = if *target == ownership.root || *target == ownership.profile { None }
+        let lock_target = if target.exists() { target.canonicalize()? } else { target.clone() };
+        let _target_lock = if lock_target == ownership.root || lock_target == ownership.profile { None }
             else { Some(crate::lock::LibraryLock::acquire(target, std::time::Duration::from_secs(1))?) };
         let current = read_original(target)?;
         ensure!(current == record.candidate || current == active.original, "interrupted account session changed");
@@ -1234,10 +1273,15 @@ fn owned_account_index(journal: &Journal, root: &Path, profile: &Path, id: &str,
         .context("account admission receipt is missing")?;
     let record = &journal.operations[index];
     let account = record.account.as_ref().context("operation is not account authentication")?;
-    ensure!(record.root == root && (record.profile == profile || account.target.as_deref() == Some(profile)), "account receipt owner mismatch");
+    ensure!(record.root == root, "account receipt owner mismatch");
     let current = read_original(profile)?;
-    ensure!((record.profile == profile && current.as_deref().map(digest) == record.original_sha256)
-        || (account.target.as_deref() == Some(profile) && current.is_some() && current == record.candidate),
+    let owns_source = record.profile == profile && current.as_deref().map(digest) == record.original_sha256;
+    // An untouched source may query a candidate whose directory does not exist yet.
+    let owns_target = if owns_source { false } else {
+        account.target.as_ref().map(|target| target.canonicalize()).transpose()?.as_deref() == Some(profile)
+    };
+    ensure!(record.profile == profile || owns_target, "account receipt owner mismatch");
+    ensure!(owns_source || (owns_target && current.is_some() && current == record.candidate),
         "account receipt no longer owns the selected session");
     Ok(index)
 }
@@ -1308,8 +1352,9 @@ pub fn control_account_complete(root: &Path, profile: &Path, identity: &HostAuth
     let index = owned_account_index(&journal, &root, &profile, operation_id, key)?;
     let record = &journal.operations[index];
     verify_account_candidate(record)?;
-    ensure!(record.account.as_ref().and_then(|account| account.target.as_deref()) == Some(profile.as_path()),
-        "completion requires the receipt's selected target");
+    let target = record.account.as_ref().and_then(|account| account.target.as_ref())
+        .context("account target is missing")?.canonicalize()?;
+    ensure!(target == profile, "completion requires the receipt's selected target");
     if record.phase == AuthPhase::Committed { return account_result(record); }
     ensure!(record.phase == AuthPhase::AwaitingVerification, "account is not ready for runtime verification");
     ensure!(journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(operation_id),
@@ -1367,7 +1412,8 @@ pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAut
     ensure!(!account.vault_pending && !account.published_vault, "published or unknown remote vault cannot be compensated by deleting local keys");
     let active = journal.active.as_ref().context("account recovery is missing")?;
     ensure!(active.operation_id.as_deref() == Some(operation_id), "rollback does not own recovery");
-    let target_lock = if !active.directory.exists() || active.directory == ownership.root || active.directory == ownership.profile { None }
+    let target = if active.directory.exists() { Some(active.directory.canonicalize()?) } else { None };
+    let target_lock = if target.as_ref().is_none_or(|target| *target == ownership.root || *target == ownership.profile) { None }
         else { Some(crate::lock::LibraryLock::acquire(&active.directory, std::time::Duration::from_secs(1))?) };
     let current = read_original(&active.directory)?;
     ensure!(current == active.original || current == record.candidate, "target session changed outside the transaction");
@@ -1380,7 +1426,7 @@ pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAut
     // Windows cannot quarantine a directory while SQLite still owns its lock file.
     // The root/source guards and the durable RollingBack record remain held.
     drop(target_lock);
-    if journal.active.as_ref().is_some_and(|active| !active.directory_existed && active.directory == ownership.profile) {
+    if journal.active.as_ref().is_some_and(|active| !active.directory_existed && target.as_deref() == Some(ownership.profile.as_path())) {
         drop(ownership._profile_lock.take());
     }
     quarantine_new_profile(journal.active.as_ref().context("account recovery is missing")?)?;

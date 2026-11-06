@@ -349,6 +349,24 @@ fn concurrent_host_recover_cannot_interleave_with_restore_commit() -> Result<()>
     let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
     assert!(ok);
     let id = created["details"]["id"].as_str().context("snapshot id")?;
+    // Bind the result to pre-dispatch inputs; the CLI generates the operation ID.
+    use sha2::{Digest, Sha256};
+    let profile = fixture.root.path().canonicalize()?;
+    let account_id = format!("{:x}", Sha256::digest(b"snapshot-fixture"));
+    let health: respire_commands::net_rpc::Health =
+        ureq::get(&format!("http://127.0.0.1:{}/api/health", fixture.port))
+            .timeout(Duration::from_secs(5))
+            .call()?
+            .into_json()?;
+    assert_eq!(health.pid, fixture.runtime.as_ref().context("fixture runtime missing")?.id());
+    assert_eq!(std::path::Path::new(&health.installation_root).canonicalize()?, profile);
+    assert_eq!(std::path::Path::new(&health.data_dir).canonicalize()?, profile);
+    assert_eq!(health.account_id, account_id);
+    assert!(health.store_ready && health.generation > 0);
+    let sync_generation = usize::try_from(health.generation)?;
+    let expected_fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&(
+        "snapshot-restore-v1", &profile, &profile, Some(&account_id), sync_generation, id,
+    ))?));
     let primary = fixture
         .command(&["--json", "snapshot", "restore", id, "--confirm"])
         .stdout(Stdio::piped())
@@ -378,7 +396,32 @@ fn concurrent_host_recover_cannot_interleave_with_restore_commit() -> Result<()>
         .path()
         .join(".snapshot-maintenance.json")
         .exists());
-    assert!(!fixture.root.path().join(".snapshot-recovery.json").exists());
+    respire_app::snapshot::ensure_no_incomplete_restore(fixture.root.path())?;
+    let restored: Value = serde_json::from_slice(&primary.stdout)?;
+    let operation_id = restored["details"]["operation"]["operation_id"]
+        .as_str()
+        .context("successful restore operation ID missing")?;
+    let parsed_operation = uuid::Uuid::parse_str(operation_id)?;
+    assert_eq!(parsed_operation.get_version_num(), 4);
+    assert_eq!(parsed_operation.to_string(), operation_id);
+    assert_eq!(
+        restored["details"]["operation"]["request_fingerprint"].as_str(),
+        Some(expected_fingerprint.as_str()),
+    );
+    let operation = respire_app::snapshot::SnapshotOperation {
+        operation_id: operation_id.to_owned(),
+        request_fingerprint: expected_fingerprint,
+    };
+    let terminal = respire_app::snapshot::operation_status(
+        fixture.root.path(),
+        "snapshot-fixture",
+        &operation,
+    )?
+    .context("successful restore terminal receipt missing")?;
+    assert_eq!(terminal.receipt.operation.as_ref(), Some(&operation));
+    assert_eq!(terminal.receipt.restored, id);
+    assert_eq!(terminal.phase, "released");
+    assert!(!terminal.cleanup_pending);
     Ok(())
 }
 
@@ -664,9 +707,10 @@ fn public_witness_verifies_restored_chain_and_reports_tamper_without_writes() ->
     std::fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
     let (ok, rejected) = fixture.run(&["--json", "snapshot", "restore", id, "--confirm"])?;
     assert!(!ok);
-    assert!(rejected["errors"]
-        .to_string()
-        .contains("witness checkpoint"));
+    assert!(
+        rejected["errors"].to_string().contains("witness checkpoint"),
+        "expected witness checkpoint rejection; actual rejected JSON: {rejected}"
+    );
 
     Ok(())
 }
@@ -744,7 +788,10 @@ fn healthy_snapshot_rescue_preserves_unparseable_current_witness() -> Result<()>
         let (ok, rejected) =
             fixture.run(&["--json", "snapshot", "restore", bad_id, "--confirm"])?;
         assert!(!ok);
-        assert!(rejected["errors"].to_string().contains("diagnostic copy"));
+        assert!(
+            rejected["errors"].to_string().contains("diagnostic copy"),
+            "expected diagnostic copy rejection; actual rejected JSON: {rejected}"
+        );
     }
     Ok(())
 }
