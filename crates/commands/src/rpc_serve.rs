@@ -2660,6 +2660,12 @@ fn dispatch_loop_inner(
                     let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
                     continue;
                 }
+                if let Some(rejected) = readonly_sync_reset_rejection_locked(&job.scope, &job.args) {
+                    drop(_held);
+                    WRITE_RUNNING.store(false, Ordering::Release);
+                    let _ = job.reply.send(rejected);
+                    continue;
+                }
                 let captured = capture_scoped_locked(&job.scope, job.args);
                 // A host-owned command was rejected before execution; its scope did not change.
                 let changing_context = changing_context && !captured.as_ref().is_ok_and(|captured| {
@@ -3119,6 +3125,28 @@ fn capture_scoped(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResu
         validate_job_scope(scope)?;
     }
     capture_scoped_locked(scope, args)
+}
+
+// Called with the scope and exclusive execution fences held, before any command effects.
+fn readonly_sync_reset_rejection_locked(
+    scope: &RuntimeRequestScope,
+    args: &[String],
+) -> Option<CommandResult> {
+    if command_name(args) != Some("sync-reset") {
+        return None;
+    }
+    let parsed = crate::cli_def::Cli::try_parse_from(
+        std::iter::once("rsrs".to_owned()).chain(args.iter().cloned()),
+    ).ok()?;
+    if !matches!(parsed.command, Some(crate::cli_def::Command::SyncReset)) {
+        return None;
+    }
+    if let Err(error) = validate_job_scope(scope) {
+        return Some(Err(error));
+    }
+    let error = respire_app::service::ensure_writable().err()?;
+    let (envelope, exit) = crate::output_emit::command_failure(&error);
+    Some(Ok(crate::output_state::Captured { exit, envelope }))
 }
 
 fn capture_scoped_locked(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResult {
@@ -3668,6 +3696,44 @@ mod tests {
         }
         std::fs::remove_file(&marker)?;
         assert!(!business_paused());
+        {
+            let _scope = SCOPE_EXECUTION.write()
+                .map_err(|_| anyhow::anyhow!("test scope fence poisoned"))?;
+            let gate = shared_exclusive();
+            let _held = gate.acquire(true);
+            let config = root.path().join("client.json");
+            std::fs::write(&config, br#"{"service_mode":"readonly"}"#)?;
+            let live = current_scope();
+            let before = GENERATION.load(Ordering::Acquire);
+            let args = vec!["--json".to_owned(), "sync-reset".to_owned()];
+            let rejected = readonly_sync_reset_rejection_locked(&live, &args)
+                .context("readonly sync-reset must be rejected before capture")?;
+            let mut reset = request("readonly-reset", &["--json", "sync-reset"]);
+            reset.method = "cli.exec".to_owned();
+            reset.scope = Some(live.clone());
+            let response = command_response(&reset, rejected);
+            assert!(!response.ok);
+            assert_eq!(response.exit, 1);
+            assert_eq!(response.operation_id, reset.operation_id);
+            assert_eq!(response.idempotency_key, reset.idempotency_key);
+            assert_eq!(response.scope, reset.scope);
+            assert!(response.envelope.context("readonly rejection envelope missing")?
+                .errors.iter().any(|error| error.contains("read-only")));
+            assert_eq!(GENERATION.load(Ordering::Acquire), before);
+            assert_eq!(current_scope(), live);
+            assert!(validate_job_scope(&live).is_ok(), "next request must retain the original scope");
+            assert!(!root.path().join("rsrs.db").exists());
+            assert!(readonly_sync_reset_rejection_locked(&live, &["remember".into(), "value".into()]).is_none());
+            assert!(readonly_sync_reset_rejection_locked(&live, &["sync-reset".into(), "--invalid-option".into()]).is_none());
+            let mut stale = live.clone();
+            stale.generation += 1;
+            assert!(matches!(readonly_sync_reset_rejection_locked(&stale, &args),
+                Some(Err(error)) if error == "scope_mismatch"));
+            std::fs::write(&config, br#"{"service_mode":"normal"}"#)?;
+            assert!(readonly_sync_reset_rejection_locked(&live, &args).is_none(),
+                "writable sync-reset must retain execution and generation fencing");
+            std::fs::remove_file(config)?;
+        }
         {
             struct RestoreGeneration(usize);
             impl Drop for RestoreGeneration {
