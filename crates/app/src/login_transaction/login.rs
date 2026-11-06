@@ -338,14 +338,16 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         progress(&mut journal, index)?.confirm_merge(&prepared.directory, confirmed)?;
         save_journal(&journal)?;
     }
-    if input.offer_local_merge && !input.migrate_local && prepared.directory != ownership.profile
+    let prepared_is_source = prepared.directory.try_exists()?
+        && prepared.directory.canonicalize()? == ownership.profile;
+    if input.offer_local_merge && !input.migrate_local && !prepared_is_source
         && crate::service::database_path(&ownership.profile)?.is_file()
         && progress(&mut journal, index)?.merge_local.is_none() {
         progress(&mut journal, index)?.offer_merge(&prepared.directory)?;
         return require_inputs(&mut journal, index, &["merge_local"]);
     }
     if progress(&mut journal, index)?.imports_local() {
-        ensure!(prepared.directory != ownership.profile, "source and destination are the same account; no migration needed");
+        ensure!(!prepared_is_source, "source and destination are the same account; no migration needed");
         ensure!(!crate::service::off_mode(), "memory service is disabled; no local import was started");
         crate::service::ensure_writable()?;
         let snapshot = match local_snapshot(input.source_secret.as_deref().filter(|value| !value.is_empty())) {
@@ -410,8 +412,9 @@ pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, in
     if !login.imports_local() || login.import.is_some() && login.sync.is_some()
         || record.phase != AuthPhase::AwaitingVerification { return Ok(()); }
     let target = record.account.as_ref().and_then(|account| account.target.as_ref()).context("import target missing")?.clone();
-    ensure!(crate::service::data_dir().canonicalize()? == target, "import selection changed");
-    let _target_lock = if target == ownership.root || target == ownership.profile { None }
+    let target_identity = target.canonicalize()?;
+    ensure!(crate::service::data_dir().canonicalize()? == target_identity, "import selection changed");
+    let _target_lock = if target_identity == ownership.root || target_identity == ownership.profile { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
     account_material_keys(record, true)?;
     if login.import.is_none() {

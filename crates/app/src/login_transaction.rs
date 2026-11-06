@@ -479,6 +479,29 @@ mod tests {
         private_write(&root.join("session.json"), &source_bytes)?;
         let source_identity = HostAuthIdentity::Bound { account_id: digest(source_user.as_bytes()), session_sha256: digest(&source_bytes) };
         let ownership = AuthOwnership::acquire(&root, &root)?;
+        let same_id = uuid::Uuid::new_v4().to_string();
+        let (mut same_account, same_index, _) = admit_account_with_intent(&ownership, &source_identity,
+            &same_id, &same_id, false, "https://source.invalid", &source_user, Some((true, false, false)))?;
+        let (same_super, _, same_salt, same_wrap, same_nonce) = crate::auth::new_vault_v4()?;
+        same_account.operations[same_index].phase = AuthPhase::Authorized;
+        let same = same_account.operations[same_index].account.as_mut().context("same account receipt missing")?;
+        same.authorization = Some(json!({"user":source_user,"token":"synthetic-unused-token"}));
+        same.vault = Some(json!({"version":4,"kdf_salt":same_salt,"wrapped_urk":same_wrap,"urk_nonce":same_nonce}));
+        save_journal(&same_account)?;
+        let same_params: HostAuthLoginParams = serde_json::from_value(json!({
+            "schema_version":1,"binding":{"installation_root":root,"profile":root,
+                "launch_id":uuid::Uuid::new_v4().to_string(),"expected_account_id":digest(source_user.as_bytes())},
+            "identity":source_identity,"addr":"https://source.invalid","user":source_user,
+            "authorization":{"kind":"browser","token":"synthetic-unused-token"},"super_password":same_super,
+            "continuation":{"migrate_local":true,"migrate_vault":false,"offer_local_merge":false}
+        }))?;
+        let same_rejected = control_login(&ownership, &same_id, &same_id, &same_params).err()
+            .context("same-profile migration was not rejected")?;
+        assert_eq!(same_rejected.to_string(), "source and destination are the same account; no migration needed");
+        assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
+        assert_eq!(control_account_rollback(ownership, &source_identity, &same_id, &same_id)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+        let ownership = AuthOwnership::acquire(&root, &root)?;
         let import_id = uuid::Uuid::new_v4().to_string();
         let (mut importing, index, _) = admit_account_with_intent(&ownership, &source_identity,
             &import_id, &import_id, false, "https://never-contact.invalid", "import-target", Some((true, false, false)))?;
@@ -495,6 +518,8 @@ mod tests {
             "authorization":{"kind":"browser","token":"synthetic-unused-token"},"super_password":target_super,
             "continuation":{"migrate_local":true,"migrate_vault":false,"offer_local_merge":false}
         }))?;
+        assert!(!login_directory("https://never-contact.invalid", "import-target")?.try_exists()?,
+            "first-login regression requires a missing target directory");
         let missing_source = control_login(&ownership, &import_id, &import_id, &import_params)?;
         assert_eq!(missing_source.outcome, HostAuthAccountOutcome::AwaitingInput);
         assert_eq!(missing_source.login.context("source input status missing")?.required_inputs, ["source_secret"]);
@@ -552,8 +577,26 @@ mod tests {
         commit_account(&ownership, &mut pending, index, &mut prepared)?;
         assert_ne!(std::fs::read(crate::service::client_config_path())?, config_before);
         let target = prepared.directory.clone();
+        #[cfg(windows)]
+        assert_ne!(target, target.canonicalize()?, "regression requires an ordinary Windows target path");
+        let selection_checkpoint = std::fs::read(recovery_path())?;
+        let missing_snapshot = login::resume_import(&ownership, &mut pending, index).err()
+            .context("import without a snapshot unexpectedly continued")?;
+        assert_eq!(missing_snapshot.to_string(), "admitted encrypted import snapshot missing",
+            "resume_import did not pass selection, target ownership and candidate validation");
+        assert_eq!(std::fs::read(recovery_path())?, selection_checkpoint,
+            "selection validation changed the durable operation before its snapshot was verified");
+        assert_eq!(serde_json::to_value(&pending.operations[index])?["account"]["login"]["sync_started"], json!(false));
         let original_material = original_import_material(&pending.operations[index],
             pending.active.as_ref().context("compensation recovery missing")?)?;
+        let mut same_target: Journal = serde_json::from_slice(&selection_checkpoint)?;
+        let source_spelling = std::path::absolute(isolated.path())?;
+        same_target.active.as_mut().context("same target recovery missing")?.directory = source_spelling.clone();
+        same_target.operations[index].account.as_mut().context("same target receipt missing")?.target = Some(source_spelling);
+        let same_rejected = rollback_import_before_copy(&ownership, &mut same_target, index, None,
+            original_material.as_deref()).err().context("source target compensation was not rejected")?;
+        assert_eq!(same_rejected.to_string(), "import cannot prove an unpublished owned target; retain the original operation");
+        assert_eq!(std::fs::read(recovery_path())?, selection_checkpoint);
         let mut changed = serde_json::to_value(&pending.operations[index])?;
         changed["account"]["login"]["import_started"] = json!(true);
         let original_record = std::mem::replace(&mut pending.operations[index], serde_json::from_value(changed)?);
@@ -1562,6 +1605,7 @@ fn rollback_import_before_copy(ownership: &AuthOwnership, journal: &mut Journal,
     let account = record.account.as_ref().context("import account missing")?;
     let login = account.login.as_ref().context("import progress missing")?;
     let active = journal.active.as_ref().context("import recovery missing")?;
+    let target_identity = active.directory.canonicalize()?;
     ensure!(record.phase == AuthPhase::AwaitingVerification && !account.register
         && login.can_compensate_import()
         && record.root == ownership.root && record.profile == ownership.profile
@@ -1569,10 +1613,10 @@ fn rollback_import_before_copy(ownership: &AuthOwnership, journal: &mut Journal,
         && (!active.directory_existed || original_material.is_some())
         && active.alias == record.alias
         && account.target.as_ref() == Some(&active.directory)
-        && active.directory != ownership.root && active.directory != ownership.profile,
+        && target_identity != ownership.root && target_identity != ownership.profile,
         "import cannot prove an unpublished owned target; retain the original operation");
     ensure!(crate::service::main_data_dir().canonicalize()? == ownership.root
-        && crate::service::data_dir().canonicalize()? == active.directory.canonicalize()?
+        && crate::service::data_dir().canonicalize()? == target_identity
         && read_original(&ownership.profile)?.as_deref().map(digest) == record.original_sha256,
         "import source or selection changed before compensation");
     verify_auth_identity(&ownership.root, &ownership.profile, &account.source_identity)?;
