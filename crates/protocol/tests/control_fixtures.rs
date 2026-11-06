@@ -296,8 +296,8 @@ fn manifest_lists_the_frozen_fixture_sets() -> Result<()> {
     let negative = manifest["fixtures"]["negative"]
         .as_array()
         .context("negative fixtures")?;
-    assert_eq!(positive.len(), 89);
-    assert_eq!(negative.len(), 287);
+    assert_eq!(positive.len(), 93);
+    assert_eq!(negative.len(), 300);
     assert_eq!(manifest["contract"], "runtime-control");
     assert_eq!(manifest["release_metadata_schema_version"], 2);
     private_host_control::space_contract_fixtures()?;

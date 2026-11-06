@@ -1,0 +1,135 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Idle",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.snapshot.preflight",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":null},\"legacy_snapshot_discovery\":false}"
+      ]
+    },
+    "result": {
+      "command": "snapshot-preflight",
+      "status": "ok",
+      "summary": {
+        "allowed": true,
+        "legacy_recovery": {
+          "journal_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "stage": "installed",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "private_response": {
+      "command": "snapshot-preflight",
+      "status": "ok",
+      "summary": {
+        "allowed": true,
+        "legacy_recovery": {
+          "journal_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "stage": "installed",
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "private_rpc_response": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "ok": true,
+      "exit": 0,
+      "bin": "rsrs-runtime",
+      "envelope": {
+        "command": "snapshot-preflight",
+        "status": "ok",
+        "summary": {
+          "allowed": true,
+          "legacy_recovery": {
+            "journal_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "stage": "installed",
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        "items": [
+          {
+            "name": "control_ready",
+            "status": "ok",
+            "value": "true"
+          },
+          {
+            "name": "store_ready",
+            "status": "skip",
+            "value": "false"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": 1234,
+      "data_dir": null
+    },
+    "finish_maintenance": false,
+    "offline_context": {
+      "authority": {
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "grant_maintenance": "none",
+        "serving_authorized": false,
+        "parent_verified": true,
+        "binding_verified_before": true,
+        "binding_verified_after": true,
+        "launch_id": "32345678-1234-4234-a234-123456789abc",
+        "grant_verified": true,
+        "registration_verified": true
+      },
+      "auth_recovery_pending": false,
+      "snapshot_clear": true,
+      "mutated": false
+    }
+  },
+  "error_code": "host_result_invalid"
+}

@@ -96,7 +96,11 @@
       "fixtures/positive/host-migration-legacy-query-unknown.json",
       "fixtures/positive/host-migration-profile-completed.json",
       "fixtures/positive/host-migration-result-completed.json",
-      "fixtures/positive/host-migration-unbound-identity.json"
+      "fixtures/positive/host-migration-unbound-identity.json",
+      "fixtures/positive/host-snapshot-legacy-query-unknown.json",
+      "fixtures/positive/host-snapshot-legacy-recover-unknown.json",
+      "fixtures/positive/host-snapshot-legacy-query-released.json",
+      "fixtures/positive/host-snapshot-legacy-recover-cleanup-warning.json"
     ],
     "negative": [
       "fixtures/negative/release-metadata-conflicting-hash.json",
@@ -385,7 +389,20 @@
       "fixtures/negative/host-migration-wrong-profile.json",
       "fixtures/negative/host-migration-wrong-result-identity.json",
       "fixtures/negative/host-migration-wrong-root.json",
-      "fixtures/negative/host-migration-wrong-source-id.json"
+      "fixtures/negative/host-migration-wrong-source-id.json",
+      "fixtures/negative/host-snapshot-legacy-params-unknown.json",
+      "fixtures/negative/host-snapshot-legacy-result-unknown.json",
+      "fixtures/negative/host-snapshot-legacy-invalid-action.json",
+      "fixtures/negative/host-snapshot-legacy-invalid-operation.json",
+      "fixtures/negative/host-snapshot-legacy-missing-journal.json",
+      "fixtures/negative/host-snapshot-legacy-invalid-journal.json",
+      "fixtures/negative/host-snapshot-legacy-request-operation.json",
+      "fixtures/negative/host-snapshot-legacy-result-operation.json",
+      "fixtures/negative/host-snapshot-legacy-result-journal.json",
+      "fixtures/negative/host-snapshot-legacy-result-fingerprint.json",
+      "fixtures/negative/host-snapshot-legacy-unknown-finishes.json",
+      "fixtures/negative/host-snapshot-legacy-public.json",
+      "fixtures/negative/host-snapshot-legacy-phase.json"
     ]
   },
   "files": [
@@ -691,7 +708,7 @@
     },
     {
       "path": "schema/private-host-control.schema.json",
-      "sha256": "996a50d609131514f170c44a3e78c8d692796300e20ad0f41235b3722d2305c7"
+      "sha256": "6bc557cf9c88c691233d4d83a4f9cf216c5498238d052b4db7db4c439756864e"
     },
     {
       "path": "fixtures/positive/host-auth-keygen-unbound.json",
@@ -815,7 +832,7 @@
     },
     {
       "path": "consumers/private_host_control.rs",
-      "sha256": "948c57cbfe62dc1d0e9db146b70a34a0ebb4e60cb7656f5c2a29f2fa95933a38"
+      "sha256": "660174fe298e264e045937cc66ee34368bebda501be53f2891754e575c23e194"
     },
     {
       "path": "fixtures/positive/host-model-verify-loaded.json",
@@ -2964,6 +2981,122 @@
     {
       "path": "fixtures/negative/host-agent-config-params-unknown.json",
       "sha256": "7e2bd391e342ea1455e4ce72e364761f614f5fe6f9b68bf46e845d5acc6a4563"
+    },
+    {
+      "path": "fixtures/positive/host-snapshot-legacy-query-unknown.json",
+      "sha256": "574e3859c258f319f56a16c4a2007e0be17ecaff836b7dd47c888c167cef7e27"
+    },
+    {
+      "path": "fixtures/positive/host-snapshot-legacy-recover-unknown.json",
+      "sha256": "fde04d6fbce96934d8741ccb9cc87fb9474654d4d06ec44cb88dd7855698e0df"
+    },
+    {
+      "path": "fixtures/positive/host-snapshot-legacy-query-released.json",
+      "sha256": "bde355cba247e81e870170a3c1079002fd04e174c6eb3d9546e3a7f426d5a042"
+    },
+    {
+      "path": "fixtures/positive/host-snapshot-legacy-recover-cleanup-warning.json",
+      "sha256": "db551c265ec0e52cdbd96ed419223fc0b0f08ff859a39e9eff22ec315d88e793"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-params-unknown.json",
+      "sha256": "9c97028cc2681bcf869170515e0d2a759bf6fe3da6ece744c912ba1595bd10f8"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-result-unknown.json",
+      "sha256": "857334a8dd6c1bce8e2849fb9264fa84e1421ffebbd54eb614e4acd7a836f1f1"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-invalid-action.json",
+      "sha256": "83d7e9fa6c1773f38740510ab61c422580801a9f042d213dd96ceabe401a2c25"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-invalid-operation.json",
+      "sha256": "bb0d4f04ebb1bca30cd34c03bc0680e82434de1b5f61f5e3b6fa86a181ab9dac"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-missing-journal.json",
+      "sha256": "55ca3f6087e1049aca9bd59a8530b29a4504dd3db796e33a2329447be10cedf0"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-invalid-journal.json",
+      "sha256": "473d9f1255f50c9f5de8952629f636285e2351c2eeb8c5f60bc7d8bfc4ec276a"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-request-operation.json",
+      "sha256": "9dd34b876dfcbaa98f0e9208894fc7dc903de1f3244b3c4695576771ea27136d"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-result-operation.json",
+      "sha256": "11aca73664c79d0095f545aadfeaa0bbe66066f2e2e23bad0443c0c3d405f941"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-result-journal.json",
+      "sha256": "f7c86be0a8ca7098cdf836a26cfe54f30895c085dcd59303f550701a132b76f2"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-result-fingerprint.json",
+      "sha256": "e4632f9c2d7c384eb604a4b88b01274834c82c1be67db48c71ef81ae8a163284"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-unknown-finishes.json",
+      "sha256": "0df7ef58897398448341a2310c97124ea6ae2042e961d6bdddf26a99a9516254"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-public.json",
+      "sha256": "def51d03abe72c3171ec2b058077240914707b7d69625d27626683276f1ea2ee"
+    },
+    {
+      "path": "fixtures/negative/host-snapshot-legacy-phase.json",
+      "sha256": "fd0a61da4a6cff5c093d04ffcd88db7e394d380028e79038eeb2c164ad4fcc96"
+    },
+    {
+      "path": "fixtures/positive/host-settings-snapshot-discovery.json",
+      "sha256": "9577343111d6cd900e5ba2403a49cc9c819be1c3fc10de769f1e156679ae98e4"
+    },
+    {
+      "path": "fixtures/positive/host-settings-snapshot-discovery-empty.json",
+      "sha256": "9d6721ba70793ad5d41281b0d0806b714f9b219033831aed03a87b29c17b253e"
+    },
+    {
+      "path": "fixtures/positive/host-settings-snapshot-discovery-default-false.json",
+      "sha256": "642a5c1f306461b112e49e3b7c0b90d300fd74bb267f2e895144d7befb63e2ad"
+    },
+    {
+      "path": "fixtures/negative/host-settings-metadata-discovery.json",
+      "sha256": "208aee8c7174944b91e8855ae13b7bc4cbc6813f546a11e4b9949d4e5fab045e"
+    },
+    {
+      "path": "fixtures/negative/host-settings-agent-discovery.json",
+      "sha256": "3659c26df0a3820a32c8f89e9224320dc1945f755b179801e23e2d337d1faaba"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-discovery-type.json",
+      "sha256": "f00211b54d66c9354d692f92291b19393fef37b6f549fb7cf31bce726bd048d4"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-descriptor-plaintext.json",
+      "sha256": "eddedab83c00355dd53f8ce9ee7321fd292e7b287bd543f5c738a3c1a03b0073"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-descriptor-journal.json",
+      "sha256": "41ca6d67230bab6934bf1eb00938f708875fd18dc49d8abdd85fd3595afa3a9d"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-descriptor-unknown.json",
+      "sha256": "405ac7d404465483192e152b7deec534c5fac958d90c09518de179719ed8cc7e"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-descriptor-without-discovery.json",
+      "sha256": "7621d7852301fa4e806d0cf25f4597cd2dda5266be85cfca0ea6a2715a1b90fd"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-discovery-inconsistent-allowed.json",
+      "sha256": "95ae4c7c1fbfc86ebe86be13852249665b5b5a2f06c6c056162ff16c0496c6bb"
+    },
+    {
+      "path": "fixtures/negative/host-settings-snapshot-discovery-mutated.json",
+      "sha256": "41d606515135324d857493fc7a8b58ad68277e288199bfb64d04ec5ca46a31cd"
     }
   ],
   "extensions": {
@@ -3182,7 +3315,10 @@
           "fixtures/positive/host-settings-status-local.json",
           "fixtures/positive/host-settings-agent-local.json",
           "fixtures/positive/host-settings-snapshot-starting.json",
-          "fixtures/positive/host-settings-snapshot-verified.json"
+          "fixtures/positive/host-settings-snapshot-verified.json",
+          "fixtures/positive/host-settings-snapshot-discovery.json",
+          "fixtures/positive/host-settings-snapshot-discovery-empty.json",
+          "fixtures/positive/host-settings-snapshot-discovery-default-false.json"
         ],
         "negative": [
           "fixtures/negative/host-settings-read-public.json",
@@ -3210,7 +3346,16 @@
           "fixtures/negative/host-settings-read-store-ready.json",
           "fixtures/negative/host-settings-read-response-operation.json",
           "fixtures/negative/host-settings-read-cross-context.json",
-          "fixtures/negative/host-settings-read-missing-result.json"
+          "fixtures/negative/host-settings-read-missing-result.json",
+          "fixtures/negative/host-settings-metadata-discovery.json",
+          "fixtures/negative/host-settings-agent-discovery.json",
+          "fixtures/negative/host-settings-snapshot-discovery-type.json",
+          "fixtures/negative/host-settings-snapshot-descriptor-plaintext.json",
+          "fixtures/negative/host-settings-snapshot-descriptor-journal.json",
+          "fixtures/negative/host-settings-snapshot-descriptor-unknown.json",
+          "fixtures/negative/host-settings-snapshot-descriptor-without-discovery.json",
+          "fixtures/negative/host-settings-snapshot-discovery-inconsistent-allowed.json",
+          "fixtures/negative/host-settings-snapshot-discovery-mutated.json"
         ]
       }
     },

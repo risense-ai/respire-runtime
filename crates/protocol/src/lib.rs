@@ -21,6 +21,11 @@ pub mod key_control;
 pub mod migration_control;
 pub mod metadata_control;
 pub mod model_maintenance;
+pub use maintenance_control::{
+    LegacySnapshotDescriptor, LegacySnapshotRecoveryAction, LegacySnapshotRecoveryBinding,
+    LegacySnapshotRecoveryParams, LegacySnapshotRecoveryResult, LEGACY_SNAPSHOT_RECOVERY_METHOD,
+};
+pub use metadata_control::SnapshotPreflightPayload;
 pub use model_control::{HostModelParams, ModelInstallIntent, ModelPreparation, HOST_MODEL_SCHEMA_V};
 pub use host_control::{
     HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,

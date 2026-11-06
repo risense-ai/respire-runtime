@@ -1,0 +1,29 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "accept",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Paused",
+    "request": {
+      "v": 1,
+      "id": "82345678-1234-4234-9234-123456789abc",
+      "operation_id": "72345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "72345678-1234-4234-8234-123456789abc",
+      "method": "control.snapshot_legacy_recovery",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/profile\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"recovery_operation_id\":\"72345678-1234-4234-8234-123456789abc\",\"request_fingerprint\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"journal_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"action\":\"recover\"}"
+      ]
+    },
+    "result": {
+      "recovery_operation_id": "72345678-1234-4234-8234-123456789abc",
+      "request_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "journal_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "state": "released",
+      "cleanup_pending": true,
+      "cleanup_warning": "Legacy journal cleanup remains pending."
+    },
+    "finish_maintenance": true,
+    "original_operation_id": "72345678-1234-4234-8234-123456789abc",
+    "original_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}

@@ -43,8 +43,8 @@ if (manifest.release_metadata_schema_version !== 2) fail("wrong release metadata
 
 const positive = manifest.fixtures?.positive;
 const negative = manifest.fixtures?.negative;
-if (!Array.isArray(positive) || positive.length !== 89) fail("positive fixture count");
-if (!Array.isArray(negative) || negative.length !== 287) fail("negative fixture count");
+if (!Array.isArray(positive) || positive.length !== 93) fail("positive fixture count");
+if (!Array.isArray(negative) || negative.length !== 300) fail("negative fixture count");
 
 const boundPaths = new Set();
 for (const bound of manifest.files ?? []) {
@@ -814,7 +814,9 @@ function offlineReadFailure(payload) {
   const authority = settingsAuthorityFailure(payload, params.binding, c, c.authority.identity, true);
   if (authority) return authority;
   const snapshot = request.method === "control.snapshot.preflight", metadata = request.method === "control.metadata.status";
-  if (snapshot ? !c.snapshot_clear : c.auth_recovery_pending) return "offline_read_blocked";
+  const discovery = params.legacy_snapshot_discovery === true;
+  if (discovery && !snapshot) return "host_params_invalid";
+  if (snapshot ? !discovery && !c.snapshot_clear : c.auth_recovery_pending) return "offline_read_blocked";
   if (c.mutated) return "offline_read_mutation";
   if (payload.finish_maintenance) return "maintenance_not_terminal";
   if (!result || !hostSchemaValid(result, hostSchema.$defs.offlineEnvelope) ||
@@ -823,6 +825,8 @@ function offlineReadFailure(payload) {
       !hostSchemaValid(result.summary, hostSchema.$defs[snapshot ? "snapshotPreflightSummary" : metadata ? "metadataStatusSummary" : "agentReadSummary"]) ||
       (metadata ? !hostSchemaValid(result.details, hostSchema.$defs.metadataStatusDetails) ||
         result.summary.enabled !== result.details.enabled || result.summary.mode !== result.details.mode : result.details !== null)) return "host_result_invalid";
+  if (snapshot && (discovery ? result.summary.allowed !== c.snapshot_clear :
+      result.summary.allowed !== true || result.summary.legacy_recovery != null)) return "host_result_invalid";
   for (const [name, status, value] of [["control_ready", "ok", "true"], ["store_ready", "skip", "false"]]) {
     const items = result.items.filter(i => i.name === name);
     if (items.length !== 1 || items[0].status !== status || items[0].value !== value) return "host_result_invalid";
@@ -999,9 +1003,14 @@ function privateHostFailure(payload) {
   if (method.params === "modelParams" && (request.method === "control.model_install_plan"
       ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
   const snapshot = request.method === "control.snapshot_maintenance";
+  const legacySnapshot = request.method === "control.snapshot_legacy_recovery";
   const verified = ["control.auth.account_complete", "control.key.complete"].includes(request.method) || snapshot && ["commit", "release"].includes(params.action);
   if (payload.maintenance_phase !== (request.method === "control.auth.recovery_status" ? "Idle" : verified ? "Verified" : "Paused")) return "maintenance_phase_mismatch";
   if (payload.original_operation_id && payload.original_operation_id !== request.operation_id) return "host_operation_mismatch";
+  if (legacySnapshot) {
+    if (params.recovery_operation_id !== request.operation_id) return "host_operation_mismatch";
+    if (params.request_fingerprint !== payload.original_fingerprint) return "host_fingerprint_mismatch";
+  }
   if (snapshot) {
     if (params.operation_id !== request.operation_id) return "host_operation_mismatch";
     const tuple = ["snapshot-restore-v1", params.binding.installation_root, params.binding.profile,
@@ -1014,9 +1023,11 @@ function privateHostFailure(payload) {
     if (failure) return failure;
   }
   const result = payload.result;
-  if (!result) return ["profileResult", "recoveryResult"].includes(method.result) ? "host_result_invalid" : payload.finish_maintenance ? "maintenance_not_terminal" : null;
+  if (!result) return ["profileResult", "recoveryResult", "legacySnapshotRecoveryResult"].includes(method.result) ? "host_result_invalid" : payload.finish_maintenance ? "maintenance_not_terminal" : null;
   if (!hostSchemaValid(result, hostSchema.$defs[method.result])) return "host_result_invalid";
-  if (method.mutable && result.operation_id !== request.operation_id) return "host_operation_mismatch";
+  if (method.mutable && result[legacySnapshot ? "recovery_operation_id" : "operation_id"] !== request.operation_id) return "host_operation_mismatch";
+  if (legacySnapshot && (result.request_fingerprint !== params.request_fingerprint ||
+      result.journal_sha256 !== params.journal_sha256)) return "host_fingerprint_mismatch";
   const profileRecoveryError = profileRecoveryFailure(payload, params, method.result);
   if (profileRecoveryError) return profileRecoveryError;
   const extension = method.result === "migrationResult" || method.result === "keyResult" && params.operation.kind === "fivekeys";
@@ -1075,7 +1086,7 @@ function privateHostFailure(payload) {
     method.result === "accountResult" && ["committed", "rolled_back"].includes(result.outcome) ||
     extension && (method.result === "migrationResult" ? ["completed", "already_migrated"].includes(result.outcome) :
       ["committed", "rolled_back"].includes(result.outcome) && !result.verification_required) ||
-    snapshot && ["released", "rolled_back"].includes(result.state);
+    (snapshot || legacySnapshot) && ["released", "rolled_back"].includes(result.state);
   if (payload.finish_maintenance && !terminal) return "maintenance_not_terminal";
   return null;
 }
@@ -1083,7 +1094,7 @@ function privateHostFailure(payload) {
 const profileRecoveryExtension = manifest.extensions.profile_recovery;
 if (profileRecoveryExtension.schema !== "schema/private-host-control.schema.json" ||
     profileRecoveryExtension.consumer !== "consumers/private_host_control.rs") fail("profile/recovery must reuse the shared schema and consumer");
-for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive", positive, 25, 64, 21], ["negative", negative, 48, 239, 132]]) {
+for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive", positive, 25, 68, 21], ["negative", negative, 48, 252, 132]]) {
   let checked = 0;
   const extra = profileRecoveryExtension.fixtures[groupName];
   if (!Array.isArray(extra) || extra.length !== extraCount) fail("profile/recovery fixture count drift");
@@ -1106,7 +1117,7 @@ for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive"
 const settingsExtension = manifest.extensions.settings;
 if (settingsExtension.schema !== "schema/private-host-control.schema.json" ||
     settingsExtension.consumer !== "consumers/private_host_control.rs") fail("settings must reuse the shared schema and consumer");
-for (const [group, count] of [["positive", 7], ["negative", 26]]) {
+for (const [group, count] of [["positive", 10], ["negative", 35]]) {
   const paths = settingsExtension.fixtures[group];
   if (paths.length !== count || new Set(paths).size !== count) fail("settings fixture count drift");
   for (const name of paths) {
