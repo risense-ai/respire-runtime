@@ -189,7 +189,13 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
                 "joined-writable"
             };
             let user = format!("join-fixture-{}", uuid::Uuid::new_v4());
-            let payload = json!({"space":name,"addr":format!("http://{}",server.server_addr()),"user":user,"token":"synthetic-member-token","super":"synthetic-super","readonly":readonly});
+            let super_password = respire_app::memory::crypto::generate_secret_key();
+            let salt = respire_app::memory::crypto::random_hex(16);
+            let kek = respire_app::memory::crypto::derive_kek_v4(&super_password, &salt)?;
+            let (nonce, wrapped) = respire_app::memory::crypto::wrap_key(&[42_u8; 32], &kek)?;
+            let vault = json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+            let member_token = uuid::Uuid::new_v4().to_string();
+            let payload = json!({"space":name,"addr":format!("http://{}",server.server_addr()),"user":user,"token":member_token,"super":super_password,"readonly":readonly});
             let code = format!(
                 "1mem-invite:{}",
                 serde_json::to_vec(&payload)?
@@ -197,20 +203,26 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>()
             );
+            let expected_user = user.clone();
+            let expected_authorization = format!("Bearer {member_token}");
             let worker = std::thread::spawn(move || -> Result<(), String> {
-                let request = server
-                    .recv_timeout(Duration::from_secs(20))
-                    .map_err(|error| error.to_string())?
-                    .ok_or("join never fetched the vault")?;
-                if request.url() != "/api/self/vault"
-                    || !request.headers().iter().any(|header| {
-                        header.field.equiv("Authorization")
-                            && header.value.as_str() == "Bearer synthetic-member-token"
-                    })
-                {
-                    return Err("join did not authenticate its vault request".into());
+                for (path, body) in [("/api/self", json!({"user":expected_user})), ("/api/self/vault", vault)] {
+                    let request = server
+                        .recv_timeout(Duration::from_secs(20))
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("join never fetched {path}"))?;
+                    if request.method() != &tiny_http::Method::Get || request.url() != path
+                        || !request.headers().iter().any(|header| {
+                            header.field.equiv("Authorization")
+                                && header.value.as_str() == expected_authorization.as_str()
+                        })
+                    {
+                        return Err(format!("join did not authenticate its ordered GET {path}"));
+                    }
+                    request.respond(tiny_http::Response::from_string(body.to_string()))
+                        .map_err(|error| error.to_string())?;
                 }
-                request.respond(tiny_http::Response::from_string(json!({"version":4,"kdf_salt":"synthetic-salt","wrapped_urk":"synthetic-wrap","urk_nonce":"synthetic-nonce"}).to_string())).map_err(|error|error.to_string())
+                Ok(())
             });
             let joined = invoke(&["space", "join", &code], if readonly { 2 } else { 0 });
             let served = worker.join().map_err(|_| "join fixture panicked")?;
