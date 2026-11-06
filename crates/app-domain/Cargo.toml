@@ -9,6 +9,8 @@ repository = "https://github.com/risense-ai/respire-cli"
 publish = false
 
 [features]
+# Enabled only by app test dependencies to reuse their shared in-memory keyring.
+test-support = []
 default = ["cpu-owned-ort-experiment"]
 native-fault-tests = ["respire_core_sdk/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]

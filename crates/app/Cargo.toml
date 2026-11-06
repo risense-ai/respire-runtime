@@ -39,6 +39,7 @@ uuid = { version = "1.0", features = ["v4"] }
 whoami = "2.1"
 
 [dev-dependencies]
+respire_app_domain = { path = "../app-domain", features = ["test-support"] }
 tempfile = "3.15"
 tiny_http = "0.12"
 

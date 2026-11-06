@@ -536,6 +536,7 @@ mod tests {
         let old_alias = format!("login-{}", uuid::Uuid::new_v4().simple());
         let old_backend = crate::keystore::import_credential_checkpoint(&old_alias, "super", &code,
             require_persistent_auth_backend)?;
+        assert_eq!(old_backend, "native", "app and domain must share the test keyring backend");
         let mut old_session = prepared.session.clone();
         old_session["keyring_account"] = json!(old_alias);
         old_session["keyring_backend"] = json!(old_backend);
