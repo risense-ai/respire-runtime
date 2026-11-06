@@ -691,7 +691,7 @@
     },
     {
       "path": "schema/private-host-control.schema.json",
-      "sha256": "38b38630dba8ed5752d79cb0ed84f02af9f653e91f84ab7a00812e7717e6b9f8"
+      "sha256": "996a50d609131514f170c44a3e78c8d692796300e20ad0f41235b3722d2305c7"
     },
     {
       "path": "fixtures/positive/host-auth-keygen-unbound.json",
@@ -815,7 +815,7 @@
     },
     {
       "path": "consumers/private_host_control.rs",
-      "sha256": "f1e55703f71c2828262dca4d388b83d09d48cfd1c4eecb6fb7d558487160111d"
+      "sha256": "948c57cbfe62dc1d0e9db146b70a34a0ebb4e60cb7656f5c2a29f2fa95933a38"
     },
     {
       "path": "fixtures/positive/host-model-verify-loaded.json",
@@ -2884,6 +2884,86 @@
     {
       "path": "fixtures/negative/host-metadata-params-unknown.json",
       "sha256": "8d26ac3c2fc01dbd90c47412f54752fb1f9eecf764f132f5dece3936e06e0480"
+    },
+    {
+      "path": "fixtures/positive/host-agent-config-set.json",
+      "sha256": "166dc17fc52d962a7bfe48dd436129f21284c0c22d4da3a973e002713aaf3340"
+    },
+    {
+      "path": "fixtures/positive/host-agent-config-workspace-mode.json",
+      "sha256": "4217df4094f81599d517dcdfbfd987f883bdda962b7d57da31c3ce81393567ec"
+    },
+    {
+      "path": "fixtures/positive/host-agent-config-rolled-back.json",
+      "sha256": "7c9d31eed533e93a5da6b0789c400e557d97f129cf085e185d6a1dc98c28fb80"
+    },
+    {
+      "path": "fixtures/positive/host-agent-config-result-committed.json",
+      "sha256": "d3aefb30d0043237f6ce68928eb9149afc6f0a41d99f6dbfa9eb896398b154d2"
+    },
+    {
+      "path": "fixtures/positive/host-agent-config-result-unknown-target-value.json",
+      "sha256": "e63522b61e8617e70a5989740a8bf0151635a0c9d366d7f10402c555dee7d9dc"
+    },
+    {
+      "path": "fixtures/positive/host-agent-config-retry-original-receipt.json",
+      "sha256": "d506f1801fe82013bc03601128ff9e9ecae7647109c6f0f0fe44ca46e761a200"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-authority-phase.json",
+      "sha256": "3961d19e044c5dfe1327792c90592d903fcd1ad13f76af78103ef2ee8e2b8197"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-authority-identity.json",
+      "sha256": "7c3395090798bf62611fed2f7ea429d3c6887c402a0d58cf84226ef76e98aae6"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-original-operation.json",
+      "sha256": "5d953399d4a1ae04759060702e671394af95178859cfcb30f40ab5d9eeb5a678"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-original-revision.json",
+      "sha256": "3c6a5efc04d676cd7e30f49245c5299c22a2cdec130355a0d633ac9e94d90861"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-candidate-revision.json",
+      "sha256": "effdec198b322c443b17c09678cfd64afeed3f34cafe5dc91f1ad114360afa5f"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-marker-original.json",
+      "sha256": "6aac0b4c61d1b8ca1b3d0da1b3ebae538ae56a4a69ad4878d1cad49fa0bac2f8"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-cas-before.json",
+      "sha256": "c5fc67329c81af67d6ba69c129889626311d446134206c59c79bb72d32c8d841"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-receipt-current-bytes.json",
+      "sha256": "8c05d6db59811f668ebb5749917df0219e61437c26d85910d491e56d81c3a3dc"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-query-replays.json",
+      "sha256": "5870422bfefda43b6c2209507902805e4c83117022a947d3a921e7a76f35aa1c"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-unknown-as-commit.json",
+      "sha256": "83a82dcf4f6db4240fd770f8add5319cf692fbffd0b305ca1f346e73ab1992a8"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-unknown-finishes.json",
+      "sha256": "a8e6081523435a59cce31e7f0d2144bc99e9789b2b7af6191df0ba5b2996d10c"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-unknown-response-success.json",
+      "sha256": "c5b09cf905902fde4b837ec7a737bc49e02f44544102ec82aa32354da4b4609c"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-rollback-foreign-bytes.json",
+      "sha256": "f03655d98df9f67a0ad0e8a6291c9659ceca411f130126d4422e603d039c8680"
+    },
+    {
+      "path": "fixtures/negative/host-agent-config-params-unknown.json",
+      "sha256": "7e2bd391e342ea1455e4ce72e364761f614f5fe6f9b68bf46e845d5acc6a4563"
     }
   ],
   "extensions": {
@@ -3166,6 +3246,36 @@
           "fixtures/negative/host-metadata-unknown-finishes.json",
           "fixtures/negative/host-metadata-unknown-response-success.json",
           "fixtures/negative/host-metadata-params-unknown.json"
+        ]
+      }
+    },
+    "agent_config": {
+      "schema": "schema/private-host-control.schema.json",
+      "consumer": "consumers/private_host_control.rs",
+      "fixtures": {
+        "positive": [
+          "fixtures/positive/host-agent-config-set.json",
+          "fixtures/positive/host-agent-config-workspace-mode.json",
+          "fixtures/positive/host-agent-config-rolled-back.json",
+          "fixtures/positive/host-agent-config-result-committed.json",
+          "fixtures/positive/host-agent-config-result-unknown-target-value.json",
+          "fixtures/positive/host-agent-config-retry-original-receipt.json"
+        ],
+        "negative": [
+          "fixtures/negative/host-agent-config-authority-phase.json",
+          "fixtures/negative/host-agent-config-authority-identity.json",
+          "fixtures/negative/host-agent-config-original-operation.json",
+          "fixtures/negative/host-agent-config-original-revision.json",
+          "fixtures/negative/host-agent-config-candidate-revision.json",
+          "fixtures/negative/host-agent-config-marker-original.json",
+          "fixtures/negative/host-agent-config-cas-before.json",
+          "fixtures/negative/host-agent-config-receipt-current-bytes.json",
+          "fixtures/negative/host-agent-config-query-replays.json",
+          "fixtures/negative/host-agent-config-unknown-as-commit.json",
+          "fixtures/negative/host-agent-config-unknown-finishes.json",
+          "fixtures/negative/host-agent-config-unknown-response-success.json",
+          "fixtures/negative/host-agent-config-rollback-foreign-bytes.json",
+          "fixtures/negative/host-agent-config-params-unknown.json"
         ]
       }
     }

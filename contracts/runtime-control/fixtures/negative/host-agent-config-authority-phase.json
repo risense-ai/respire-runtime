@@ -1,0 +1,311 @@
+{
+  "fixture_type": "private_host_control",
+  "expected": "reject",
+  "payload": {
+    "channel": "inherited_pipe",
+    "maintenance_phase": "Idle",
+    "request": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "method": "control.agent_config.set",
+      "args": [
+        "{\"schema_version\":1,\"binding\":{\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"launch_id\":\"32345678-1234-4234-a234-123456789abc\",\"expected_account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"review\":{\"operation_id\":\"42345678-1234-4234-8234-123456789abc\",\"installation_root\":\"/isolated/root\",\"profile\":\"/isolated/root/accounts/source\",\"identity\":{\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"intent\":{\"key\":\"recall_mode\",\"raw_value\":\"quality\"},\"original_config\":\"{\\\"keep\\\":true}\",\"original_revision\":\"e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d\",\"candidate_revision\":\"dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629\",\"fingerprint\":\"0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335\"}}"
+      ],
+      "operation_id": "42345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "42345678-1234-4234-8234-123456789abc"
+    },
+    "result": {
+      "review": {
+        "operation_id": "42345678-1234-4234-8234-123456789abc",
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "intent": {
+          "key": "recall_mode",
+          "raw_value": "quality"
+        },
+        "original_config": "{\"keep\":true}",
+        "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+        "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+        "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335"
+      },
+      "outcome": "committed",
+      "result": {
+        "command": "agent-config",
+        "status": "ok",
+        "summary": {
+          "action": "updated",
+          "key": "recall_mode",
+          "value": "quality"
+        },
+        "items": [
+          {
+            "name": "recall_mode",
+            "status": "ok",
+            "value": "quality"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      }
+    },
+    "private_response": {
+      "command": "agent-config-control",
+      "status": "ok",
+      "summary": {
+        "review": {
+          "operation_id": "42345678-1234-4234-8234-123456789abc",
+          "installation_root": "/isolated/root",
+          "profile": "/isolated/root/accounts/source",
+          "identity": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "intent": {
+            "key": "recall_mode",
+            "raw_value": "quality"
+          },
+          "original_config": "{\"keep\":true}",
+          "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+          "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+          "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335"
+        },
+        "outcome": "committed",
+        "result": {
+          "command": "agent-config",
+          "status": "ok",
+          "summary": {
+            "action": "updated",
+            "key": "recall_mode",
+            "value": "quality"
+          },
+          "items": [
+            {
+              "name": "recall_mode",
+              "status": "ok",
+              "value": "quality"
+            }
+          ],
+          "actions": [],
+          "errors": [],
+          "details": null,
+          "related": []
+        }
+      },
+      "items": [
+        {
+          "name": "control_ready",
+          "status": "ok",
+          "value": "true"
+        },
+        {
+          "name": "store_ready",
+          "status": "skip",
+          "value": "false"
+        }
+      ],
+      "actions": [],
+      "errors": [],
+      "details": null,
+      "related": []
+    },
+    "private_rpc_response": {
+      "v": 1,
+      "id": "22345678-1234-4234-9234-123456789abc",
+      "ok": true,
+      "exit": 0,
+      "bin": "rsrs-runtime",
+      "envelope": {
+        "command": "agent-config-control",
+        "status": "ok",
+        "summary": {
+          "review": {
+            "operation_id": "42345678-1234-4234-8234-123456789abc",
+            "installation_root": "/isolated/root",
+            "profile": "/isolated/root/accounts/source",
+            "identity": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "intent": {
+              "key": "recall_mode",
+              "raw_value": "quality"
+            },
+            "original_config": "{\"keep\":true}",
+            "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+            "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+            "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335"
+          },
+          "outcome": "committed",
+          "result": {
+            "command": "agent-config",
+            "status": "ok",
+            "summary": {
+              "action": "updated",
+              "key": "recall_mode",
+              "value": "quality"
+            },
+            "items": [
+              {
+                "name": "recall_mode",
+                "status": "ok",
+                "value": "quality"
+              }
+            ],
+            "actions": [],
+            "errors": [],
+            "details": null,
+            "related": []
+          }
+        },
+        "items": [
+          {
+            "name": "control_ready",
+            "status": "ok",
+            "value": "true"
+          },
+          {
+            "name": "store_ready",
+            "status": "skip",
+            "value": "false"
+          }
+        ],
+        "actions": [],
+        "errors": [],
+        "details": null,
+        "related": []
+      },
+      "error": null,
+      "code": null,
+      "web_url": null,
+      "pid": 1234,
+      "data_dir": "/isolated/root/accounts/source",
+      "operation_id": "42345678-1234-4234-8234-123456789abc",
+      "idempotency_key": "42345678-1234-4234-8234-123456789abc"
+    },
+    "finish_maintenance": true,
+    "agent_config_context": {
+      "authority": {
+        "installation_root": "/isolated/root",
+        "profile": "/isolated/root/accounts/source",
+        "identity": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "grant_maintenance": "none",
+        "serving_authorized": false,
+        "parent_verified": true,
+        "binding_verified_before": true,
+        "binding_verified_after": true,
+        "launch_id": "32345678-1234-4234-a234-123456789abc",
+        "grant_verified": true,
+        "registration_verified": true
+      },
+      "fingerprint_preimage": "[1,\"control.agent_config.set\",\"42345678-1234-4234-8234-123456789abc\",\"/isolated/root\",\"/isolated/root/accounts/source\",{\"account_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},{\"key\":\"recall_mode\",\"raw_value\":\"quality\"},\"e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d\",\"dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629\"]",
+      "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335",
+      "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+      "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+      "candidate_config": "{\n  \"keep\": true,\n  \"recall_mode\": \"quality\"\n}",
+      "record_before": {
+        "review": {
+          "operation_id": "42345678-1234-4234-8234-123456789abc",
+          "installation_root": "/isolated/root",
+          "profile": "/isolated/root/accounts/source",
+          "identity": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "intent": {
+            "key": "recall_mode",
+            "raw_value": "quality"
+          },
+          "original_config": "{\"keep\":true}",
+          "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+          "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+          "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335"
+        },
+        "was_serving": false,
+        "store_ready": false,
+        "sent": true,
+        "receipt": null
+      },
+      "record_after": {
+        "review": {
+          "operation_id": "42345678-1234-4234-8234-123456789abc",
+          "installation_root": "/isolated/root",
+          "profile": "/isolated/root/accounts/source",
+          "identity": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "intent": {
+            "key": "recall_mode",
+            "raw_value": "quality"
+          },
+          "original_config": "{\"keep\":true}",
+          "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+          "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+          "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335"
+        },
+        "was_serving": false,
+        "store_ready": false,
+        "sent": true,
+        "receipt": {
+          "review": {
+            "operation_id": "42345678-1234-4234-8234-123456789abc",
+            "installation_root": "/isolated/root",
+            "profile": "/isolated/root/accounts/source",
+            "identity": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "intent": {
+              "key": "recall_mode",
+              "raw_value": "quality"
+            },
+            "original_config": "{\"keep\":true}",
+            "original_revision": "e78bf90424775f81b3a702f4db316bf479e4ba38232eeef3e30673bebcc0e23d",
+            "candidate_revision": "dcbb2b54a88329dcf7a9dfbc9a03003c94154c31ad7b414545daff4f37c94629",
+            "fingerprint": "0479f081d24ec46f5d013d128e14b8f6ce223a4165b34ff2dbdbc6634ddaf335"
+          },
+          "outcome": "committed",
+          "result": {
+            "command": "agent-config",
+            "status": "ok",
+            "summary": {
+              "action": "updated",
+              "key": "recall_mode",
+              "value": "quality"
+            },
+            "items": [
+              {
+                "name": "recall_mode",
+                "status": "ok",
+                "value": "quality"
+              }
+            ],
+            "actions": [],
+            "errors": [],
+            "details": null,
+            "related": []
+          }
+        }
+      },
+      "auth_recovery_pending": false,
+      "snapshot_clear": true,
+      "locks_owned": true,
+      "marker_unchanged": true,
+      "actual_before": "{\"keep\":true}",
+      "actual_after": "{\n  \"keep\": true,\n  \"recall_mode\": \"quality\"\n}",
+      "write_attempted": true,
+      "receipt_published": true,
+      "rollback_source": null
+    }
+  },
+  "error_code": "settings_authority_mismatch"
+}
