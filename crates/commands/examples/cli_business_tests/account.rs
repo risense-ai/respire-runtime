@@ -139,10 +139,10 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         }
         Ok(value)
     };
-    let health = |profile: &std::path::Path| -> Result<u64, Box<dyn std::error::Error>> {
+    let health = |profile: &std::path::Path, stage: &str| -> Result<u64, Box<dyn std::error::Error>> {
         let status: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
             .timeout(Duration::from_secs(5))
-            .call()?
+            .call().map_err(|error| format!("owned space health stage={stage}: {error}"))?
             .into_json()?;
         let executable = status["exe"].as_str().ok_or("Runtime executable missing")?;
         if status["data_dir"].as_str().map(std::path::Path::new) != Some(profile)
@@ -157,11 +157,13 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             .ok_or_else(|| "runtime PID missing".into())
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // Start the copied pinned managed installation, not a shared Runtime override.
+        invoke(&["runtime", "start"], 0)?;
         invoke(&["status"], 0)?;
-        let original_pid = health(&library)?;
+        let original_pid = health(&library, "initial-status")?;
         invoke(&["space", "list"], 0)?;
         assert_eq!(
-            health(&library)?,
+            health(&library, "after-list")?,
             original_pid,
             "listing host profiles must preserve the owned runtime"
         );
@@ -174,7 +176,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             assert_eq!(rejected["summary"]["reason"], "invalid_input");
             assert_eq!(rejected["details"]["error_type"], "user");
             assert_eq!(
-                health(&library)?,
+                health(&library, "after-invalid-invite")?,
                 original_pid,
                 "bad invite must not stop the current runtime"
             );
@@ -239,7 +241,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             );
             assert_eq!(joined["details"]["readonly"], readonly);
             assert_eq!(std::fs::read(&config)?, before);
-            assert_ne!(health(&library)?, original_pid);
+            assert_ne!(health(&library, if readonly { "after-readonly-join" } else { "after-writable-join" })?, original_pid);
             let target = library.join("accounts").join(name);
             let session: Value =
                 serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
@@ -249,10 +251,10 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
                     serde_json::from_slice(&std::fs::read(target.join("agent.json"))?)?;
                 assert_eq!(agent["readonly_team"], true);
             }
-            let pid = health(&library)?;
+            let pid = health(&library, "before-duplicate-join")?;
             invoke(&["space", "join", "--code", &code], 2)?;
             assert_eq!(
-                health(&library)?,
+                health(&library, "after-duplicate-join")?,
                 pid,
                 "existing target must fail before stopping the runtime"
             );
@@ -283,11 +285,11 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         assert_eq!(rejected?["details"]["error_type"], "runtime");
         assert_eq!(std::fs::read(&config)?, before);
         assert!(!library.join("accounts/rejected-join").exists());
-        health(&library)?;
+        health(&library, "after-rejected-join")?;
         invoke(&["space", "create", "probe"], 0)?;
         let probe = library.join("accounts/probe");
         assert!(probe.join("space_owner.json").is_file());
-        assert_ne!(health(&probe)?, original_pid);
+        assert_ne!(health(&probe, "after-create")?, original_pid);
         let before = std::fs::read(&config)?;
         let blocked = invoke(&["space", "remove", "probe"], 2)?;
         assert_eq!(blocked["summary"]["reason"], "invalid_input");
@@ -295,16 +297,16 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         let blocked = invoke(&["space", "remove", "probe", "--yes"], 2)?;
         assert_eq!(blocked["details"]["error_type"], "user");
         assert!(probe.is_dir());
-        health(&probe)?;
+        health(&probe, "after-blocked-remove")?;
         invoke(&["space", "use", "main"], 0)?;
-        health(&library)?;
+        health(&library, "after-use-main")?;
         let before = std::fs::read(&config)?;
         invoke(&["space", "use", "missing"], 2)?;
         assert_eq!(std::fs::read(&config)?, before);
-        health(&library)?;
+        health(&library, "after-use-missing")?;
         invoke(&["space", "remove", "probe", "--yes"], 0)?;
         assert!(!probe.exists());
-        health(&library)?;
+        health(&library, "after-remove")?;
         let preserved: Value = serde_json::from_slice(&std::fs::read(&config)?)?;
         assert_eq!(preserved["api_base"], "https://fixture.invalid");
         assert_eq!(preserved["custom"], "preserve");
@@ -507,20 +509,20 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Ok(())
     });
     let execute = |args: &[&str]| -> std::io::Result<Output> {
-        let output = isolated_command(Some(&models))?
+        let mut command = isolated_command(Some(&models))?;
+        // Login factors come only from its arguments, never the harness unlock key.
+        if args.contains(&"login") {
+            command.env_remove("RSRS_SUPER");
+        } else {
+            command.env("RSRS_SUPER", &super_password);
+        }
+        let output = command
             .args(args)
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("RSRS_DATA_DIR", &root)
             .env("RSRS_ADDR", "http://environment.invalid")
             .env("RSRS_RPC_PORT", runtime_port.to_string())
-            .env(
-                "RSRS_SUPER",
-                args.windows(2)
-                    .find(|pair| pair[0] == "--super")
-                    .map(|pair| pair[1])
-                    .unwrap_or(&super_password),
-            )
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
@@ -538,6 +540,76 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             String::from_utf8_lossy(&output.stderr)
         );
         Ok(output)
+    };
+    let recover_account = |output: &Output, required: Option<&str>| -> Result<(), Box<dyn std::error::Error>> {
+        use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult};
+        assert!(!output.status.success());
+        let failure: Value = serde_json::from_slice(&output.stdout)?;
+        let operation = if required.is_some() {
+            assert_eq!(failure["summary"]["reason"], "runtime_error");
+            failure["errors"].as_array().ok_or("login errors missing")?
+                .iter().filter_map(Value::as_str)
+                .find_map(|error| error.split_once("login input pending; operation_id=")
+                    .and_then(|(_, tail)| tail.split_whitespace().next()))
+                .ok_or("login did not retain an AwaitingInput operation")?
+        } else {
+            assert_eq!(failure["summary"]["reason"], "account_outcome_unknown");
+            failure["details"]["operation_id"].as_str().ok_or("original account operation missing")?
+        };
+        let id = uuid::Uuid::parse_str(operation)?;
+        assert_eq!(id.get_version_num(), 4);
+        assert_eq!(id.to_string(), operation);
+        let source = original.canonicalize()?;
+        let source_arg = source.to_str().ok_or("source profile is not UTF-8")?;
+        let before = requests.lock().map_err(|error| error.to_string())?.clone();
+        // Observe the original O without resending login or supplying new factors.
+        let queried = execute(&["--json", "runtime", "account-result", "--operation-id",
+            operation, "--source-profile", source_arg])?;
+        let envelope: Value = serde_json::from_slice(&queried.stdout)?;
+        if let Some(required) = required {
+            assert_eq!(envelope["command"], "auth-account");
+            assert_eq!(envelope["status"], "pending");
+            let receipt: HostAuthAccountResult = serde_json::from_value(envelope["summary"].clone())?;
+            assert_eq!(receipt.operation_id, operation);
+            assert_eq!(receipt.source_profile, source);
+            assert_eq!(receipt.outcome, HostAuthAccountOutcome::AwaitingInput);
+            assert_eq!(receipt.login.ok_or("login input status missing")?.required_inputs, [required]);
+        } else {
+            assert!(!queried.status.success());
+            for response in [&failure, &envelope] {
+                assert_eq!(response["summary"]["reason"], "account_outcome_unknown");
+                assert_eq!(response["details"]["error_type"], "outcome_unknown");
+                assert_eq!(response["details"]["operation_id"], operation);
+                assert_eq!(response["details"]["source_profile"], source_arg);
+                assert_eq!(response["details"]["register"], false);
+                assert_eq!(response["details"]["replayed"], false);
+                assert_eq!(response["details"]["result_command"], "runtime account-result");
+            }
+        }
+        // Explicit compensation, not a login retry: Runtime rejects RemotePending,
+        // RemoteUnknown, committed operations and pending/published remote effects.
+        let rolled_back = execute(&["--json", "runtime", "account-rollback", "--operation-id",
+            operation, "--source-profile", source_arg, "--confirm"])?;
+        let envelope: Value = serde_json::from_slice(&rolled_back.stdout)?;
+        assert_eq!(envelope["command"], "auth-account");
+        let receipt: HostAuthAccountResult = serde_json::from_value(envelope["summary"].clone())?;
+        assert_eq!(receipt.operation_id, operation);
+        assert_eq!(receipt.source_profile, source);
+        assert_eq!(receipt.outcome, HostAuthAccountOutcome::RolledBack);
+        assert_eq!(*requests.lock().map_err(|error| error.to_string())?, before,
+            "original-operation recovery repeated authorization or vault requests");
+        assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
+        assert_eq!(std::fs::read(original.join("session.json"))?, session_bytes);
+        // Reconnected rollback deliberately retains Paused; restart is explicit recovery.
+        let restarted = execute(&["--json", "runtime", "restart"])?;
+        assert!(restarted.status.success(), "original account did not resume after rollback");
+        let envelope: Value = serde_json::from_slice(&restarted.stdout)?;
+        assert_eq!(envelope["summary"]["state"], "ready");
+        assert_eq!(std::fs::canonicalize(envelope["summary"]["data_dir"].as_str()
+            .ok_or("restarted profile missing")?)?, source);
+        assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
+        assert_eq!(std::fs::read(original.join("session.json"))?, session_bytes);
+        Ok(())
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let stale_session = br#"{"user":"original","addr":"http://legacy.invalid"}"#;
@@ -700,6 +772,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         *mode.lock().map_err(|error| error.to_string())? = "authorized".to_owned();
         for args in [
             vec![
+                "--json",
                 "login",
                 "--oauth",
                 "--addr",
@@ -707,8 +780,11 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                 "--dashboard",
                 &addr,
                 "--no-open",
+                // Explicit empty input prevents fallback to an old target keyring entry.
+                "--super=",
             ],
             vec![
+                "--json",
                 "login",
                 "--interactive",
                 "--addr",
@@ -728,9 +804,15 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             {
                 return Err("failed vault verification changed the original account".into());
             }
+            if args.contains(&"--super=") {
+                recover_account(&output, Some("super_password"))?;
+            } else {
+                recover_account(&output, None)?;
+            }
         }
         *mode.lock().map_err(|error| error.to_string())? = "totp".to_owned();
         let totp = execute(&[
+            "--json",
             "login",
             "--interactive",
             "--addr",
@@ -744,6 +826,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         if totp.status.success() || std::fs::read(root.join("client.json"))? != config_bytes {
             return Err("headless TOTP changed the account before authorization".into());
         }
+        recover_account(&totp, Some("totp"))?;
         *mode.lock().map_err(|error| error.to_string())? = "authorized".to_owned();
         let authorized = execute(&[
             "--json",
