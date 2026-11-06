@@ -727,7 +727,9 @@
             "control.snapshot.preflight",
             "control.metadata.enable",
             "control.metadata.disable",
-            "control.metadata.result"
+            "control.metadata.result",
+            "control.agent_config.set",
+            "control.agent_config.result"
           ]
         },
         "args": {
@@ -836,6 +838,9 @@
             },
             {
               "$ref": "#/$defs/settingsResponse"
+            },
+            {
+              "$ref": "#/$defs/agentConfigResponse"
             }
           ]
         },
@@ -844,6 +849,9 @@
         },
         "metadata_context": {
           "$ref": "#/$defs/metadataContext"
+        },
+        "agent_config_context": {
+          "$ref": "#/$defs/agentConfigContext"
         }
       },
       "additionalProperties": false
@@ -4586,6 +4594,506 @@
         "data_dir"
       ],
       "additionalProperties": false
+    },
+    "agentConfigIntent": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "raw_value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "raw_value"
+      ],
+      "additionalProperties": false
+    },
+    "agentConfigReview": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/$defs/metadataIdentity"
+        },
+        "intent": {
+          "$ref": "#/$defs/agentConfigIntent"
+        },
+        "original_config": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "original_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "operation_id",
+        "installation_root",
+        "profile",
+        "identity",
+        "intent",
+        "original_config",
+        "original_revision",
+        "candidate_revision",
+        "fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "agentConfigParams": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "review": {
+          "$ref": "#/$defs/agentConfigReview"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "review"
+      ],
+      "additionalProperties": false
+    },
+    "agentConfigReceipt": {
+      "type": "object",
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/agentConfigReview"
+        },
+        "outcome": {
+          "enum": [
+            "committed",
+            "rolled_back",
+            "unknown"
+          ]
+        },
+        "result": {}
+      },
+      "required": [
+        "review",
+        "outcome",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "agentConfigRecord": {
+      "type": "object",
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/agentConfigReview"
+        },
+        "was_serving": {
+          "type": "boolean"
+        },
+        "store_ready": {
+          "type": "boolean"
+        },
+        "sent": {
+          "type": "boolean"
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agentConfigReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "review",
+        "was_serving",
+        "store_ready",
+        "sent",
+        "receipt"
+      ],
+      "additionalProperties": false
+    },
+    "agentConfigContext": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/settingsAuthority"
+        },
+        "fingerprint_preimage": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "original_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_config": {
+          "type": "string"
+        },
+        "record_before": {
+          "$ref": "#/$defs/agentConfigRecord"
+        },
+        "record_after": {
+          "$ref": "#/$defs/agentConfigRecord"
+        },
+        "auth_recovery_pending": {
+          "type": "boolean"
+        },
+        "snapshot_clear": {
+          "type": "boolean"
+        },
+        "locks_owned": {
+          "type": "boolean"
+        },
+        "marker_unchanged": {
+          "type": "boolean"
+        },
+        "actual_before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actual_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_attempted": {
+          "type": "boolean"
+        },
+        "receipt_published": {
+          "type": "boolean"
+        },
+        "rollback_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "authority",
+        "fingerprint_preimage",
+        "fingerprint",
+        "original_revision",
+        "candidate_revision",
+        "candidate_config",
+        "record_before",
+        "record_after",
+        "auth_recovery_pending",
+        "snapshot_clear",
+        "locks_owned",
+        "marker_unchanged",
+        "actual_before",
+        "actual_after",
+        "write_attempted",
+        "receipt_published",
+        "rollback_source"
+      ],
+      "additionalProperties": false
+    },
+    "agentConfigEnvelope": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "agent-config-control"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "fail"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/agentConfigReceipt"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentConfigAction": {
+      "type": "object",
+      "required": [
+        "command",
+        "status",
+        "summary",
+        "items",
+        "actions",
+        "errors",
+        "details",
+        "related"
+      ],
+      "properties": {
+        "command": {
+          "const": "agent-config"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "fail"
+          ]
+        },
+        "summary": {
+          "type": "object"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "value"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warn",
+                  "fail",
+                  "skip",
+                  "pending"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 0
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "details": {
+          "type": "null"
+        },
+        "related": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentConfigResponse": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "exit": {
+          "enum": [
+            0,
+            2
+          ]
+        },
+        "bin": {
+          "const": "rsrs-runtime"
+        },
+        "envelope": {
+          "type": "object"
+        },
+        "error": {
+          "type": "null"
+        },
+        "code": {
+          "enum": [
+            null,
+            "agent_config_outcome_unknown"
+          ]
+        },
+        "web_url": {
+          "type": "null"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "data_dir": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "ok",
+        "exit",
+        "bin",
+        "envelope",
+        "error",
+        "code",
+        "web_url",
+        "pid",
+        "data_dir"
+      ],
+      "additionalProperties": false
     }
   },
   "x-methods": {
@@ -4762,6 +5270,16 @@
     "control.metadata.result": {
       "params": "metadataParams",
       "result": "metadataResult",
+      "mutable": true
+    },
+    "control.agent_config.set": {
+      "params": "agentConfigParams",
+      "result": "agentConfigReceipt",
+      "mutable": true
+    },
+    "control.agent_config.result": {
+      "params": "agentConfigParams",
+      "result": "agentConfigReceipt",
       "mutable": true
     }
   },
