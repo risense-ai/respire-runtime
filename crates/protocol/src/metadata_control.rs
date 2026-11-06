@@ -186,5 +186,7 @@ pub fn metadata_status_path(path: &Path) -> std::io::Result<PathBuf> {
     }
     let existing = existing.ok_or_else(|| Error::new(ErrorKind::NotFound, "metadata status path has no existing ancestor"))?;
     let suffix = absolute.strip_prefix(&existing).map_err(|_| Error::new(ErrorKind::InvalidInput, "metadata status path changed"))?;
-    Ok(existing.canonicalize()?.join(suffix))
+    let canonical = existing.canonicalize()?;
+    // Joining an empty suffix adds a separator and changes display-based identity hashes.
+    Ok(if suffix.as_os_str().is_empty() { canonical } else { canonical.join(suffix) })
 }

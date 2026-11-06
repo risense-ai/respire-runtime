@@ -16,7 +16,6 @@ fn isolated_command(models: Option<&std::path::Path>) -> std::io::Result<Command
             command.env_remove(name);
         }
     }
-    command.env("RSRS_RUNTIME_BIN", runtime_bin()?);
     command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
     if let Some(models) = models {
         command.env("RSRS_M3_DIR", models).env("RSRS_ENGINE", "cpu");
@@ -89,6 +88,12 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let home = tempfile::tempdir()?;
     let library = home.path().join(".rsrs");
     std::fs::create_dir(&library)?;
+    support::install_runtime_fixture(&library)?;
+    let source_runtime = runtime_bin()?;
+    let version = source_runtime.parent().and_then(std::path::Path::file_name)
+        .ok_or("Runtime fixture version directory missing")?;
+    let installed_runtime = library.join("runtime").join(version)
+        .join(source_runtime.file_name().ok_or("Runtime fixture file name missing")?);
     let config = library.join("client.json");
     std::fs::write(
         &config,
@@ -141,7 +146,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             .into_json()?;
         let executable = status["exe"].as_str().ok_or("Runtime executable missing")?;
         if status["data_dir"].as_str().map(std::path::Path::new) != Some(profile)
-            || std::path::Path::new(executable).canonicalize()? != runtime_bin()?.canonicalize()?
+            || std::path::Path::new(executable).canonicalize()? != installed_runtime.canonicalize()?
         {
             return Err(format!("runtime profile readback failed: {status}").into());
         }
@@ -330,6 +335,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     let root = home.path().join(".rsrs");
     let original = root.join("accounts/original");
     std::fs::create_dir_all(&original)?;
+    support::install_runtime_fixture(&root)?;
     let session_bytes = br#"{"user":"original","addr":"https://previous.invalid"}"#;
     std::fs::write(original.join("session.json"), session_bytes)?;
     let config_bytes = serde_json::to_vec(
