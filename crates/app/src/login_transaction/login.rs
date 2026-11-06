@@ -332,7 +332,21 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             && local["secret_key"].as_str().is_none() {
             return require_inputs(&mut journal, index, &["secret_key"]);
         }
-        PreparedLogin::prepare_with_vault(addr, &authorized, super_password, vault, None)?
+        let config_before = match std::fs::read(crate::service::client_config_path()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        match PreparedLogin::prepare_with_vault(addr, &authorized, super_password, vault, None) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let Some(rejected) = error.downcast_ref::<LocalKeyMaterialRejected>() else {
+                    return Err(error);
+                };
+                reject_local_key_material(ownership, &mut journal, index, rejected, &config_before)?;
+                return account_result(&journal.operations[index]);
+            }
+        }
     };
     if let Some(confirmed) = input.merge_local {
         progress(&mut journal, index)?.confirm_merge(&prepared.directory, confirmed)?;
@@ -375,6 +389,50 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
     commit_account(ownership, &mut journal, index, &mut prepared)?;
     resume_import(ownership, &mut journal, index)?;
     account_result(&journal.operations[index])
+}
+
+pub(super) fn reject_local_key_material(ownership: &AuthOwnership, journal: &mut Journal,
+    index: usize, rejected: &LocalKeyMaterialRejected, config_before: &Option<Vec<u8>>) -> Result<()> {
+    let record = &journal.operations[index];
+    let account = record.account.as_ref().context("rejected login receipt missing")?;
+    let login = account.login.as_ref().context("rejected login progress missing")?;
+    let active = journal.active.as_ref().context("rejected login recovery missing")?;
+    ensure!(record.phase == AuthPhase::Authorized && !account.register
+        && record.root == ownership.root && record.profile == ownership.profile
+        && rejected.directory.canonicalize()? == ownership.profile
+        && record.original_sha256.as_deref() == Some(rejected.original_sha256.as_str())
+        && account.target.is_none() && record.candidate.is_none()
+        && record.candidate_sha256.is_none() && record.backend.is_none()
+        && !account.vault_pending && !account.published_vault
+        && !login.import_started && !login.sync_started && login.import.is_none()
+        && login.sync.is_none() && login.snapshot.is_none() && !login.publication_started()
+        && active.operation_id.as_deref() == Some(record.operation_id.as_str())
+        && active.alias == record.alias && active.directory == ownership.profile
+        && active.original.as_deref().map(digest) == record.original_sha256
+        && active.directory_existed && !active.owns_config
+        && active.backends.is_empty() && active.pass_backends.is_empty(),
+        "local rejection cannot prove an untouched owned account; retain the original operation");
+    ensure!(crate::service::main_data_dir().canonicalize()? == ownership.root
+        && crate::service::data_dir().canonicalize()? == ownership.profile
+        && read_original(&ownership.profile)? == active.original
+        && serde_json::to_vec(&load_journal()?)? == serde_json::to_vec(journal)?,
+        "local rejection source or durable operation changed");
+    verify_auth_identity(&ownership.root, &ownership.profile, &account.source_identity)?;
+    let identity = account.source_identity.clone();
+    let verify_config = || -> Result<()> {
+        let current = match std::fs::read(crate::service::client_config_path()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(&current == config_before, "local rejection configuration changed");
+        Ok(())
+    };
+    verify_config()?;
+    rollback_account_material(journal, index)?;
+    verify_config()?;
+    verify_auth_identity(&ownership.root, &ownership.profile, &identity)?;
+    finish_account_rollback(journal, index)
 }
 
 fn import_key(keys: &crate::memory::SessionKeys, record: &AuthRecord, target: &Path) -> Result<[u8; 32]> {
