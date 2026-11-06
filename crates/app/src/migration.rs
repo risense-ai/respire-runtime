@@ -4,6 +4,11 @@
 #[path = "migration_readiness_tests.rs"]
 mod readiness_tests;
 
+#[cfg(test)]
+pub(crate) fn memory_keyring_for_test() -> impl Drop {
+    readiness_tests::memory_keyring()
+}
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
