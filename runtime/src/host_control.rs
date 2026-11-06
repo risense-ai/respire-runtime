@@ -651,6 +651,11 @@ fn receive_and_execute(
         return Ok(());
     }
     let (params, model_params) = validate_request(&request)?;
+    let verify_binding = if request.method == HostControlOperation::MemoryRevision.method() {
+        crate::startup_identity::verify_memory_revision_binding
+    } else {
+        crate::startup_identity::verify_control_binding
+    };
     let model_plan = request.method == HostControlOperation::ModelInstallPlan.method();
     let model_verify = request.method == HostControlOperation::ModelInstallVerify.method();
     if model_plan || model_verify {
@@ -662,7 +667,7 @@ fn receive_and_execute(
     // or argv dispatch is accepted; EOF/extra bytes revoke this read-only child.
     respire_spawn::watch_control_parent()
         .map_err(|_| ("unauthorized", "host control parent watch failed"))?;
-    crate::startup_identity::verify_control_binding(&params.binding)
+    verify_binding(&params.binding)
         .map_err(|_| ("scope_mismatch", "host control binding does not match consumed grant"))?;
     *control_ready = true;
     if model_plan || model_verify {
@@ -684,7 +689,7 @@ fn receive_and_execute(
                     .ok_or(("invalid_request", "model preparation selection digest missing"))?)
         } else { respire_commands::model_install::model_preparation_plan(&model.intent) }
             .map_err(|_| ("model_plan_unavailable", "selected model preparation status unavailable"))?;
-        crate::startup_identity::verify_control_binding(&params.binding)
+        verify_binding(&params.binding)
             .map_err(|_| ("scope_mismatch", "host control identity changed during model planning"))?;
         let mut envelope = ResultEnvelope::new(command, Status::Ok,
             serde_json::json!({"complete":plan.assets.complete}), Vec::new());
@@ -703,7 +708,7 @@ fn receive_and_execute(
             return Err(("revision_unavailable", "memory revision unavailable"));
         }
     };
-    crate::startup_identity::verify_control_binding(&params.binding)
+    verify_binding(&params.binding)
         .map_err(|_| ("scope_mismatch", "host control identity changed during the read"))?;
     let actual_profile = std::path::Path::new(&revision.profile).canonicalize()
         .map_err(|_| ("scope_mismatch", "host control profile is unavailable"))?;

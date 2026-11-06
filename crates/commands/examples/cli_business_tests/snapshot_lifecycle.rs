@@ -35,6 +35,12 @@ impl Fixture {
             "CLI shim cannot substitute for the standalone Runtime fixture"
         );
         let root = tempfile::tempdir()?;
+        support::install_runtime_fixture(root.path())?;
+        let runtime_bin = root.path().join("runtime")
+            .join(runtime_bin.parent().and_then(std::path::Path::file_name)
+                .context("Runtime fixture version directory missing")?)
+            .join(runtime_bin.file_name().context("Runtime fixture binary name missing")?)
+            .canonicalize()?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
             .local_addr()?
             .port();
@@ -508,8 +514,6 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
 #[test]
 fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> Result<()> {
     let mut fixture = Fixture::new()?;
-    // Host control requires the official managed installation, not the serve override.
-    support::install_runtime_fixture(fixture.root.path())?;
     let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
     assert!(ok);
     let id = created["details"]["id"].as_str().context("snapshot id")?;

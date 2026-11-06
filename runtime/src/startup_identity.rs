@@ -426,12 +426,23 @@ fn validate_identity_write_context(
 }
 
 pub(crate) fn verify_control_binding(binding: &respire_protocol::ControlBinding) -> Result<()> {
+    verify_control_binding_inner(binding, true)
+}
+
+/// Revision reads must not inspect or recover an interrupted login journal.
+pub(crate) fn verify_memory_revision_binding(binding: &respire_protocol::ControlBinding) -> Result<()> {
+    verify_control_binding_inner(binding, false)
+}
+
+fn verify_control_binding_inner(
+    binding: &respire_protocol::ControlBinding, check_login_recovery: bool,
+) -> Result<()> {
     let startup = STARTUP.get().context("runtime control grant is not consumed")?;
     let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
     let account = control_account(&startup.context.profile)?;
     validate_control_binding(binding, &startup.context, grant, account.as_deref())?;
-    verify_managed_boot()
+    verify_managed_boot_inner(check_login_recovery)
 }
 
 fn validate_control_binding(
@@ -466,10 +477,14 @@ fn control_account(profile: &Path) -> Result<Option<String>> {
 }
 
 pub(crate) fn verify_managed_boot() -> Result<()> {
+    verify_managed_boot_inner(true)
+}
+
+fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
     let startup = STARTUP
         .get()
         .context("runtime startup authorization is missing")?;
-    if !startup.auth_control {
+    if check_login_recovery && !startup.auth_control {
         anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
             "interrupted auth control must be recovered before opening the store");
     }
