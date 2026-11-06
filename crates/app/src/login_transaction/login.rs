@@ -1,5 +1,6 @@
 //! Resume only the admitted login; never journal the supplemental request object.
 use super::*;
+use crate::MemoryTransport;
 use respire_protocol::host_control::{HostAuthLoginContinuation, HostAuthLoginStatus};
 
 #[derive(Serialize, Deserialize)]
@@ -38,6 +39,8 @@ pub(super) struct LoginProgress {
     challenge: Option<ChallengeCheckpoint>,
     snapshot: Option<ImportSnapshot>,
     import_started: bool,
+    #[serde(default)]
+    sync_started: bool,
     import: Option<Value>,
     sync: Option<Value>,
     migration_cloud: Option<Value>,
@@ -53,7 +56,7 @@ impl LoginProgress {
     pub(super) fn new(migrate_local: bool, migrate_vault: bool, offer_local_merge: bool) -> Self {
         Self { migrate_local, migrate_vault, offer_local_merge, merge_local: None, merge_target: None,
             required_inputs: Vec::new(), challenge: None, snapshot: None,
-            import_started: false, import: None, sync: None, migration_cloud: None,
+            import_started: false, sync_started: false, import: None, sync: None, migration_cloud: None,
             migration_salt: None, publication_pending: false, publication_done: false,
             publication_step: None, vault_done: false, password_done: false }
     }
@@ -92,6 +95,11 @@ impl LoginProgress {
 
     pub(super) fn publication_started(&self) -> bool {
         self.publication_pending || self.publication_done || self.vault_done || self.password_done
+    }
+
+    pub(super) fn can_compensate_import(&self) -> bool {
+        self.imports_local() && !self.migrate_vault && !self.import_started
+            && self.import.is_none() && !self.publication_started()
     }
 }
 
@@ -372,6 +380,30 @@ fn import_key(keys: &crate::memory::SessionKeys, record: &AuthRecord, target: &P
         &("login-import-v1", &record.operation_id, &record.root, &record.profile, target))?)
 }
 
+#[derive(Default)]
+pub(super) struct ImportSyncControl {
+    phase: std::cell::Cell<Option<&'static str>>,
+    pub(super) remote_effect_possible: std::cell::Cell<bool>,
+}
+
+impl crate::sync::SyncControl for ImportSyncControl {
+    fn progress(&self, phase: &str) {
+        self.phase.set(match phase {
+            "capabilities" => Some("capabilities"),
+            "pull" => Some("pull"),
+            _ => None,
+        });
+    }
+
+    fn local<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> { action() }
+
+    fn remote<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        // Unknown phases, pushes and resolutions must never authorize compensation.
+        if self.phase.get().is_none() { self.remote_effect_possible.set(true); }
+        action()
+    }
+}
+
 pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, index: usize) -> Result<()> {
     let record = &journal.operations[index];
     let Some(login) = record.account.as_ref().and_then(|account| account.login.as_ref()) else { return Ok(()); };
@@ -391,15 +423,43 @@ pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, in
     let mut entries: Vec<crate::memory::model::MemoryEntry> = serde_json::from_slice(&bytes)?;
     for entry in &mut entries { entry.user = record.account.as_ref().context("account receipt missing")?.user.clone(); }
     let recovered = login.import_started;
-    progress(journal, index)?.import_started = true;
+    let first_sync = !login.sync_started && !recovered;
+    let original_material = original_import_material(record, journal.active.as_ref().context("import recovery missing")?);
+    progress(journal, index)?.sync_started = true;
     save_journal(journal)?;
     ensure!(!crate::service::off_mode(), "target service disabled; import receipt retained");
     crate::service::ensure_writable()?;
     let _deferred = crate::core_sdk::defer_indexing();
     let target_app = crate::service::App::open()?;
-    let before = target_app.sync().context("target sync failed before import; source preserved")?;
-    ensure!(before.converged, "target has not converged; import receipt retained");
+    // Inspect all epochs/states, not only the currently sendable outbox batch.
+    let database = rusqlite::Connection::open_with_flags(crate::service::database_path(&target)?,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
+    let empty_target: bool = database.query_row("SELECT NOT EXISTS(SELECT 1 FROM memories)
+        AND NOT EXISTS(SELECT 1 FROM sync_outbox) AND NOT EXISTS(SELECT 1 FROM sync_resolution_outbox)",
+        [], |row| row.get(0))?;
+    drop(database);
+    let control = ImportSyncControl::default();
+    let before = (|| -> Result<()> {
+        let remote = crate::sync::build_remote_from_env()?;
+        let stats = crate::sync::sync_controlled(&target_app.keys, &target_app.store, &remote, &control, None)?;
+        let blobs = target_app.store.all(true)?;
+        ensure!(blobs.len() == stats.remote_total
+            && blobs.iter().filter(|entry| !entry.deleted).count() == stats.remote_alive,
+            "target has not converged; import receipt retained");
+        Ok(())
+    })();
     drop(target_app);
+    if let Err(error) = before {
+        if first_sync && empty_target && !control.remote_effect_possible.get() {
+            progress(journal, index)?.sync = Some(json!({"status":"failed","reason":"target_sync_failed_before_copying"}));
+            rollback_import_before_copy(ownership, journal, index, _target_lock, original_material?.as_deref())
+                .context("target sync failed before copying; compensation unconfirmed; retain the original operation")?;
+            return Ok(());
+        }
+        return Err(error.context("target sync failed before copying; outcome unknown; retain the original operation"));
+    }
+    progress(journal, index)?.import_started = true;
+    save_journal(journal)?;
     // This existing importer commits once and deduplicates exact content on recovery.
     let report = crate::service::import_json_text(&serde_json::to_string(&entries)?)?;
     progress(journal, index)?.import = Some(json!({"report":report,"recovered":recovered}));

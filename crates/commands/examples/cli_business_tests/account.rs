@@ -285,11 +285,55 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         assert_eq!(rejected?["details"]["error_type"], "runtime");
         assert_eq!(std::fs::read(&config)?, before);
         assert!(!library.join("accounts/rejected-join").exists());
-        health(&library, "after-rejected-join")?;
+        let _before_create_pid = u32::try_from(health(&library, "after-rejected-join")?)?;
+        #[cfg(windows)]
+        let before_create_birth = respire_spawn::process_birth(_before_create_pid)?
+            .ok_or("space create owner birth missing")?;
+        let read_optional_session = |path: &std::path::Path| -> std::io::Result<Option<Vec<u8>>> {
+            match std::fs::read(path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        let original_session = read_optional_session(&library.join("session.json"))?;
+        let joined_writable = library.join("accounts/joined-writable");
+        let joined_session = std::fs::read(joined_writable.join("session.json"))?;
+        let mut original_config: Value = serde_json::from_slice(&std::fs::read(&config)?)?;
+        original_config.as_object_mut().ok_or("space config must be an object")?.remove("data_dir");
         invoke(&["space", "create", "probe"], 0)?;
         let probe = library.join("accounts/probe");
         assert!(probe.join("space_owner.json").is_file());
-        assert_ne!(health(&probe, "after-create")?, original_pid);
+        let assert_idle_probe = || -> Result<(), Box<dyn std::error::Error>> {
+            let mut selected: Value = serde_json::from_slice(&std::fs::read(&config)?)?;
+            let directory = selected["data_dir"].as_str().ok_or("space selected directory missing")?;
+            if std::path::Path::new(directory).canonicalize()? != probe.canonicalize()? {
+                return Err("empty space was not selected".into());
+            }
+            selected.as_object_mut().ok_or("space config must be an object")?.remove("data_dir");
+            if selected != original_config {
+                return Err("empty space changed unrelated configuration".into());
+            }
+            respire_app::login_transaction::verify_auth_identity(
+                &library, &probe, &respire_protocol::HostAuthIdentity::Absent,
+            )?;
+            #[cfg(windows)]
+            if respire_spawn::process_birth(_before_create_pid)? == Some(before_create_birth) {
+                return Err("empty space retained the previous Runtime owner".into());
+            }
+            if probe.join("session.json").try_exists()?
+                || read_optional_session(&library.join("session.json"))? != original_session
+                || std::fs::read(joined_writable.join("session.json"))? != joined_session
+                || std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(200),
+                ).is_ok()
+                || library.join("runtime/endpoint.json").try_exists()?
+            {
+                return Err("empty space did not preserve idle ownership and session boundaries".into());
+            }
+            Ok(())
+        };
+        assert_idle_probe()?;
         let before = std::fs::read(&config)?;
         let blocked = invoke(&["space", "remove", "probe"], 2)?;
         assert_eq!(blocked["summary"]["reason"], "invalid_input");
@@ -297,7 +341,26 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         let blocked = invoke(&["space", "remove", "probe", "--yes"], 2)?;
         assert_eq!(blocked["details"]["error_type"], "user");
         assert!(probe.is_dir());
-        health(&probe, "after-blocked-remove")?;
+        assert_idle_probe()?;
+        invoke(&["space", "use", "joined-writable"], 0)?;
+        invoke(&["runtime", "start"], 0)?;
+        let resumed_pid = health(&joined_writable, "after-idle-create-return-authenticated")?;
+        assert_ne!(resumed_pid, original_pid);
+        use sha2::{Digest, Sha256};
+        let joined: Value = serde_json::from_slice(&joined_session)?;
+        let joined_account = format!("{:x}", Sha256::digest(
+            joined["user"].as_str().ok_or("joined account missing")?.as_bytes(),
+        ));
+        respire_app::login_transaction::verify_auth_identity(&library, &joined_writable,
+            &respire_protocol::HostAuthIdentity::Bound {
+                account_id: joined_account.clone(),
+                session_sha256: format!("{:x}", Sha256::digest(&joined_session)),
+            })?;
+        let resumed: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
+            .timeout(Duration::from_secs(5)).call()?.into_json()?;
+        if resumed["pid"] != resumed_pid || resumed["account_id"] != joined_account {
+            return Err("resumed space health differs from its authenticated session".into());
+        }
         invoke(&["space", "use", "main"], 0)?;
         health(&library, "after-use-main")?;
         let before = std::fs::read(&config)?;
@@ -508,10 +571,13 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         }
         Ok(())
     });
+    let use_checkpointed_credentials = std::cell::Cell::new(false);
+    let source_alias = format!("login-{}", uuid::Uuid::new_v4().simple());
+    let mut source_backends = Vec::new();
     let execute = |args: &[&str]| -> std::io::Result<Output> {
         let mut command = isolated_command(Some(&models))?;
-        // Login factors come only from its arguments, never the harness unlock key.
-        if args.contains(&"login") {
+        // Login uses its arguments; checkpointed source/target sessions use their own credentials.
+        if args.contains(&"login") || use_checkpointed_credentials.get() {
             command.env_remove("RSRS_SUPER");
         } else {
             command.env("RSRS_SUPER", &super_password);
@@ -611,7 +677,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         assert_eq!(std::fs::read(original.join("session.json"))?, session_bytes);
         Ok(())
     };
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), Box<dyn std::error::Error>> {
         let stale_session = br#"{"user":"original","addr":"http://legacy.invalid"}"#;
         std::fs::write(original.join("session.json"), stale_session)?;
         for args in [
@@ -828,6 +894,14 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         }
         recover_account(&totp, Some("totp"))?;
         *mode.lock().map_err(|error| error.to_string())? = "authorized".to_owned();
+        let before_login: Value = serde_json::from_slice(
+            &std::fs::read(root.join(".login-recovery.json"))?,
+        )?;
+        let prior_operations: Vec<String> = before_login["operations"]
+            .as_array().ok_or("account receipt history missing before login")?
+            .iter().map(|record| record["operation_id"].as_str()
+                .map(str::to_owned).ok_or("prior account operation ID missing"))
+            .collect::<Result<_, _>>()?;
         let authorized = execute(&[
             "--json",
             "login",
@@ -864,12 +938,49 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         {
             return Err("login changed unrelated API preferences or escaped the fixture".into());
         }
-        let saved: Value = serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
+        let saved_bytes = std::fs::read(target.join("session.json"))?;
+        let saved: Value = serde_json::from_slice(&saved_bytes)?;
         if saved["user"] != "authorized"
             || saved.get("super").is_some()
-            || saved.get("keyring_account").is_some()
+            || saved.get("pass").is_some()
         {
             return Err("headless login persisted an unexpected credential".into());
+        }
+        // Private auth retains a credential reference bound to this new committed receipt.
+        // Compare private bytes in memory; failures must not print credential material.
+        use sha2::{Digest, Sha256};
+        let journal: Value = serde_json::from_slice(
+            &std::fs::read(root.join(".login-recovery.json"))?,
+        )?;
+        let new_operations: Vec<_> = journal["operations"].as_array()
+            .ok_or("account receipt history missing after login")?
+            .iter().filter(|record| record["operation_id"].as_str()
+                .is_some_and(|id| !prior_operations.iter().any(|prior| prior == id)))
+            .collect();
+        if journal["schema_version"] != 2 || !journal["active"].is_null()
+            || new_operations.len() != 1 {
+            return Err("login did not retain exactly one completed new operation".into());
+        }
+        let record = new_operations[0];
+        let operation_id = record["operation_id"].as_str().ok_or("login operation ID missing")?;
+        let parsed = uuid::Uuid::parse_str(operation_id)?;
+        let alias = record["alias"].as_str().filter(|value| !value.is_empty())
+            .ok_or("login credential reference missing")?;
+        let backend = record["backend"].as_str().ok_or("login credential backend missing")?;
+        let candidate: Vec<u8> = serde_json::from_value(record["candidate"].clone())?;
+        let session_sha256 = format!("{:x}", Sha256::digest(&saved_bytes));
+        if parsed.get_version_num() != 4 || parsed.to_string() != operation_id
+            || record["idempotency_key"] != operation_id || record["phase"] != "committed"
+            || record["account"]["register"] != false
+            || record["account"]["user"] != "authorized" || record["account"]["addr"] != addr
+            || std::path::Path::new(record["root"].as_str().ok_or("login receipt root missing")?).canonicalize()? != root.canonicalize()?
+            || std::path::Path::new(record["profile"].as_str().ok_or("login receipt source missing")?).canonicalize()? != original.canonicalize()?
+            || std::path::Path::new(record["account"]["target"].as_str().ok_or("login receipt target missing")?).canonicalize()? != target.canonicalize()?
+            || saved["keyring_account"] != alias || saved["keyring_backend"] != backend
+            || !matches!(backend, "native" | "secret_service")
+            || candidate != saved_bytes || record["candidate_sha256"] != session_sha256
+        {
+            return Err("login session does not match its committed credential receipt".into());
         }
         let stopped = execute(&["--runtime-internal", "--stop"])?;
         if !stopped.status.success() {
@@ -905,18 +1016,38 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             }
         }
 
-        // A different server's source uses another URK, even with the same recovery code.
+        // The source owns its recovery code; target --super is never a source factor.
         let source_urk = [43_u8; 32];
+        let source_secret = crypto::generate_secret_key();
+        if source_secret == super_password {
+            return Err("source and target fixture credentials must be distinct".into());
+        }
+        let source_backend = respire_app::keystore::import_credential_checkpoint(
+            &source_alias, "super", &source_secret, |backend| {
+                anyhow::ensure!(matches!(backend, "native" | "secret_service"),
+                    "source fixture requires persistent credentials");
+                source_backends.push(backend.to_owned());
+                Ok(())
+            },
+        )?;
+        let checkpoint = respire_app::keystore::read_imported(
+            &source_alias, "super", source_backend,
+        )?;
+        if checkpoint != source_secret {
+            return Err("source credential checkpoint readback mismatch".into());
+        }
         let source_salt = crypto::random_hex(16);
         let (source_nonce, source_wrap) = crypto::wrap_key(
             &source_urk,
-            &crypto::derive_kek_v4(&super_password, &source_salt)?,
+            &crypto::derive_kek_v4(&source_secret, &source_salt)?,
         )?;
         let source_session = serde_json::to_vec(
             &json!({"user":"original","addr":"https://previous.invalid",
+            "keyring_account":source_alias,"keyring_backend":source_backend,
             "vault_version":4,"kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}),
         )?;
         std::fs::write(original.join("session.json"), &source_session)?;
+        use_checkpointed_credentials.set(true);
         let selected = execute(&["--json", "account", "use", "original"])?;
         assert!(
             selected.status.success(),
@@ -964,10 +1095,74 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             "--migrate-local",
         ];
         let source_config = std::fs::read(root.join("client.json"))?;
+        let target_session = std::fs::read(target.join("session.json"))?;
+        let before_import: Value = serde_json::from_slice(
+            &std::fs::read(root.join(".login-recovery.json"))?,
+        )?;
+        let prior_imports = before_import["operations"].as_array()
+            .ok_or("account history missing before import")?;
+        let target_empty = || -> Result<bool, Box<dyn std::error::Error>> {
+            let path = target.join("rsrs.db");
+            if !path.try_exists()? { return Ok(true); }
+            let database = rusqlite::Connection::open_with_flags(path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
+            Ok(database.query_row("SELECT NOT EXISTS(SELECT 1 FROM memories)
+                AND NOT EXISTS(SELECT 1 FROM sync_outbox)
+                AND NOT EXISTS(SELECT 1 FROM sync_resolution_outbox)", [], |row| row.get(0))?)
+        };
+        if before_import["schema_version"] != 2 || !before_import["active"].is_null()
+            || !target_empty()? {
+            return Err("import rejection fixture requires its original empty target/outbox".into());
+        }
         *mode.lock().map_err(|error| error.to_string())? = "sync_unavailable".to_owned();
         let rejected = execute(&transfer)?;
         assert_eq!(rejected.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&rejected.stdout).contains("before copying"));
+        let after_import: Value = serde_json::from_slice(
+            &std::fs::read(root.join(".login-recovery.json"))?,
+        )?;
+        let operations = after_import["operations"].as_array()
+            .ok_or("account history missing after rejected import")?;
+        if after_import["schema_version"] != 2 || !after_import["active"].is_null()
+            || operations.len() != prior_imports.len() + 1
+            || operations.get(..prior_imports.len()) != Some(prior_imports.as_slice()) {
+            return Err("rejected import did not retain one new terminal operation and its history".into());
+        }
+        let record = &operations[prior_imports.len()];
+        let operation_id = record["operation_id"].as_str().ok_or("import operation ID missing")?;
+        let parsed = uuid::Uuid::parse_str(operation_id)?;
+        let bound_root: std::path::PathBuf = serde_json::from_value(record["root"].clone())?;
+        let bound_source: std::path::PathBuf = serde_json::from_value(record["profile"].clone())?;
+        let identity = respire_protocol::HostAuthIdentity::Bound {
+            account_id: format!("{:x}", Sha256::digest(b"original")),
+            session_sha256: format!("{:x}", Sha256::digest(&source_session)),
+        };
+        let base = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!({
+            "schema_version":1,"register":false,"root":bound_root,"source":bound_source,
+            "identity":identity,"addr":addr,"user":"authorized",
+        }))?));
+        let fingerprint = format!("{:x}", Sha256::digest(
+            serde_json::to_vec(&(&base, (true, false, false)))?,
+        ));
+        let login = &record["account"]["login"];
+        if parsed.get_version_num() != 4 || parsed.to_string() != operation_id
+            || prior_imports.iter().any(|prior| prior["operation_id"] == operation_id)
+            || record["idempotency_key"] != operation_id || record["fingerprint"] != fingerprint
+            || record["phase"] != "rolled_back" || bound_root != root.canonicalize()?
+            || bound_source != original.canonicalize()?
+            || record["original_sha256"] != format!("{:x}", Sha256::digest(&source_session))
+            || record["account"]["register"] != false || record["account"]["user"] != "authorized"
+            || record["account"]["addr"] != addr
+            || record["account"]["source_identity"] != serde_json::to_value(&identity)?
+            || std::path::Path::new(record["account"]["target"].as_str()
+                .ok_or("import receipt target missing")?).canonicalize()? != target.canonicalize()?
+            || login["migrate_local"] != true || login["migrate_vault"] != false
+            || login["offer_local_merge"] != false || login["import_started"] != false
+            || login.get("import") != Some(&Value::Null)
+            || login["sync_started"] != true
+            || login["sync"] != json!({"status":"failed","reason":"target_sync_failed_before_copying"})
+            || !target_empty()? || std::fs::read(target.join("session.json"))? != target_session {
+            return Err("rejected import did not prove bound rollback before copying source data".into());
+        }
         assert_eq!(std::fs::read(root.join("client.json"))?, source_config);
         assert_eq!(
             std::fs::read(original.join("session.json"))?,
@@ -1114,6 +1309,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .clear();
         assert!(execute(&["--runtime-internal", "--stop"])?.status.success());
         std::fs::write(original.join("session.json"), session_bytes)?;
+        use_checkpointed_credentials.set(false);
 
         let legacy_super = "synthetic-legacy-passphrase";
         let salt = crypto::random_hex(16);
@@ -1228,13 +1424,29 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             return Err("authorization did not exercise polling and vault verification".into());
         }
         Ok(())
-    })();
+    }));
     let stopped = execute(&["--runtime-internal", "--stop"]);
     running.store(false, Ordering::SeqCst);
     let served = worker
         .join()
-        .map_err(|_| "authorization fixture thread panicked")?;
+        .map_err(|_| "authorization fixture thread panicked");
+    let mut source_cleanup_failed = false;
+    for backend in &source_backends {
+        if respire_app::keystore::remove_imported(&source_alias, "super", backend).is_err() {
+            source_cleanup_failed = true;
+        }
+    }
+    if source_cleanup_failed {
+        eprintln!("source fixture credential cleanup failed; original fixture result retained");
+    }
+    let result = match result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     result?;
+    if source_cleanup_failed {
+        return Err("source fixture credential cleanup failed".into());
+    }
     stopped?;
-    served.map_err(Into::into)
+    served?.map_err(Into::into)
 }

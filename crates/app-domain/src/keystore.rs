@@ -13,33 +13,33 @@ const VAULT_SERVICE: &str = "rsrs";
 
 #[derive(Clone, Copy)]
 enum Backend {
-    #[cfg(any(not(target_os = "linux"), test))]
+    #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
     Native,
-    #[cfg(all(target_os = "linux", not(test)))]
+    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
     SecretService,
-    #[cfg(all(target_os = "linux", not(test)))]
+    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
     Kernel,
 }
 
 impl Backend {
     fn name(self) -> &'static str {
         match self {
-            #[cfg(any(not(target_os = "linux"), test))]
+            #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
             Self::Native => "native",
-            #[cfg(all(target_os = "linux", not(test)))]
+            #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
             Self::SecretService => "secret_service",
-            #[cfg(all(target_os = "linux", not(test)))]
+            #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
             Self::Kernel => "kernel",
         }
     }
 }
 
 fn backends() -> &'static [Backend] {
-    #[cfg(all(target_os = "linux", not(test)))]
+    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
     {
         &[Backend::SecretService, Backend::Kernel]
     }
-    #[cfg(any(not(target_os = "linux"), test))]
+    #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
     {
         &[Backend::Native]
     }
@@ -47,15 +47,15 @@ fn backends() -> &'static [Backend] {
 
 fn credential_entry(service: &str, label: &str, backend: Backend) -> Result<keyring::Entry> {
     match backend {
-        #[cfg(any(not(target_os = "linux"), test))]
+        #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
         Backend::Native => keyring::Entry::new(service, label)
             .map_err(|_| anyhow!("keyring initialization failed")),
-        #[cfg(all(target_os = "linux", not(test)))]
+        #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
         Backend::SecretService => keyring::secret_service::default_credential_builder()
             .build(None, service, label)
             .map(keyring::Entry::new_with_credential)
             .map_err(|_| anyhow!("Secret Service initialization failed")),
-        #[cfg(all(target_os = "linux", not(test)))]
+        #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
         Backend::Kernel => keyring::keyutils::default_credential_builder()
             .build(None, service, label)
             .map(keyring::Entry::new_with_credential)

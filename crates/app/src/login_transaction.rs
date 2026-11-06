@@ -505,6 +505,112 @@ mod tests {
         assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
         assert_eq!(control_account_rollback(ownership, &source_identity, &import_id, &import_id)?.outcome,
             HostAuthAccountOutcome::RolledBack);
+
+        use crate::sync::SyncControl as _;
+        let sync_control = login::ImportSyncControl::default();
+        sync_control.progress("pull");
+        assert!(sync_control.remote::<()>(|| Err(anyhow!("synthetic read failure"))).is_err());
+        assert!(!sync_control.remote_effect_possible.get());
+        sync_control.progress("push");
+        assert!(sync_control.remote::<()>(|| Err(anyhow!("synthetic lost write response"))).is_err());
+        sync_control.progress("pull");
+        sync_control.remote(|| Ok(()))?;
+        assert!(sync_control.remote_effect_possible.get(), "a later read erased a possible write");
+        let unclassified = login::ImportSyncControl::default();
+        unclassified.remote(|| Ok(()))?;
+        assert!(unclassified.remote_effect_possible.get());
+
+        // Exercise the production compensation against a real candidate and mock keyring.
+        let keyring = crate::migration::memory_keyring_for_test();
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        let rollback_id = uuid::Uuid::new_v4().to_string();
+        let config_before = std::fs::read(crate::service::client_config_path())?;
+        let (mut pending, index, _) = admit_account_with_intent(&ownership, &source_identity,
+            &rollback_id, &rollback_id, false, "https://never-contact.invalid", "import-target", Some((true, false, false)))?;
+        pending.operations[index].phase = AuthPhase::Authorized;
+        save_journal(&pending)?;
+        let (code, _, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
+        let mut prepared = PreparedLogin::prepare_with_vault("https://never-contact.invalid",
+            &json!({"user":"import-target","token":"synthetic-compensation-token"}), code.clone(),
+            json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}), None)?;
+        let old_alias = format!("login-{}", uuid::Uuid::new_v4().simple());
+        let old_backend = crate::keystore::import_credential_checkpoint(&old_alias, "super", &code,
+            require_persistent_auth_backend)?;
+        assert_eq!(old_backend, "native", "app and domain must share the test keyring backend");
+        let mut old_session = prepared.session.clone();
+        old_session["keyring_account"] = json!(old_alias);
+        old_session["keyring_backend"] = json!(old_backend);
+        let old_bytes = serde_json::to_vec(&old_session)?;
+        std::fs::create_dir_all(&prepared.directory)?;
+        private_write(&prepared.directory.join("session.json"), &old_bytes)?;
+        prepared.original = Some(old_bytes.clone());
+        let database = crate::service::database_path(&prepared.directory)?;
+        let store = crate::transport::local::LocalStore::open(&database)?;
+        store.meta_set("compensation_test", "retain-existing-database")?;
+        drop(store);
+        let database_before = std::fs::read(&database)?;
+        commit_account(&ownership, &mut pending, index, &mut prepared)?;
+        assert_ne!(std::fs::read(crate::service::client_config_path())?, config_before);
+        let target = prepared.directory.clone();
+        let original_material = original_import_material(&pending.operations[index],
+            pending.active.as_ref().context("compensation recovery missing")?)?;
+        let mut changed = serde_json::to_value(&pending.operations[index])?;
+        changed["account"]["login"]["import_started"] = json!(true);
+        let original_record = std::mem::replace(&mut pending.operations[index], serde_json::from_value(changed)?);
+        let lock = crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?;
+        let checkpoint = std::fs::read(recovery_path())?;
+        assert!(rollback_import_before_copy(&ownership, &mut pending, index, Some(lock), original_material.as_deref()).is_err());
+        assert_eq!(std::fs::read(recovery_path())?, checkpoint);
+        pending.operations[index] = original_record;
+        let (other_code, _, other_salt, other_wrap, other_nonce) = crate::auth::new_vault_v4()?;
+        let other_alias = format!("login-{}", uuid::Uuid::new_v4().simple());
+        let other_backend = crate::keystore::import_credential_checkpoint(&other_alias, "super", &other_code,
+            require_persistent_auth_backend)?;
+        let mut other_session = old_session.clone();
+        other_session["keyring_account"] = json!(other_alias);
+        other_session["keyring_backend"] = json!(other_backend);
+        other_session["kdf_salt"] = json!(other_salt);
+        other_session["wrapped_urk"] = json!(other_wrap);
+        other_session["urk_nonce"] = json!(other_nonce);
+        pending.active.as_mut().context("compensation recovery missing")?.original = Some(serde_json::to_vec(&other_session)?);
+        let other_material = original_import_material(&pending.operations[index],
+            pending.active.as_ref().context("compensation recovery missing")?)?;
+        assert_ne!(other_material, original_material);
+        let candidate_config = std::fs::read(crate::service::client_config_path())?;
+        let candidate_session = std::fs::read(target.join("session.json"))?;
+        let lock = crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?;
+        let rejected = rollback_import_before_copy(&ownership, &mut pending, index, Some(lock), other_material.as_deref());
+        assert!(rejected.err().is_some_and(|error| error.to_string().contains("target keys differ")));
+        assert_eq!(std::fs::read(recovery_path())?, checkpoint);
+        assert_eq!(std::fs::read(crate::service::client_config_path())?, candidate_config);
+        assert_eq!(std::fs::read(target.join("session.json"))?, candidate_session);
+        pending.active.as_mut().context("compensation recovery missing")?.original = Some(old_bytes.clone());
+        std::fs::write(crate::service::client_config_path(), b"{\"changed\":true}")?;
+        let lock = crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?;
+        assert!(rollback_import_before_copy(&ownership, &mut pending, index, Some(lock), original_material.as_deref()).is_err());
+        assert_eq!(std::fs::read(recovery_path())?, checkpoint);
+        // Restore the exact candidate config, not an unrelated external edit.
+        let active = pending.active.as_ref().context("compensation recovery missing")?;
+        let mut candidate_config: Value = serde_json::from_slice(active.config.as_deref().context("source config missing")?)?;
+        candidate_config["data_dir"] = json!(target.to_string_lossy());
+        std::fs::write(crate::service::client_config_path(), serde_json::to_vec(&candidate_config)?)?;
+        let lock = crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?;
+        rollback_import_before_copy(&ownership, &mut pending, index, Some(lock), original_material.as_deref())?;
+        assert!(target.is_dir(), "compensation quarantined an existing target");
+        assert_eq!(std::fs::read(target.join("session.json"))?, old_bytes);
+        assert_eq!(std::fs::read(database)?, database_before);
+        assert_eq!(crate::keystore::read_imported(&old_alias, "super", &old_backend)?, code);
+        assert_eq!(std::fs::read(crate::service::client_config_path())?, config_before);
+        assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
+        assert!(load_journal()?.active.is_none());
+        let terminal = std::fs::read(recovery_path())?;
+        assert_eq!(control_account_result(&ownership, &source_identity, &rollback_id, &rollback_id)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+        assert_eq!(control_login(&ownership, &rollback_id, &rollback_id, &import_params)?.outcome,
+            HostAuthAccountOutcome::RolledBack);
+        assert_eq!(std::fs::read(recovery_path())?, terminal, "terminal query resumed import or authentication");
+        drop(ownership);
+        drop(keyring);
         identity::assert_existing_recovery(&root)?;
         keys::assert_existing_recovery(&root)?;
         space::assert_existing_recovery(&root)?;
@@ -1305,10 +1411,14 @@ fn account_material_keys(record: &AuthRecord, require_published: bool) -> Result
         && session["addr"].as_str() == Some(account.addr.as_str())
         && session["keyring_account"].as_str() == Some(record.alias.as_str()), "account candidate identity mismatch");
     let backend = record.backend.as_deref().context("account credential checkpoint is missing")?;
+    session_material_keys(&session, &record.alias, backend)
+}
+
+fn session_material_keys(session: &Value, alias: &str, backend: &str) -> Result<crate::memory::SessionKeys> {
     require_persistent_auth_backend(backend)?;
     let secret = if session["vault_version"] == 1 {
-        crate::keystore::read_imported_v1_password(&record.alias, backend)?
-    } else { crate::keystore::read_imported(&record.alias, "super", backend)? };
+        crate::keystore::read_imported_v1_password(alias, backend)?
+    } else { crate::keystore::read_imported(alias, "super", backend)? };
     let salt = session["kdf_salt"].as_str().context("account salt is missing")?;
     let wrapped = session["wrapped_urk"].as_str().context("account wrap is missing")?;
     let nonce = session["urk_nonce"].as_str().context("account nonce is missing")?;
@@ -1404,6 +1514,23 @@ pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAut
     let index = owned_account_index(&journal, &ownership.root, &ownership.profile, operation_id, key)?;
     let record = &journal.operations[index];
     if record.phase == AuthPhase::RolledBack { return account_result(record); }
+    let active = journal.active.as_ref().context("account recovery is missing")?;
+    let target = if active.directory.exists() { Some(active.directory.canonicalize()?) } else { None };
+    let target_lock = if target.as_ref().is_none_or(|target| *target == ownership.root || *target == ownership.profile) { None }
+        else { Some(crate::lock::LibraryLock::acquire(&active.directory, std::time::Duration::from_secs(1))?) };
+    rollback_account_material(&mut journal, index)?;
+    // Windows cannot quarantine a directory while SQLite still owns its lock file.
+    // The root/source guards and the durable RollingBack record remain held.
+    drop(target_lock);
+    if journal.active.as_ref().is_some_and(|active| !active.directory_existed && target.as_deref() == Some(ownership.profile.as_path())) {
+        drop(ownership._profile_lock.take());
+    }
+    finish_account_rollback(&mut journal, index)?;
+    account_result(&journal.operations[index])
+}
+
+fn rollback_account_material(journal: &mut Journal, index: usize) -> Result<()> {
+    let record = &journal.operations[index];
     ensure!(record.phase != AuthPhase::Committed && record.phase != AuthPhase::RemotePending
         && record.phase != AuthPhase::RemoteUnknown, "remote outcome must be resolved before compensation");
     let account = record.account.as_ref().context("account receipt is missing")?;
@@ -1411,28 +1538,74 @@ pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAut
         "legacy publication is pending or complete; retain the original account receipt");
     ensure!(!account.vault_pending && !account.published_vault, "published or unknown remote vault cannot be compensated by deleting local keys");
     let active = journal.active.as_ref().context("account recovery is missing")?;
-    ensure!(active.operation_id.as_deref() == Some(operation_id), "rollback does not own recovery");
-    let target = if active.directory.exists() { Some(active.directory.canonicalize()?) } else { None };
-    let target_lock = if target.as_ref().is_none_or(|target| *target == ownership.root || *target == ownership.profile) { None }
-        else { Some(crate::lock::LibraryLock::acquire(&active.directory, std::time::Duration::from_secs(1))?) };
+    ensure!(active.operation_id.as_deref() == Some(record.operation_id.as_str()), "rollback does not own recovery");
     let current = read_original(&active.directory)?;
     ensure!(current == active.original || current == record.candidate, "target session changed outside the transaction");
     if active.owns_config {
         verify_account_config(active)?;
     }
     journal.operations[index].phase = AuthPhase::RollingBack;
-    save_journal(&journal)?;
+    save_journal(journal)?;
     rollback_record_inner(journal.active.as_ref().context("account recovery is missing")?, false)?;
-    // Windows cannot quarantine a directory while SQLite still owns its lock file.
-    // The root/source guards and the durable RollingBack record remain held.
-    drop(target_lock);
-    if journal.active.as_ref().is_some_and(|active| !active.directory_existed && target.as_deref() == Some(ownership.profile.as_path())) {
-        drop(ownership._profile_lock.take());
-    }
+    Ok(())
+}
+
+fn finish_account_rollback(journal: &mut Journal, index: usize) -> Result<()> {
     quarantine_new_profile(journal.active.as_ref().context("account recovery is missing")?)?;
     journal.operations[index].phase = AuthPhase::RolledBack;
-    retire_active(&mut journal)?;
-    account_result(&journal.operations[index])
+    retire_active(journal)
+}
+
+fn rollback_import_before_copy(ownership: &AuthOwnership, journal: &mut Journal, index: usize,
+    target_lock: Option<crate::lock::LibraryLock>, original_material: Option<&str>) -> Result<()> {
+    let record = &journal.operations[index];
+    let account = record.account.as_ref().context("import account missing")?;
+    let login = account.login.as_ref().context("import progress missing")?;
+    let active = journal.active.as_ref().context("import recovery missing")?;
+    ensure!(record.phase == AuthPhase::AwaitingVerification && !account.register
+        && login.can_compensate_import()
+        && record.root == ownership.root && record.profile == ownership.profile
+        && active.owns_config
+        && (!active.directory_existed || original_material.is_some())
+        && active.alias == record.alias
+        && account.target.as_ref() == Some(&active.directory)
+        && active.directory != ownership.root && active.directory != ownership.profile,
+        "import cannot prove an unpublished owned target; retain the original operation");
+    ensure!(crate::service::main_data_dir().canonicalize()? == ownership.root
+        && crate::service::data_dir().canonicalize()? == active.directory.canonicalize()?
+        && read_original(&ownership.profile)?.as_deref().map(digest) == record.original_sha256,
+        "import source or selection changed before compensation");
+    verify_auth_identity(&ownership.root, &ownership.profile, &account.source_identity)?;
+    ensure!(target_lock.as_ref().context("import target ownership missing")?.protects(&active.directory)?,
+        "import target ownership changed before compensation");
+    ensure!(original_import_material(record, active)?.as_deref() == original_material,
+        "original target credentials changed before compensation");
+    let candidate_keys = account_material_keys(record, true)?;
+    ensure!(original_material.is_none_or(|original| original == digest(&candidate_keys.urk)),
+        "original and candidate target keys differ; retain the candidate and original operation");
+    rollback_account_material(journal, index)?;
+    let record = &journal.operations[index];
+    let active = journal.active.as_ref().context("import recovery missing")?;
+    ensure!(read_original(&active.directory)? == active.original
+        && original_import_material(record, active)?.as_deref() == original_material
+        && crate::service::data_dir().canonicalize()? == ownership.profile,
+        "import compensation could not verify restored target or source selection");
+    verify_auth_identity(&ownership.root, &ownership.profile,
+        &record.account.as_ref().context("import account missing")?.source_identity)?;
+    drop(target_lock);
+    finish_account_rollback(journal, index)
+}
+
+fn original_import_material(record: &AuthRecord, active: &Recovery) -> Result<Option<String>> {
+    let Some(bytes) = active.original.as_deref() else { return Ok(None); };
+    let session: Value = serde_json::from_slice(bytes)?;
+    let account = record.account.as_ref().context("import account missing")?;
+    let alias = session["keyring_account"].as_str().context("original target credential alias missing")?;
+    let backend = session["keyring_backend"].as_str().context("original target credential backend missing")?;
+    ensure!(alias != record.alias && session["user"].as_str() == Some(account.user.as_str())
+        && session["addr"].as_str() == Some(account.addr.as_str()), "original target credential identity mismatch");
+    let keys = session_material_keys(&session, alias, backend)?;
+    Ok(Some(digest(&keys.urk)))
 }
 
 impl PreparedLogin {
