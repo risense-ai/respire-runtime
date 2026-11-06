@@ -165,8 +165,8 @@ jobs:
           process.stdout.write(out); process.stderr.write(err);
           process.exit(result.status ?? 1);
           NODE
-          # Type-check migrated business tests here; execute them only with the source-bound CLI fixture.
-          cargo test --locked -p respire_commands --example cli_business_tests --no-run
+      - name: Compile cross-repository CLI integration fixtures (not execution)
+        run: cargo test --locked -p respire_commands --example cli_business_tests --no-run
       - name: Preserve workspace source test output
         if: ${{ always() && !cancelled() && (steps.source-tests.outcome == 'success' || steps.source-tests.outcome == 'failure') }}
         uses: actions/upload-artifact@v4
