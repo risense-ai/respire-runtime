@@ -321,6 +321,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
 /// failures before commit and the host/runtime account verification after commit.
 #[test]
 fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::error::Error>> {
+    const AUTHORIZATION_TOKEN: &str = "synthetic-grant-token";
     use respire_app::memory::{crypto, SessionKeys};
     use respire_app::transport::{local::LocalStore, MemoryTransport};
     use serde_json::{json, Value};
@@ -408,7 +409,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                 "/api/self/password" => {
                     if !request.headers().iter().any(|header| {
                         header.field.equiv("Authorization")
-                            && header.value.as_str() == "Bearer synthetic-grant-token"
+                            && header.value.as_str() == format!("Bearer {AUTHORIZATION_TOKEN}")
                     }) {
                         return Err("password namespace update missing authorization".to_owned());
                     }
@@ -434,18 +435,18 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                     json!({"error":mode})
                 }
                 "/oauth/token" => {
-                    json!({"access_token":"synthetic-grant-token","token_type":"Bearer","user":"authorized","session_id":"fixture"})
+                    json!({"access_token":AUTHORIZATION_TOKEN,"token_type":"Bearer","user":"authorized","session_id":"fixture"})
                 }
                 "/login" if mode == "totp" => {
                     json!({"totp_required":true,"ticket":"synthetic-ticket"})
                 }
                 "/login" => {
-                    json!({"token":"synthetic-grant-token","user":"authorized","session_id":"fixture"})
+                    json!({"token":AUTHORIZATION_TOKEN,"user":"authorized","session_id":"fixture"})
                 }
                 "/api/self/vault" => {
                     if !request.headers().iter().any(|header| {
                         header.field.equiv("Authorization")
-                            && header.value.as_str() == "Bearer synthetic-grant-token"
+                            && header.value.as_str() == format!("Bearer {AUTHORIZATION_TOKEN}")
                     }) {
                         return Err("vault request missing authorization".to_owned());
                     }
