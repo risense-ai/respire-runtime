@@ -403,6 +403,8 @@ pub struct RestoreReceipt {
     account_fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<SnapshotOperation>,
+    #[serde(default, skip_serializing)]
+    legacy_journal_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,6 +454,8 @@ struct TerminalReceipt {
     sync_quarantined: bool,
     account_fingerprint: String,
     operation: SnapshotOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_journal_sha256: Option<String>,
 }
 
 // Never evict: one current operation plus its retained terminal predecessors.
@@ -469,11 +473,12 @@ fn next_history(previous: RecoveryJournal) -> Result<Vec<TerminalReceipt>> {
             sync_quarantined: true,
             account_fingerprint: previous.receipt.account_fingerprint,
             operation,
+            legacy_journal_sha256: previous.receipt.legacy_journal_sha256,
         });
     }
     Ok(history)
 }
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 struct RecoveryReceipt {
     restored: String,
     before_restore: String,
@@ -482,6 +487,8 @@ struct RecoveryReceipt {
     account_fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     operation: Option<SnapshotOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_journal_sha256: Option<String>,
 }
 impl From<&RestoreReceipt> for RecoveryReceipt {
     fn from(value: &RestoreReceipt) -> Self {
@@ -492,6 +499,7 @@ impl From<&RestoreReceipt> for RecoveryReceipt {
             rollback_sha256: value.rollback_sha256.clone(),
             account_fingerprint: value.account_fingerprint.clone(),
             operation: value.operation.clone(),
+            legacy_journal_sha256: value.legacy_journal_sha256.clone(),
         }
     }
 }
@@ -505,6 +513,7 @@ impl From<RecoveryReceipt> for RestoreReceipt {
             rollback_sha256: value.rollback_sha256,
             account_fingerprint: value.account_fingerprint,
             operation: value.operation,
+            legacy_journal_sha256: value.legacy_journal_sha256,
         }
     }
 }
@@ -549,8 +558,15 @@ fn write_record(root: &Path, receipt: &RestoreReceipt, phase: &str, name: &str) 
     Ok(())
 }
 fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
-    let recovery = read_record(root, RECOVERY_FILE)?;
-    let maintenance = read_record(root, MAINTENANCE_FILE)?;
+    let recovery = read_record(root, RECOVERY_FILE)?.map(|(journal, _)| journal);
+    let maintenance = read_record(root, MAINTENANCE_FILE)?.map(|(journal, _)| journal);
+    resolve_journal(recovery, maintenance)
+}
+
+fn resolve_journal(
+    recovery: Option<RecoveryJournal>,
+    maintenance: Option<RecoveryJournal>,
+) -> Result<Option<RecoveryJournal>> {
     match (recovery, maintenance) {
         (Some(recovery), Some(mut maintenance)) => {
             if recovery.receipt.rollback_file != maintenance.receipt.rollback_file {
@@ -563,9 +579,24 @@ fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
                 maintenance.history = next_history(recovery)?;
                 return Ok(Some(maintenance));
             }
+            // Binding legacy recovery publishes only RECOVERY_FILE. Its original
+            // prepared gate remains unbound until terminal cleanup removes it.
+            let legacy_binding = recovery.receipt.legacy_journal_sha256.is_some()
+                && recovery.receipt.operation.is_some()
+                && maintenance.phase == "prepared"
+                && maintenance.receipt.operation.is_none()
+                && maintenance.receipt.legacy_journal_sha256.is_none()
+                && recovery.history.is_empty() && maintenance.history.is_empty();
+            if legacy_binding {
+                maintenance.receipt.operation = recovery.receipt.operation.clone();
+                maintenance.receipt.legacy_journal_sha256 = recovery.receipt.legacy_journal_sha256.clone();
+                anyhow::ensure!(recovery.receipt == maintenance.receipt,
+                    "legacy recovery binding changed its original receipt");
+            }
             anyhow::ensure!(
                 recovery.receipt.rollback_sha256 == maintenance.receipt.rollback_sha256
-                    && recovery.receipt.operation == maintenance.receipt.operation,
+                    && recovery.receipt.operation == maintenance.receipt.operation
+                    && recovery.receipt.legacy_journal_sha256 == maintenance.receipt.legacy_journal_sha256,
                 "snapshot recovery and maintenance journals disagree"
             );
             Ok(Some(recovery))
@@ -575,7 +606,7 @@ fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
     }
 }
 
-fn read_record(root: &Path, name: &str) -> Result<Option<RecoveryJournal>> {
+fn read_record(root: &Path, name: &str) -> Result<Option<(RecoveryJournal, Vec<u8>)>> {
     let path = root.join(name);
     let meta = match fs::symlink_metadata(&path) {
         Ok(meta) => meta,
@@ -586,7 +617,9 @@ fn read_record(root: &Path, name: &str) -> Result<Option<RecoveryJournal>> {
         meta.is_file() && !meta.file_type().is_symlink() && meta.len() < 65536,
         "invalid snapshot recovery journal file"
     );
-    let journal: RecoveryJournal = serde_json::from_slice(&fs::read(path)?)?;
+    let bytes = fs::read(path)?;
+    anyhow::ensure!(bytes.len() < 65536, "snapshot recovery journal exceeds size limit");
+    let journal: RecoveryJournal = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(
         journal.schema_version == 1
             && matches!(
@@ -601,12 +634,18 @@ fn read_record(root: &Path, name: &str) -> Result<Option<RecoveryJournal>> {
         .and_then(|name| name.strip_suffix(".db"))
         .context("invalid snapshot rollback filename")?;
     anyhow::ensure!(valid_id(id), "invalid snapshot rollback identity");
+    if let Some(digest) = journal.receipt.legacy_journal_sha256.as_deref() {
+        anyhow::ensure!(journal.receipt.operation.is_some() && valid_digest(digest),
+            "invalid legacy snapshot recovery binding");
+    }
     anyhow::ensure!(
         !terminal_phase(&journal.phase) || journal.receipt.operation.is_some() || !journal.history.is_empty(),
         "terminal snapshot journal is missing its operation identity"
     );
     anyhow::ensure!(journal.history.len() < MAX_RECORDED_OPERATIONS, "snapshot operation history capacity exceeded");
     for (index, entry) in journal.history.iter().enumerate() {
+        anyhow::ensure!(entry.legacy_journal_sha256.as_deref().is_none_or(valid_digest),
+            "invalid historical legacy snapshot recovery binding");
         anyhow::ensure!(
             terminal_phase(&entry.phase)
                 && valid_id(&entry.restored)
@@ -616,7 +655,127 @@ fn read_record(root: &Path, name: &str) -> Result<Option<RecoveryJournal>> {
             "invalid snapshot operation history"
         );
     }
-    Ok(Some(journal))
+    Ok(Some((journal, bytes)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyRecoveryDescription {
+    pub journal_sha256: String,
+    pub phase: String,
+    pub account_fingerprint: String,
+}
+
+/// Describe existing legacy bytes only; this does not authorize recovery or open the database.
+pub fn describe_legacy_recovery(root: &Path, account: &str) -> Result<LegacyRecoveryDescription> {
+    let recovery = read_record(root, RECOVERY_FILE)?;
+    let maintenance = read_record(root, MAINTENANCE_FILE)?;
+    let account_fingerprint = format!("{:x}", Sha256::digest(account.as_bytes()));
+    for (journal, _) in recovery.iter().chain(maintenance.iter()) {
+        anyhow::ensure!(
+            journal.receipt.operation.is_none() && journal.history.is_empty(),
+            "snapshot has an operation identity; legacy recovery is forbidden"
+        );
+        anyhow::ensure!(
+            journal.receipt.account_fingerprint == account_fingerprint,
+            "snapshot recovery belongs to another account"
+        );
+    }
+    if let (Some((recovery, _)), Some((maintenance, _))) = (&recovery, &maintenance) {
+        anyhow::ensure!(
+            maintenance.phase == "prepared" && recovery.receipt == maintenance.receipt,
+            "legacy snapshot recovery and maintenance journals disagree"
+        );
+    }
+    let (selected, bytes) = recovery
+        .as_ref()
+        .or(maintenance.as_ref())
+        .context("no interrupted legacy snapshot operation exists")?;
+    let description = LegacyRecoveryDescription {
+        journal_sha256: format!("{:x}", Sha256::digest(bytes)),
+        phase: selected.phase.clone(),
+        account_fingerprint,
+    };
+    resolve_journal(
+        recovery.map(|(journal, _)| journal),
+        maintenance.map(|(journal, _)| journal),
+    )?
+    .context("legacy snapshot journal disappeared")?;
+    Ok(description)
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyRecoveryStatus {
+    pub phase: String,
+    pub cleanup_pending: bool,
+    pub cleanup_warning: Option<String>,
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Query only the existing journal/history; absence is never evidence of recovery.
+pub fn legacy_recovery_status(
+    root: &Path,
+    account: &str,
+    operation: &SnapshotOperation,
+    journal_sha256: &str,
+) -> Result<Option<LegacyRecoveryStatus>> {
+    let Some(journal) = read_journal(root)? else { return Ok(None); };
+    let digest = if let Some(entry) = journal.history.iter()
+        .find(|entry| entry.operation.operation_id == operation.operation_id) {
+        entry.legacy_journal_sha256.as_deref()
+    } else if journal.receipt.operation.as_ref()
+        .is_some_and(|recorded| recorded.operation_id == operation.operation_id) {
+        journal.receipt.legacy_journal_sha256.as_deref()
+    } else { return Ok(None); };
+    anyhow::ensure!(valid_digest(journal_sha256) && digest == Some(journal_sha256), OperationConflict);
+    let status = operation_status(root, account, operation)?
+        .context("legacy recovery journal changed during query")?;
+    let cleanup_warning = (terminal_phase(&status.phase) && status.cleanup_pending)
+        .then(|| "legacy snapshot recovery completed; local cleanup is pending".to_owned());
+    Ok(Some(LegacyRecoveryStatus {
+        phase: status.phase,
+        cleanup_pending: status.cleanup_pending,
+        cleanup_warning,
+    }))
+}
+
+/// Persist the recovery identity before one recovery attempt; retries only query it.
+pub fn recover_legacy_locked(
+    root: &Path,
+    account: &str,
+    expected: &LegacyRecoveryDescription,
+    operation: &SnapshotOperation,
+    ownership: &crate::lock::LibraryLock,
+) -> Result<LegacyRecoveryStatus> {
+    anyhow::ensure!(ownership.protects(root)?, "legacy recovery requires this library's ownership lock");
+    if let Some(status) = legacy_recovery_status(root, account, operation, &expected.journal_sha256)? {
+        return Ok(status);
+    }
+    anyhow::ensure!(uuid::Uuid::parse_str(&operation.operation_id).is_ok_and(|id|
+        id.get_version_num() == 4 && id.to_string() == operation.operation_id)
+        && valid_digest(&operation.request_fingerprint), "invalid legacy recovery operation identity");
+    anyhow::ensure!(
+        describe_legacy_recovery(root, account)? == *expected,
+        "legacy snapshot description changed before recovery"
+    );
+    let journal = read_journal(root)?.context("legacy snapshot journal disappeared before binding")?;
+    let phase = journal.phase;
+    let mut receipt: RestoreReceipt = journal.receipt.into();
+    receipt.operation = Some(operation.clone());
+    receipt.legacy_journal_sha256 = Some(expected.journal_sha256.clone());
+    write_journal(root, &receipt, &phase)?;
+    let outcome = recover_locked(root, account, ownership);
+    anyhow::ensure!(ownership.protects(root)?, "legacy recovery ownership changed");
+    let mut status = legacy_recovery_status(root, account, operation, &expected.journal_sha256)?
+        .context("legacy recovery has no durable result; outcome is unknown")?;
+    if let Err(error) = outcome {
+        if !terminal_phase(&status.phase) { return Err(error); }
+        status.cleanup_pending = true;
+        status.cleanup_warning = Some("legacy snapshot recovery completed; local cleanup is pending".to_owned());
+    }
+    Ok(status)
 }
 
 /// Read under the host's installation takeover lock. This also supports commit
@@ -642,6 +801,7 @@ pub fn operation_status(
                 rollback_sha256: String::new(),
                 account_fingerprint: entry.account_fingerprint.clone(),
                 operation: Some(entry.operation.clone()),
+                legacy_journal_sha256: entry.legacy_journal_sha256.clone(),
             },
             cleanup_pending: false,
         }));
@@ -849,6 +1009,7 @@ fn restore_operation_with_hook(
         rollback_file,
         account_fingerprint,
         operation: operation.cloned(),
+        legacy_journal_sha256: None,
     };
     // Durable receipt exists before the first operation that can replace live.
     write_record(root, &receipt, "prepared", MAINTENANCE_FILE)?;
@@ -1177,6 +1338,7 @@ mod tests {
                 operation_id: uuid::Uuid::new_v4().to_string(),
                 request_fingerprint: "e".repeat(64),
             }),
+            legacy_journal_sha256: None,
         }
     }
 
@@ -1234,6 +1396,32 @@ mod tests {
         assert!(error.downcast_ref::<OperationConflict>().is_some());
         assert_eq!(fs::read(root.join(RECOVERY_FILE))?, before_retry);
         assert!(!root.join("rsrs.db").exists());
+
+        let legacy_root = root.join("legacy");
+        let ownership = crate::lock::LibraryLock::acquire(&legacy_root, std::time::Duration::from_secs(1))?;
+        let mut legacy = controlled_receipt();
+        legacy.operation = None;
+        write_record(&legacy_root, &legacy, "prepared", MAINTENANCE_FILE)?;
+        write_journal(&legacy_root, &legacy, "verified")?;
+        let expected = describe_legacy_recovery(&legacy_root, "account")?;
+        let operation = SnapshotOperation {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            request_fingerprint: "a".repeat(64),
+        };
+        assert!(legacy_recovery_status(&legacy_root, "account", &operation, &expected.journal_sha256)?.is_none());
+        let result = recover_legacy_locked(&legacy_root, "account", &expected, &operation, &ownership)?;
+        assert_eq!(result.phase, "released");
+        assert!(!result.cleanup_pending);
+        let persisted = fs::read(legacy_root.join(RECOVERY_FILE))?;
+        assert_eq!(legacy_recovery_status(&legacy_root, "account", &operation, &expected.journal_sha256)?
+            .context("lost-response recovery result missing")?.phase, "released");
+        assert_eq!(recover_legacy_locked(&legacy_root, "account", &expected, &operation, &ownership)?.phase, "released");
+        assert_eq!(fs::read(legacy_root.join(RECOVERY_FILE))?, persisted);
+        assert!(!legacy_root.join("rsrs.db").exists());
+        assert!(legacy_recovery_status(&legacy_root, "other-account", &operation, &expected.journal_sha256).is_err());
+        assert!(legacy_recovery_status(&legacy_root, "account", &operation, &"f".repeat(64)).is_err());
+        let changed = SnapshotOperation { request_fingerprint: "b".repeat(64), ..operation };
+        assert!(legacy_recovery_status(&legacy_root, "account", &changed, &expected.journal_sha256).is_err());
         Ok(())
     }
 
@@ -1241,7 +1429,8 @@ mod tests {
     fn controlled_cleanup_retains_terminal_identity_and_prefers_new_gate() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
-        let receipt = controlled_receipt();
+        let mut receipt = controlled_receipt();
+        receipt.legacy_journal_sha256 = Some("e".repeat(64));
         let operation = receipt.operation.as_ref().context("controlled operation missing")?;
         write_record(root, &receipt, "prepared", MAINTENANCE_FILE)?;
         write_journal(root, &receipt, "verified")?;
@@ -1250,6 +1439,10 @@ mod tests {
         let status = operation_status(root, "account", operation)?.context("terminal operation missing")?;
         assert_eq!(status.phase, "released");
         assert!(status.cleanup_pending);
+        let legacy_status = legacy_recovery_status(root, "account", operation, &"e".repeat(64))?
+            .context("legacy cleanup result missing")?;
+        assert_eq!(legacy_status.phase, "released");
+        assert!(legacy_status.cleanup_pending && legacy_status.cleanup_warning.is_some());
         release_restore(root, &receipt)?;
         let status = operation_status(root, "account", operation)?.context("released operation missing")?;
         assert_eq!(status.phase, "released");
