@@ -1,6 +1,6 @@
 [package]
 name = "respire_runtime"
-version = "1.0.21-dev.15"
+version = "1.0.21-dev.16"
 edition = "2021"
 rust-version = "1.88"
 description = "standalone respire runtime binary (rsrs-runtime): loopback RPC host for the CLI and client2"
@@ -13,6 +13,11 @@ name = "rsrs-runtime"
 path = "src/main.rs"
 
 [dependencies]
+respire_host_commands = { path = "../crates/host-commands" }
+respire_frontend = { package = "respire_host_frontend", path = "../host-frontend/cli" }
+respire_host_control = { path = "../crates/host-control", features = ["runtime-host"] }
+respire_client_host = { path = "../crates/client-host", features = ["locks"] }
+url = "2.5"
 respire_app = { package = "respire_app", path = "../crates/app", default-features = false }
 respire_commands = { path = "../crates/commands" }
 respire_core_sdk = { path = "../crates/core-sdk" }

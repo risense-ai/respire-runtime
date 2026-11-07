@@ -219,6 +219,25 @@ impl Drop for Arguments {
     }
 }
 impl Arguments {
+    fn is_nonzero_port(&self, index: usize) -> bool {
+        if index >= self.count { return false; }
+        // SAFETY: Shell32 guarantees count valid pointers to terminated strings.
+        let word = unsafe { *self.pointer.add(index) };
+        if word.is_null() { return false; }
+        let mut port = 0u32;
+        for offset in 0..=5 {
+            // SAFETY: stop at the first terminator; inspect at most six units
+            // of this one non-secret numeric argument, never logging argv.
+            let unit = unsafe { *word.add(offset) };
+            if unit == 0 { return offset > 0 && port > 0 && port <= u16::MAX as u32; }
+            if offset == 5 || !(u16::from(b'0')..=u16::from(b'9')).contains(&unit) {
+                return false;
+            }
+            port = port * 10 + u32::from(unit - u16::from(b'0'));
+        }
+        false
+    }
+
     fn is(&self, index: usize, expected: &str) -> bool {
         if index >= self.count {
             return false;
@@ -267,6 +286,12 @@ fn runtime_role(command: &[u16], executable: &Path) -> io::Result<bool> {
     }
     let name = executable.file_name().and_then(|name| name.to_str());
     if name.is_some_and(|name| name.eq_ignore_ascii_case("rsrs-runtime.exe")) {
+        if arguments.is(1, "--runtime-internal") {
+            return Ok(arguments.count == 5
+                && arguments.is(2, "--runtime-background-internal")
+                && arguments.is(3, "--port")
+                && arguments.is_nonzero_port(4));
+        }
         let mut index = 1;
         while index < arguments.count {
             if arguments.is(index, "--json")
@@ -465,6 +490,18 @@ mod tests {
             (r#"rsrs-runtime serve --status"#, "rsrs-runtime.exe", false),
             (r#"rsrs-runtime runtime start --stop"#, "rsrs-runtime.exe", false),
             (r#"rsrs-runtime serve --data-dir"#, "rsrs-runtime.exe", false),
+            (r#""C:\space path\rsrs-runtime.exe" --runtime-internal --runtime-background-internal --port 15169"#, "RSRS-RUNTIME.EXE", true),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port 65535"#, "rsrs-runtime.exe", true),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port 0"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port 65536"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port -1"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port nope"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-background-internal --runtime-internal --port 15169"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port 15169 --supervised"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port 15169 --status"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --data-dir 15169"#, "rsrs-runtime.exe", false),
+            (r#"rsrs-runtime --runtime-internal --runtime-background-internal --port 15169"#, "foreign.exe", false),
             (r#"rsrs-runtime --core-worker-internal"#, "rsrs-runtime.exe", false),
             (r#"rsrs-runtime runtime status"#, "rsrs-runtime.exe", false),
             (r#"rsrs-runtime --status --data-dir serve"#, "rsrs-runtime.exe", false),

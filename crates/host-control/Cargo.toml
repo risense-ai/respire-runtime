@@ -1,0 +1,28 @@
+[package]
+name = "respire_host_control"
+version = "0.1.0-dev.1"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[features]
+default = []
+runtime-host = []
+
+[dependencies]
+respire_client_host = { path = "../client-host", features = ["locks"] }
+respire_commands = { package = "respire_host_commands", path = "../host-commands" }
+respire_protocol = { path = "../protocol" }
+respire_spawn = { path = "../../spawn" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[lints.rust]
+unsafe_code = "forbid"

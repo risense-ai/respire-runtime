@@ -1120,6 +1120,11 @@ fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthId
             let journal = load_journal()?;
             let record = journal.operations.iter().find(|record| record.operation_id == *operation_id)
                 .context("unbound auth session has no transaction receipt")?;
+            if record.key_operation.is_some() {
+                ensure!(record.root == root && record.candidate.as_deref() == Some(bytes),
+                    "offline recovery receipt does not own this session");
+                return keys::verify_unbound_candidate(&journal, record, profile);
+            }
             let prepared = recovering && record.phase == AuthPhase::Prepared
                 && journal.active.as_ref().is_some_and(|active| active.operation_id.as_deref() == Some(operation_id.as_str()));
             ensure!(record.root == root && record.profile == profile && (record.phase == AuthPhase::Committed || prepared)
@@ -1867,21 +1872,35 @@ impl PreparedLogin {
     }
 
     // Only the owned fivekeys transaction may prepare an unauthenticated candidate.
-    // Its caller verifies the kit first and never publishes it before authentication.
+    // Its caller verifies the kit first; an empty server keeps recovery offline.
     fn prepare_candidate(addr: &str, authorized: &Value, super_password: String, vault: Value,
         legacy: Option<(Value, [u8; 32])>, registration_source: bool, without_token: bool, fixed_directory: Option<&Path>) -> Result<Self> {
         crate::service::require_profile_change_host()?;
-        let user = authorized["user"].as_str().filter(|user| !user.is_empty()).context("authorization did not return a user")?.to_owned();
+        let user = authorized["user"].as_str().context("authorization did not return a user")?.to_owned();
+        let base = addr.trim().trim_end_matches('/');
+        let unbound_recovery = without_token && addr.trim().is_empty() && user.is_empty();
+        ensure!(!user.is_empty() || unbound_recovery, "authorization did not return a user");
         let token = authorized["token"].as_str().filter(|token| !token.is_empty());
         ensure!(without_token || token.is_some(), "authorization did not return a token");
-        let base = addr.trim().trim_end_matches('/');
+        ensure!(!unbound_recovery || token.is_none(), "offline recovery cannot carry a token");
         let version = vault["version"].as_i64().context("vault missing version")?;
         ensure!((1..=4).contains(&version), "unsupported vault version; original factors were preserved");
+        ensure!(!unbound_recovery || matches!(version, 1 | 2 | 4), "unsupported offline recovery kit version");
         let salt = vault["kdf_salt"].as_str().context("vault missing kdf_salt")?;
         let wrapped = vault["wrapped_urk"].as_str().context("vault missing wrapped_urk")?;
         let nonce = vault["urk_nonce"].as_str().context("vault missing urk_nonce")?;
         let current = crate::service::data_dir();
         let mut directory = if let Some(directory) = fixed_directory { directory.to_path_buf() }
+        else if unbound_recovery {
+            // Match the original fivekeys selection without inventing an account.
+            if crate::service::session_user_of_dir(&current).is_empty() { current.clone() }
+            else {
+                let main = crate::service::main_data_dir();
+                ensure!(crate::service::session_user_of_dir(&main).is_empty(),
+                    "offline recovery cannot replace a named account; select its original local library");
+                main
+            }
+        }
         else if (registration_source && crate::service::session_user_of_dir(&current).is_empty())
             || (legacy.is_some() && crate::service::session_user_of_dir(&current) == user) {
             current.clone()
@@ -1893,10 +1912,11 @@ impl PreparedLogin {
         };
         ensure!(session.is_object(), "target account session must be an object");
         let previous_alias = session["keyring_account"].as_str().unwrap_or(&user);
-        let login_password = authorized["pass"].as_str().filter(|value| version == 1 || !value.is_empty()).map(str::to_owned)
+        let supplied_password = authorized["pass"].as_str().filter(|value| version == 1 || !value.is_empty()).map(str::to_owned);
+        let login_password = if unbound_recovery { supplied_password } else { supplied_password
             .or_else(|| if version == 1 { crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty()) } else { None })
             .or_else(|| session["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned))
-            .or_else(|| crate::keystore::load_login_pass(previous_alias));
+            .or_else(|| crate::keystore::load_login_pass(previous_alias)) };
         let account_secret = authorized["secret"].as_str().filter(|value| !value.is_empty())
             .or_else(|| session["secret"].as_str().filter(|value| !value.is_empty())).map(str::to_owned);
         let secret_key = authorized["secret_key"].as_str().filter(|value| !value.is_empty())
@@ -1911,7 +1931,7 @@ impl PreparedLogin {
                 salt, wrapped, nonce),
             _ => crate::memory::SessionKeys::unlock_v4(&super_password, salt, wrapped, nonce),
         }.context("original decryption factors do not unlock this account; the original account was preserved")?;
-        if fixed_directory.is_none() && original.is_none() && legacy.is_none() {
+        if !unbound_recovery && fixed_directory.is_none() && original.is_none() && legacy.is_none() {
             let plain = crate::service::account_dir(&user)?;
             let suffix = hex::encode(sha2::Sha256::digest(format!("{base}\n{user}").as_bytes()));
             let isolated = crate::service::account_dir(&format!("{user}-{}", &suffix[..16]))?;
@@ -1971,7 +1991,7 @@ impl PreparedLogin {
         session["kdf_salt"] = vault["kdf_salt"].clone();
         session["wrapped_urk"] = vault["wrapped_urk"].clone();
         session["urk_nonce"] = vault["urk_nonce"].clone();
-        if session["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX)
+        if !unbound_recovery && session["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX)
             && !wrapped.starts_with(crate::memory::crypto::RSRS_PREFIX) {
             // A local explicit namespace migration can precede cloud rewrapping.
             // Keep its current namespace after verifying the cloud URK above.
@@ -1980,6 +2000,12 @@ impl PreparedLogin {
             session["kdf_salt"] = local_wrap[0].clone();
             session["wrapped_urk"] = local_wrap[1].clone();
             session["urk_nonce"] = local_wrap[2].clone();
+        }
+        if unbound_recovery {
+            // Offline recovery carries only the supplied kit, never stale cloud identity.
+            session.as_object_mut().context("offline recovery session must be an object")?.retain(|field, _|
+                matches!(field.as_str(), "user" | "addr" | "vault_version" | "kdf_salt" | "wrapped_urk" | "urk_nonce")
+                    || (version == 1 && field == "secret"));
         }
         session["keyring_account"] = json!(alias);
         Ok(Self { user, directory, original, session, super_password, login_password, alias, recovery_written: false, migration_cloud: None, migration_auth: None })

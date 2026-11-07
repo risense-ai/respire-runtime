@@ -778,6 +778,10 @@ fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
         .map(|name| name.strip_suffix(" (deleted)").unwrap_or(name));
     let standalone = image_name == Some("rsrs-runtime");
     if standalone {
+        if args.get(1) == Some(&"--runtime-internal") {
+            return matches!(&args[2..], ["--runtime-background-internal", "--port", port]
+                if port.parse::<u16>().is_ok_and(|port| port > 0));
+        }
         let mut args = args.iter().copied().skip(1);
         while let Some(argument) = args.next() {
             match argument {
@@ -1058,6 +1062,25 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    #[test]
+    fn background_identity_requires_the_exact_internal_launcher_shape() {
+        for image in ["/tmp/rsrs-runtime", "/tmp/rsrs-runtime (deleted)"] {
+            assert!(runtime_role_arguments(Path::new(image),
+                &["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169"]));
+        }
+        for args in [
+            vec!["rsrs-runtime", "--runtime-background-internal"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "0"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169", "--status"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--data-dir", "15169"],
+        ] {
+            assert!(!runtime_role_arguments(Path::new("/tmp/rsrs-runtime"), &args));
+        }
+        assert!(!runtime_role_arguments(Path::new("/tmp/foreign"),
+            &["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169"]));
     }
 
     #[test]

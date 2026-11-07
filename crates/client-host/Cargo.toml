@@ -1,0 +1,28 @@
+[package]
+name = "respire_client_host"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Pure client environment and profile path helpers"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+locks = ["dep:rusqlite"]
+
+[dependencies]
+anyhow = "1.0"
+dirs = "6.0"
+hex = "0.4"
+keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+whoami = "2.1"
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -110,6 +110,10 @@ pub(crate) fn runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .thread_name("runtime-network")
+                // Blocking admission can enter the same command/parser frames
+                // as resident read workers. Keep their established stack size;
+                // a small Tokio default aborts the process on real diagnostics.
+                .thread_stack_size(16 * 1024 * 1024)
                 .enable_all()
                 .build()
                 .map_err(|error| error.to_string())

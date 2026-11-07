@@ -129,6 +129,9 @@ fn stage(ownership: &AuthOwnership, journal: &mut Journal, index: usize, mut pre
     ensure!(read_original(&target)? == prepared.original, "fivekeys target changed while acquiring ownership");
     verify_account_config(journal.active.as_ref().context("fivekeys recovery missing")?)?;
     prepared.alias = journal.operations[index].alias.clone();
+    if prepared.user.is_empty() {
+        prepared.session["auth_operation_id"] = json!(journal.operations[index].operation_id);
+    }
     checkpoint_credentials(journal, index, &mut prepared.session, &prepared.super_password, prepared.login_password.as_deref())?;
     journal.operations[index].phase = AuthPhase::Prepared;
     operation_mut(journal, index)?.required_inputs.clear();
@@ -278,4 +281,136 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     assert_eq!(read_original(root)?, Some(original));
     assert!(!auth_recovery_pending()?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offline_kit(version: i64) -> Result<(HostKeyOperation, HostKeyInput, [u8; 32])> {
+        let urk = crate::memory::crypto::generate_key();
+        let password = String::new();
+        let mut input = HostKeyInput { password: Some(password.clone()), ..HostKeyInput::default() };
+        let (salt, wrapped, nonce) = match version {
+            1 => {
+                let secret = crate::memory::crypto::generate_account_secret();
+                let salt = crate::memory::crypto::random_hex(16);
+                let (nonce, wrapped) = crate::memory::crypto::wrap_key(&urk,
+                    &crate::memory::crypto::derive_kek(&password, &secret, &salt)?)?;
+                input.account_secret = Some(secret);
+                (salt, wrapped, nonce)
+            }
+            2 => {
+                let secret = "synthetic-legacy-super".to_owned();
+                let salt = crate::memory::crypto::random_hex(16);
+                let (nonce, wrapped) = crate::memory::crypto::wrap_key(&urk,
+                    &crate::memory::crypto::derive_super_kek(&secret, &salt)?)?;
+                input.super_password = Some(secret);
+                (salt, wrapped, nonce)
+            }
+            4 => {
+                let secret = crate::memory::crypto::generate_secret_key();
+                let kit = crate::auth::wrap_with_v4(&secret, &urk)?;
+                input.super_password = Some(secret);
+                kit
+            }
+            _ => anyhow::bail!("unsupported offline fixture version"),
+        };
+        Ok((HostKeyOperation::Fivekeys { addr: String::new(), user: String::new(),
+            kdf_salt: salt, wrapped_urk: wrapped, urk_nonce: nonce, use_super: version != 1 }, input, urk))
+    }
+
+    #[test]
+    fn offline_fivekeys_requires_original_native_credential_and_verification() -> Result<()> {
+        let isolated = crate::test_lock::Isolate::new()?;
+        let _keyring = crate::migration::memory_keyring_for_test();
+        let root = isolated.path().canonicalize()?;
+        for version in [1, 2, 4] {
+            let (intent, input, urk) = offline_kit(version)?;
+            let config = std::fs::read(crate::service::client_config_path()).ok();
+            let candidate = prepared(&intent, &input, None, None)?;
+            assert_eq!(candidate.directory, root);
+            assert_eq!(candidate.session["user"], "");
+            assert_eq!(candidate.session["addr"], "");
+            assert_eq!(candidate.session["vault_version"], version);
+            assert!(!root.join("session.json").exists());
+            let ownership = AuthOwnership::acquire(&root, &root)?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut params = HostKeyParams { schema_version: HOST_KEY_SCHEMA_V,
+                binding: respire_protocol::ControlBinding { installation_root: root.clone(), profile: root.clone(),
+                    launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None },
+                identity: HostAuthIdentity::Absent, source_identity: HostAuthIdentity::Absent,
+                operation: intent, input: Some(input) };
+            let receipt = control_key(&ownership, &id, &id, &params)?;
+            assert!(receipt.outcome == HostKeyOutcome::Pending && receipt.verification_required);
+            assert!(receipt.account_id.is_none() && receipt.super_password.is_none());
+            assert!(matches!(&receipt.identity, HostAuthIdentity::Unbound { operation_id, session_sha256 }
+                if operation_id == &id && Some(session_sha256) == receipt.session_sha256.as_ref()));
+            let journal = load_journal()?;
+            let record = journal.operations.iter().find(|record| record.operation_id == id)
+                .context("offline fixture receipt missing")?;
+            assert_eq!(candidate_keys(record)?.urk, urk);
+            assert!(!auth_recovery_pending()?);
+            let alias = record.alias.clone();
+            let backend = record.backend.as_deref().context("offline fixture backend missing")?;
+            let slot = if version == 1 { "pass" } else { "super" };
+            let secret = if version == 1 { crate::keystore::read_imported_v1_password(&alias, backend)? }
+                else { crate::keystore::read_imported(&alias, slot, backend)? };
+            crate::keystore::remove_imported(&alias, slot, backend)?;
+            assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());
+            crate::keystore::import_credential(&alias, slot, "synthetic-wrong-credential")?;
+            assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());
+            crate::keystore::remove_imported(&alias, slot, backend)?;
+            crate::keystore::import_credential(&alias, slot, &secret)?;
+            verify_auth_identity(&root, &root, &receipt.identity)?;
+            params.identity = receipt.identity;
+            params.input = None;
+            let pending = control_key_result(&ownership, &id, &id, &params)?;
+            assert!(pending.verification_required && pending.outcome == HostKeyOutcome::Pending);
+            let checkpoint = std::fs::read(recovery_path())?;
+            drop(ownership);
+            assert!(control_key_complete(&root, &root, &id, &id, &params,
+                |_| anyhow::bail!("synthetic live Runtime is not ready")).is_err());
+            assert_eq!(std::fs::read(recovery_path())?, checkpoint);
+            let ownership = AuthOwnership::acquire(&root, &root)?;
+            let rolled_back = control_key_rollback(ownership, &id, &id, &params)?;
+            assert!(rolled_back.outcome == HostKeyOutcome::RolledBack);
+            assert!(rolled_back.identity == HostAuthIdentity::Absent);
+            assert!(!root.join("session.json").exists());
+            assert_eq!(std::fs::read(crate::service::client_config_path()).ok(), config);
+            assert!(crate::keystore::read_imported(&alias, slot, backend).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn offline_fivekeys_preserves_selected_library_on_wrong_kit() -> Result<()> {
+        let isolated = crate::test_lock::Isolate::new()?;
+        let _keyring = crate::migration::memory_keyring_for_test();
+        let root = isolated.path().canonicalize()?;
+        let (intent, input, urk) = offline_kit(4)?;
+        let keys = crate::memory::SessionKeys::from_urk(urk)?;
+        let (nonce, ciphertext) = keys.encrypt_content(&serde_json::to_string(&json!({
+            "kind":"Context", "tags":"", "title":"retained", "content":"offline recovery fixture",
+            "user":"", "computer":"fixture", "project":"", "created_at":"", "updated_at":""
+        }))?)?;
+        let database_path = crate::service::database_path(&root)?;
+        let database = rusqlite::Connection::open(&database_path)?;
+        database.execute_batch("CREATE TABLE memories(ciphertext TEXT, nonce TEXT, deleted INTEGER);")?;
+        database.execute("INSERT INTO memories VALUES(?1,?2,0)", rusqlite::params![ciphertext, nonce])?;
+        drop(database);
+        let database_before = std::fs::read(&database_path)?;
+        let good = prepared(&intent, &input, None, None)?;
+        assert_eq!(good.directory, root);
+        let (wrong_intent, wrong_input, _) = offline_kit(4)?;
+        assert!(prepared(&wrong_intent, &wrong_input, None, None).is_err());
+        let mut online = intent.clone();
+        if let HostKeyOperation::Fivekeys { addr, .. } = &mut online { *addr = "https://never-contact.invalid".into(); }
+        assert!(prepared(&online, &input, None, None).is_err());
+        assert_eq!(std::fs::read(&database_path)?, database_before);
+        assert!(!root.join("session.json").exists());
+        assert!(!crate::service::client_config_path().exists());
+        assert!(!crate::service::accounts_root().exists());
+        Ok(())
+    }
 }

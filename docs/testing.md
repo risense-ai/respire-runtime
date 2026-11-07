@@ -95,3 +95,33 @@ is a product change outside this test/CI-only task; the Runtime server checks an
 all current assertions remain in place. The VM's `commands37/app3` inventory is
 an execution inventory pending its own frozen executable digests, not 40 new
 non-overlapping behaviors or a claim of successful execution.
+
+## Explicit unpublished account candidate
+
+Before publishing the next Runtime, the CLI's existing
+`migration-keyring-check.yml` can also execute the original
+`account::authorization_preserves_and_commits_profiles` test. Dispatch that
+workflow on the exact CLI candidate commit, supplying `runtime_candidate_sha`
+with the full Runtime commit that includes this harness. Both checkouts must
+match those identities and use identical SDK locks. The ordinary official-pin
+integration jobs above remain unchanged.
+
+This optional native Linux job builds both binaries and the original harness,
+uses the existing token-free SDK cache and real pinned CPU model, and installs
+an explicitly unpublished local candidate with `runtime install --file`.
+The Runtime version must be its real next DEV version, different from the
+published CLI pin. The generated archive has a complete file inventory and
+SHA-256 digests; the product installer creates and validates its normal receipt.
+The test-only `RSRS_RUNTIME_CANDIDATE_METADATA` opt-in binds that exact receipt,
+Runtime source/binary and CLI source/binary. It does not change production
+installation checks, protocol, client authentication or the official release pin.
+
+The existing private Secret Service wrapper checks native keyring roundtrips
+before and after the unchanged account test, using disposable HOME/XDG paths
+and a private D-Bus session. The account's synthetic loopback server and existing
+unknown-outcome, rollback and credential preservation assertions are retained.
+Only sanitized `result.json` is uploaded. Raw product replies and private state
+remain in runner-temporary files; do not upload them when diagnosing a failure.
+A missing test, failed cleanup, mismatched identity or failed test fails the job.
+This one-test source-candidate result is not a release-asset, full-platform,
+coverage, G1 or G2 acceptance report.

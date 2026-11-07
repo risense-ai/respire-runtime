@@ -91,11 +91,16 @@ impl AccountRequest {
 }
 
 pub(crate) fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<()> {
+    let target = receipt.target_profile.as_ref().context("receipt target is missing")?;
+    let account = receipt.account_id.as_deref().context("receipt account is missing")?;
+    verify_ready_target_runtime(target, account)
+}
+
+pub(crate) fn verify_ready_target_runtime(target: &std::path::Path, account: &str) -> Result<()> {
     crate::startup_identity::verify_account_completion_authority()?;
     let health = respire_commands::net_rpc::health()?;
     respire_commands::net_rpc::request_scope(&health)?;
-    let target = receipt.target_profile.as_ref().context("receipt target is missing")?;
-    ensure!(health.store_ready && health.account_id == *receipt.account_id.as_ref().context("receipt account is missing")?
+    ensure!(health.store_ready && health.account_id == account
         && std::fs::canonicalize(&health.data_dir)? == target.canonicalize()?
         && health.runtime_version == env!("CARGO_PKG_VERSION"), "target Runtime is not ready for this account receipt");
     let process = respire_commands::net_rpc::runtime_process_identity(health.pid)?;

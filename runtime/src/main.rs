@@ -7,7 +7,7 @@
 //! | argv                                   | behaviour                                  |
 //! |----------------------------------------|--------------------------------------------|
 //! | `serve [--host H] [--port P] [--data-dir D] [--supervised]` | serve until stopped |
-//! | `--json runtime start` / `runtime start` | legacy foreground alias for `serve`; no readiness claim |
+//! | `--json runtime start` / `runtime start` | detached same-image startup with checked readiness |
 //! | `--json runtime stop` / `runtime stop` / `--stop` | ask the resident runtime to stop |
 //! | `--status`                              | probe the resident runtime health          |
 //! | `--version`                             | print the binary version                   |
@@ -16,6 +16,8 @@
 //! consumed with `respire_spawn` semantics: `RSRS_RUNTIME_BOOT_TOKEN` is read
 //! and then removed from this process's environment.
 
+mod background_start;
+mod host_account;
 mod startup_identity;
 mod host_control;
 mod maintenance_control;
@@ -73,6 +75,8 @@ fn consume_boot_token() -> Result<Option<String>> {
 struct Flags {
     json: bool,
     serve: bool,
+    start: bool,
+    background_child: bool,
     stop: bool,
     status: bool,
     version: bool,
@@ -87,6 +91,8 @@ impl Default for Flags {
         Self {
             json: false,
             serve: false,
+            start: false,
+            background_child: false,
             stop: false,
             status: false,
             version: false,
@@ -103,6 +109,11 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    if std::env::args_os().skip(1).any(|arg| arg == "--host-rpc-stdio") {
+        anyhow::ensure!(boot_token.is_none(), "host RPC cannot consume runtime boot authorization");
+        host_account::install_frontend()?;
+        return Ok(respire_frontend::run_frontend());
+    }
     if std::env::args().nth(1).as_deref() == Some("--host-control-internal") {
         anyhow::ensure!(
             boot_token.is_none() && std::env::args_os().count() == 2,
@@ -133,12 +144,22 @@ fn run(boot_token: Option<String>) -> Result<i32> {
             }
         };
     }
+    if uses_host_frontend(std::env::args_os().skip(1)) {
+        anyhow::ensure!(boot_token.is_none(), "host commands cannot consume runtime boot authorization");
+        host_account::install_frontend()?;
+        return Ok(respire_frontend::run_frontend());
+    }
     let mut flags = Flags::default();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => flags.json = true,
-            "serve" => flags.serve = true,
+            "serve" | "--runtime-internal" => flags.serve = true,
+            "--runtime-background-internal" => {
+                flags.serve = true;
+                flags.background_child = true;
+                flags.json = true;
+            }
             "--stop" => flags.stop = true,
             "--status" => flags.status = true,
             "--version" => flags.version = true,
@@ -166,7 +187,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
             "runtime" => {
                 let verb = args.next().unwrap_or_default();
                 match verb.as_str() {
-                    "start" => flags.serve = true,
+                    "start" => flags.start = true,
                     "stop" => flags.stop = true,
                     "status" => flags.status = true,
                     "version" => flags.version = true,
@@ -182,7 +203,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
             }
         }
     }
-    let requested = [flags.serve, flags.stop, flags.status, flags.version]
+    let requested = [flags.serve, flags.start, flags.stop, flags.status, flags.version]
         .into_iter()
         .filter(|requested| *requested)
         .count();
@@ -193,7 +214,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
     );
 
     anyhow::ensure!(
-        !(flags.status || flags.stop || flags.version)
+        !(flags.status || flags.stop || flags.version || flags.start || flags.background_child)
             || (!flags.supervised && boot_token.is_none()),
         "boot authorization and --supervised are only valid when serving"
     );
@@ -205,13 +226,21 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         }
         return Ok(0);
     }
+    anyhow::ensure!(!flags.background_child || flags.serve,
+        "background readiness is only valid for a serving process");
     apply_data_dir(&flags);
+    if let Some(port) = flags.port {
+        std::env::set_var("RSRS_RPC_PORT", port.to_string());
+    }
     if let Err(error) = respire_app::service::validate_client_config() {
         if flags.json {
             print_envelope("configuration", false, 2, Some(&format!("{error:#}")), None);
             return Ok(2);
         }
         return Err(error).context("Runtime client configuration is invalid");
+    }
+    if flags.start {
+        return background_start::start(&flags);
     }
     if flags.status {
         return status_command(flags.json);
@@ -221,6 +250,46 @@ fn run(boot_token: Option<String>) -> Result<i32> {
     }
     // Bare invocation defaults to serving, mirroring `--runtime-internal`.
     serve_command(&flags, boot_token.as_deref())
+}
+
+// Only lifecycle/process modes stay in this binary's small startup parser.
+// The existing CLI parser owns all host command syntax and behavior unchanged.
+fn uses_host_frontend(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    let mut args = args.filter(|argument| argument != "--json");
+    let Some(first) = args.next() else { return false; };
+    if first == "runtime" {
+        return !matches!(args.next().as_deref().and_then(std::ffi::OsStr::to_str),
+            Some("start" | "stop" | "status" | "version"));
+    }
+    !matches!(first.to_str(),
+        Some("serve" | "--runtime-internal" | "--runtime-background-internal"
+            | "--stop" | "--status" | "--version" | "--supervised" | "--host" | "--port" | "--data-dir"))
+}
+
+#[cfg(test)]
+mod frontend_route_tests {
+    use super::uses_host_frontend;
+    fn route(args: &[&str]) -> bool { uses_host_frontend(args.iter().map(std::ffi::OsString::from)) }
+    #[test]
+    fn original_client2_host_commands_use_the_shared_frontend() {
+        for command in ["config", "logout", "grant", "account", "space", "migrate", "login",
+            "keygen", "keys-export", "inject", "inject-status", "inject-remove", "classify-config", "model"] {
+            assert!(route(&["--json", command]), "{command}");
+        }
+        assert!(route(&["--json", "config", "--data-dir", "test-profile"]));
+        assert!(route(&["--json", "model", "install-engines"]));
+        assert!(route(&["--json", "runtime", "account-result", "original-operation"]));
+        assert!(route(&["--json", "runtime", "account-rollback", "original-operation"]));
+    }
+    #[test]
+    fn runtime_lifecycle_and_private_modes_keep_their_dispatcher() {
+        assert!(!route(&[]));
+        for args in [vec!["--json", "runtime", "start"], vec!["--runtime-internal"],
+            vec!["serve", "--port", "15169"], vec!["--status"], vec!["--version"],
+            vec!["--runtime-internal", "--runtime-background-internal", "--port", "15169"]] {
+            assert!(!route(&args), "{args:?}");
+        }
+    }
 }
 
 fn apply_data_dir(flags: &Flags) {
@@ -240,6 +309,11 @@ fn publish_identity() {
 }
 
 fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
+    if flags.background_child {
+        anyhow::ensure!(flags.host == "127.0.0.1",
+            "legacy host mode only accepts the existing loopback endpoint");
+        startup_identity::enable_background_readiness()?;
+    }
     respire_commands::model_install::enable_backend_probe_host(
         respire_commands::model_install::BackendProbeHost::Serving);
     startup_identity::authorize(
@@ -247,11 +321,13 @@ fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
         boot_token,
         flags.port.unwrap_or_else(net_rpc::rpc_port),
     )?;
+    startup_identity::install_legacy_host()?;
     let installed = host_hooks::install(HostHooks {
         capture_run: Some(respire_commands::runtime_executor::capture_run),
         mcp_http_response: Some(respire_commands::runtime_mcp::http_response),
         managed_id: Some(startup_identity::managed_id),
         verify_managed_boot: Some(startup_identity::verify_managed_boot),
+        runtime_listener_ready: Some(startup_identity::publish_legacy_ready),
         ..HostHooks::default()
     });
     anyhow::ensure!(installed, "Runtime executor hooks were installed twice");
@@ -293,6 +369,8 @@ fn status_command(json: bool) -> Result<i32> {
             if json {
                 let body = serde_json::json!({
                     "v": respire_commands::rpc_worker::PROTOCOL_V,
+                    "status": "ok",
+                    "summary": { "running": true },
                     "id": "status",
                     "ok": true,
                     "exit": 0,
@@ -308,6 +386,14 @@ fn status_command(json: bool) -> Result<i32> {
                     "runtime=up pid={} url={} data_dir={}",
                     health.pid, health.url, health.data_dir,
                 );
+            }
+            Ok(0)
+        }
+        Err(error) if background_start::is_unavailable(&error) => {
+            if json {
+                print_envelope("status", true, 0, None, Some("not_running"));
+            } else {
+                println!("runtime=not_running");
             }
             Ok(0)
         }
@@ -377,15 +463,18 @@ fn print_envelope(id: &str, ok: bool, exit: i32, error: Option<&str>, result: Op
     let mut body = serde_json::json!({
         "v": respire_commands::rpc_worker::PROTOCOL_V,
         "id": id,
+        "status": if ok { "ok" } else { "fail" },
         "ok": ok,
         "exit": exit,
         "bin": VERSION,
     });
     if let Some(error) = error {
         body["error"] = serde_json::json!(error);
+        body["errors"] = serde_json::json!([error]);
     }
     if let Some(result) = result {
         body["result"] = serde_json::json!(result);
+        body["summary"] = serde_json::json!({"result": result, "running": result == "started" || result == "already_running"});
     }
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();

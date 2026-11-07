@@ -52,3 +52,5 @@ pub mod util;
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub mod legacy_host;
