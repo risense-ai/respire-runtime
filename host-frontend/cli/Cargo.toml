@@ -56,3 +56,8 @@ tiny_http = "0.12"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# CI-only standalone entry for the existing managed-install test fixture.
+[[example]]
+name = "host-fixture-cli"
+path = "src/main.rs"
