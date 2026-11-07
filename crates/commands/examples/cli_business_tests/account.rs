@@ -382,6 +382,93 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+fn authorization_failure_evidence(root: &std::path::Path, source: &std::path::Path, output: &Output) {
+    use serde_json::{json, Value};
+
+    fn allowed(value: &Value, choices: &[&str]) -> Value {
+        match value.as_str().filter(|value| choices.contains(value)) {
+            Some(value) => json!(value),
+            None if value.is_null() => Value::Null,
+            None => json!("redacted"),
+        }
+    }
+
+    fn operation_id(value: &Value) -> Option<String> {
+        let text = value.as_str()?;
+        let id = uuid::Uuid::parse_str(text).ok()?;
+        (id.get_version_num() == 4 && id.to_string() == text).then(|| id.to_string())
+    }
+
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    let mut evidence = json!({
+        "schema_version": 1, "event": "authorization_failure_evidence",
+        "reason_code": allowed(&response["summary"]["reason"], &["account_outcome_unknown", "runtime_error"]),
+        "error_type": allowed(&response["details"]["error_type"], &["outcome_unknown", "runtime"]),
+        "operation_id": operation_id(&response["details"]["operation_id"]),
+        "runtime_log_reason_code": "not_captured_by_fixture",
+    });
+    let journal = match std::fs::read(root.join(".login-recovery.json")) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                evidence["journal_reason_code"] = json!("invalid_json");
+                eprintln!("{evidence}");
+                return;
+            }
+        },
+        Err(error) => {
+            evidence["journal_reason_code"] = json!(match error.kind() {
+                std::io::ErrorKind::NotFound => "not_found",
+                std::io::ErrorKind::PermissionDenied => "permission_denied",
+                _ => "io_error",
+            });
+            evidence["journal_os_error_code"] = json!(error.raw_os_error());
+            eprintln!("{evidence}");
+            return;
+        }
+    };
+    let active = &journal["active"];
+    let id = operation_id(&response["details"]["operation_id"]);
+    evidence["operation_id"] = json!(id);
+    evidence["journal_reason_code"] = json!("read");
+    evidence["journal_schema_v2"] = json!(journal["schema_version"] == 2);
+    evidence["active_present"] = json!(active.is_object());
+    evidence["active_matches_operation"] = json!(id.is_some() && operation_id(&active["operation_id"]) == id);
+    let records: Vec<&Value> = journal["operations"].as_array().into_iter().flatten()
+        .filter(|record| id.is_some() && operation_id(&record["operation_id"]) == id).collect();
+    evidence["matching_records"] = json!(records.len());
+    if let [record] = records.as_slice() {
+        let account = &record["account"];
+        let login = &account["login"];
+        evidence["phase"] = allowed(&record["phase"], &["admitted", "login_input", "remote_pending",
+            "remote_unknown", "authorized", "prepared", "awaiting_verification", "rolling_back", "committed", "rolled_back"]);
+        evidence["backend"] = allowed(&record["backend"], &["native", "secret_service", "kernel"]);
+        evidence["root_matches_fixture"] = json!(root.canonicalize().ok().is_some_and(|path|
+            record["root"].as_str().map(std::path::Path::new) == Some(path.as_path())));
+        evidence["source_matches_fixture"] = json!(source.canonicalize().ok().is_some_and(|path|
+            record["profile"].as_str().map(std::path::Path::new) == Some(path.as_path())));
+        for field in ["candidate", "candidate_sha256"] {
+            evidence[format!("{field}_present")] = json!(!record[field].is_null());
+        }
+        for field in ["authorization", "vault", "target"] {
+            evidence[format!("{field}_present")] = json!(!account[field].is_null());
+        }
+        for field in ["published_vault", "vault_pending"] {
+            evidence[field] = json!(account[field].as_bool());
+        }
+        for field in ["import_started", "sync_started", "publication_pending", "publication_done", "vault_done", "password_done"] {
+            evidence[field] = json!(login[field].as_bool());
+        }
+        evidence["owns_config"] = json!(active["owns_config"].as_bool());
+        for field in ["backends", "pass_backends", "totp_backends"] {
+            evidence[field] = json!(active[field].as_array().map(|values| values.iter()
+                .map(|value| allowed(value, &["native", "secret_service", "kernel"])).collect::<Vec<_>>()));
+        }
+    }
+    // Never serialize journal material, response text, credentials or arbitrary errors.
+    eprintln!("{evidence}");
+}
+
 /// Exercise the shipped client against an isolated authorization server, including
 /// failures before commit and the host/runtime account verification after commit.
 #[test]
@@ -916,6 +1003,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             &super_password,
         ])?;
         if !authorized.status.success() {
+            authorization_failure_evidence(&root, &original, &authorized);
             return Err(format!(
                 "authorized OAuth login failed: {} {}",
                 String::from_utf8_lossy(&authorized.stdout),
