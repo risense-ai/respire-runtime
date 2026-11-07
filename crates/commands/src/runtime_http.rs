@@ -148,6 +148,35 @@ fn mcp_http(
     })
 }
 
+fn dispatch_rpc(body: &[u8], action: impl FnOnce(crate::rpc_serve::RpcResponse) + Send + 'static) -> anyhow::Result<()> {
+    match crate::legacy_host::prepare(body)? {
+        Some((request, projection)) => crate::rpc_serve::handle_http_legacy_deferred(request,
+            move |response| action(crate::legacy_host::project(response, projection))),
+        None => crate::rpc_serve::handle_http_rpc_deferred(body, action),
+    }
+}
+fn dispatch_rpc_sync(body: &[u8]) -> anyhow::Result<crate::rpc_serve::RpcResponse> {
+    match crate::legacy_host::prepare(body)? {
+        Some((request, projection)) => Ok(crate::legacy_host::project(
+            crate::rpc_serve::handle_http_legacy(request)?, projection)),
+        None => crate::rpc_serve::handle_http_rpc(body),
+    }
+}
+fn legacy_host_headers(headers: &axum::http::HeaderMap) -> anyhow::Result<()> {
+    for (name, required) in [("host", true), ("origin", false)] {
+        let mut values = headers.get_all(name).iter();
+        let first = values.next();
+        anyhow::ensure!(!required || first.is_some(), "legacy_host_header_rejected");
+        anyhow::ensure!(values.next().is_none(), "legacy_host_header_rejected");
+        if let Some(value) = first {
+            tiny_http::Header::from_bytes(name, value.as_bytes())
+                .map_err(|_| anyhow::anyhow!("legacy_host_header_rejected"))?;
+        }
+    }
+    Ok(())
+}
+
+
 fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static str, Vec<u8>) {
     let url = req.url().to_owned();
     let method = req.method().to_owned();
@@ -192,6 +221,12 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
     }
     let path = url.split('?').next().unwrap_or(url.as_str());
     if path == "/api/health" && method == tiny_http::Method::Get {
+        if crate::legacy_host::health().is_err() {
+            return (503, "application/json", br#"{"error":"legacy_host_binding_changed"}"#.to_vec());
+        }
+        if crate::legacy_host::is_enabled() && !crate::rpc_serve::startup_complete() {
+            return (503, "application/json", br#"{"error":"runtime_starting"}"#.to_vec());
+        }
         return (
             200,
             "application/json; charset=utf-8",
@@ -224,14 +259,18 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
                 br#"{"error":"invalid_stop_identity"}"#.to_vec(),
             );
         }
-        let expected: serde_json::Value = match serde_json::from_str(&body) {
-            Ok(expected) => expected,
-            Err(_) => {
-                return (
-                    400,
-                    "application/json; charset=utf-8",
-                    br#"{"error":"invalid_stop_identity"}"#.to_vec(),
-                )
+        let expected: serde_json::Value = if body.is_empty() && crate::legacy_host::is_enabled() {
+            // This is the explicitly launched old local-host trust boundary.
+            // Bind legacy stop to this immutable actor, never current-account
+            // discovery. Ordinary and supervisor-managed instances stay strict.
+            match crate::legacy_host::stop_identity() {
+                Ok(Some(expected)) => expected,
+                _ => return (409, "application/json", br#"{"error":"legacy_host_binding_unavailable"}"#.to_vec()),
+            }
+        } else {
+            match serde_json::from_str(&body) {
+                Ok(expected) => expected,
+                Err(_) => return (400, "application/json", br#"{"error":"invalid_stop_identity"}"#.to_vec()),
             }
         };
         let operation_id = match crate::rpc_serve::request_drain_exit(&expected) {
@@ -286,7 +325,7 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
                     .into_bytes(),
             );
         }
-        return match crate::rpc_serve::handle_http_rpc(body.as_bytes()) {
+        return match dispatch_rpc_sync(body.as_bytes()) {
             Ok(response) => (
                 200,
                 "application/json; charset=utf-8",
@@ -396,6 +435,10 @@ async fn serve_request(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
+    if crate::legacy_host::is_enabled() && (!peer.ip().is_loopback()
+        || legacy_host_headers(&parts.headers).is_err()) {
+        return response(403, "application/json", br#"{"error":"invalid local transport"}"#.to_vec());
+    }
     let method = match parts.method.as_str().parse::<tiny_http::Method>() {
         Ok(method) => method,
         Err(_) => {
@@ -452,7 +495,7 @@ async fn serve_request(
         // response ordering and all socket backpressure in its async task.
         // Admission may wait for a business gate; never block a network worker.
         match tokio::task::spawn_blocking(move || {
-            crate::rpc_serve::handle_http_rpc_deferred(&bytes, move |value| {
+            dispatch_rpc(&bytes, move |value| {
                 let _ = send.send(value);
             })
         })

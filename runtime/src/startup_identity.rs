@@ -12,6 +12,10 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static STARTUP: OnceLock<Startup> = OnceLock::new();
+static BACKGROUND_READINESS: OnceLock<()> = OnceLock::new();
+static BACKGROUND_INSTANCE: OnceLock<String> = OnceLock::new();
+static LEGACY_HOST_SESSION: OnceLock<Option<String>> = OnceLock::new();
+static LEGACY_HOST_REVOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LaunchContext {
@@ -71,6 +75,11 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
         verify_authority(None, &context)?;
         (None, uuid::Uuid::new_v4().to_string())
     };
+    if BACKGROUND_READINESS.get().is_some() {
+        anyhow::ensure!(grant.is_none() && !supervised, "local background mode cannot inherit a supervisor");
+        BACKGROUND_INSTANCE.set(instance_id.clone())
+            .map_err(|_| anyhow::anyhow!("background instance already installed"))?;
+    }
     respire_commands::rpc_serve::set_launch_instance_id(&instance_id)?;
     STARTUP
         .set(Startup { context, grant, auth_control: false, paused_control: false })
@@ -334,14 +343,21 @@ fn validate_key_result_context(original: &LaunchContext, launched_identity: &res
                 (HostAuthIdentity::Bound { account_id: before, .. }, HostAuthIdentity::Bound { account_id: after, .. })
                     if before == after), "super-reset changed its account");
         }
-        HostKeyOperation::Fivekeys { user, .. } => {
+        HostKeyOperation::Fivekeys { addr, user, .. } => {
             if result.verification_required || result.outcome == HostKeyOutcome::Committed {
                 let target = result.target_profile.as_ref().context("fivekeys target missing")?;
-                let account = hash(user.as_bytes());
-                anyhow::ensure!(result.account_id.as_ref() == Some(&account)
-                    && matches!(&result.identity, HostAuthIdentity::Bound { account_id, session_sha256 }
-                        if account_id == &account && Some(session_sha256) == result.session_sha256.as_ref()),
-                    "fivekeys target identity differs from its intent");
+                if user.is_empty() {
+                    anyhow::ensure!(addr.trim().is_empty() && result.account_id.is_none()
+                        && matches!(&result.identity, HostAuthIdentity::Unbound { operation_id, session_sha256 }
+                            if operation_id == &result.operation_id && Some(session_sha256) == result.session_sha256.as_ref()),
+                        "offline recovery identity differs from its intent");
+                } else {
+                    let account = hash(user.as_bytes());
+                    anyhow::ensure!(result.account_id.as_ref() == Some(&account)
+                        && matches!(&result.identity, HostAuthIdentity::Bound { account_id, session_sha256 }
+                            if account_id == &account && Some(session_sha256) == result.session_sha256.as_ref()),
+                        "fivekeys target identity differs from its intent");
+                }
                 expected.profile = target.clone();
             } else if result.outcome == HostKeyOutcome::RolledBack {
                 expected.profile = result.source_profile.clone();
@@ -967,6 +983,41 @@ mod tests {
     }
 
     #[test]
+    fn repeated_start_accepts_existing_generation_but_new_child_is_exact() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("background-identity-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root)?;
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(root.clone());
+        let image = root.join("runtime");
+        fs::write(&image, b"synthetic-image")?;
+        let (mut context, _) = fixture();
+        context.root = root.canonicalize()?;
+        context.profile = context.root.clone();
+        context.image_path = image.canonicalize()?;
+        let health: respire_commands::net_rpc::Health = serde_json::from_value(serde_json::json!({
+            "server":"respire", "v":respire_commands::rpc_worker::PROTOCOL_V,
+            "bin":crate::VERSION, "runtime_version":crate::VERSION,
+            "pid":123, "instance_id":"synthetic-instance", "account_id":context.account_id,
+            "generation":2, "image_sha256":context.image_sha256,
+            "exe":context.image_path, "image_path":context.image_path,
+            "installation_root":context.root, "data_dir":context.profile
+        }))?;
+        let expected = BackgroundStartContext(context);
+        assert!(expected.verify_reported_identity(&health, false).is_ok());
+        assert!(expected.verify_reported_identity(&health, true).is_err());
+        let mut initial = health.clone(); initial.generation = 1;
+        assert!(expected.verify_reported_identity(&initial, true).is_ok());
+        let mut invalid = health.clone(); invalid.generation = 0;
+        assert!(expected.verify_reported_identity(&invalid, false).is_err());
+        invalid = health.clone(); invalid.account_id = "different-account".into();
+        assert!(expected.verify_reported_identity(&invalid, false).is_err());
+        invalid = health; invalid.managed_id = Some("another-owner".into());
+        assert!(expected.verify_reported_identity(&invalid, false).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn detached_grant_accepts_only_its_exact_context() -> Result<()> {
         let (context, grant) = fixture();
         validate_grant(&grant, &context, false, &grant.nonce, 2000)?;
@@ -1223,6 +1274,23 @@ mod tests {
             }
             assert!(validate_key_result_context(&context, &launched, &foreign, &key_receipt).is_err(), "{field}");
         }
+        if let HostKeyOperation::Fivekeys { user, .. } = &mut key_receipt.operation { user.clear(); }
+        key_receipt.account_id = None;
+        key_receipt.identity = respire_protocol::HostAuthIdentity::Unbound {
+            operation_id: key_receipt.operation_id.clone(), session_sha256: "f".repeat(64) };
+        target.account_id = hash(target.profile.display().to_string().as_bytes());
+        validate_key_result_context(&context, &launched, &target, &key_receipt)?;
+        key_receipt.identity = respire_protocol::HostAuthIdentity::Absent;
+        assert!(validate_key_result_context(&context, &launched, &target, &key_receipt).is_err());
+        key_receipt.identity = respire_protocol::HostAuthIdentity::Unbound {
+            operation_id: "foreign-operation".into(), session_sha256: "f".repeat(64) };
+        assert!(validate_key_result_context(&context, &launched, &target, &key_receipt).is_err());
+        key_receipt.identity = respire_protocol::HostAuthIdentity::Unbound {
+            operation_id: key_receipt.operation_id.clone(), session_sha256: "f".repeat(64) };
+        if let HostKeyOperation::Fivekeys { addr, .. } = &mut key_receipt.operation {
+            *addr = "https://never-contact.invalid".into();
+        }
+        assert!(validate_key_result_context(&context, &launched, &target, &key_receipt).is_err());
         key_receipt.operation = HostKeyOperation::SuperReset { addr: None };
         assert!(validate_key_result_context(&context, &launched, &target, &key_receipt).is_err());
         Ok(())
@@ -1542,4 +1610,137 @@ mod tests {
         fs::remove_dir_all(&root)?;
         result
     }
+}
+
+/// The parent already has local host authority. This is an ordinary startup
+/// snapshot, not an account grant or permission for legacy HTTP requests.
+pub(crate) struct BackgroundStartContext(LaunchContext);
+
+pub(crate) fn enable_background_readiness() -> Result<()> {
+    BACKGROUND_READINESS.set(())
+        .map_err(|_| anyhow::anyhow!("background readiness was already enabled"))
+}
+
+pub(crate) fn background_start_context(port: u16) -> Result<BackgroundStartContext> {
+    respire_commands::runtime_policy::require_host("background runtime startup")?;
+    anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+        "interrupted auth control must be recovered before startup");
+    fs::create_dir_all(respire_app::service::main_data_dir())?;
+    fs::create_dir_all(respire_app::service::data_dir())?;
+    let context = current_context(port)?;
+    verify_authority(None, &context)?;
+    Ok(BackgroundStartContext(context))
+}
+
+impl BackgroundStartContext {
+    pub(crate) fn image_path(&self) -> &Path { &self.0.image_path }
+
+    pub(crate) fn verify_current(&self) -> Result<()> {
+        anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+            "authentication recovery interrupted background startup");
+        anyhow::ensure!(current_context(self.0.port)? == self.0,
+            "background startup account, generation, profile or image changed");
+        verify_authority(None, &self.0)
+    }
+
+    pub(crate) fn verify(&self, health: &respire_commands::net_rpc::Health) -> Result<()> {
+        self.verify_running(health, true)
+    }
+
+    pub(crate) fn verify_existing(&self, health: &respire_commands::net_rpc::Health) -> Result<()> {
+        self.verify_running(health, false)
+    }
+
+    fn verify_reported_identity(&self, health: &respire_commands::net_rpc::Health, newly_spawned: bool) -> Result<()> {
+        anyhow::ensure!(health.server == "respire"
+            && health.v == respire_commands::rpc_worker::PROTOCOL_V
+            && health.bin == crate::VERSION && health.runtime_version == crate::VERSION
+            && health.managed_id.is_none()
+            && health.pid > 0
+            && !health.instance_id.is_empty()
+            && health.account_id == self.0.account_id
+            && health.generation > 0
+            && (!newly_spawned || health.generation == respire_commands::rpc_worker::generation_on_wire(self.0.sync_generation))
+            && health.image_sha256 == self.0.image_sha256
+            && Path::new(&health.exe).canonicalize()? == self.0.image_path
+            && Path::new(&health.image_path).canonicalize()? == self.0.image_path
+            && Path::new(&health.installation_root).canonicalize()? == self.0.root
+            && Path::new(&health.data_dir).canonicalize()? == self.0.profile,
+            "background Runtime readiness identity does not match the requested image and context");
+        Ok(())
+    }
+
+    fn verify_running(&self, health: &respire_commands::net_rpc::Health, newly_spawned: bool) -> Result<()> {
+        self.verify_current()?;
+        // An existing actor may have advanced its own generation through a
+        // legitimate command. A new child must still match launch readiness.
+        self.verify_reported_identity(health, newly_spawned)?;
+        anyhow::ensure!(respire_commands::net_rpc::instance_is_running(health)?,
+            "background Runtime process instance is not live");
+        let actual = respire_commands::net_rpc::runtime_process_identity(health.pid)?;
+        anyhow::ensure!(Path::new(&actual.executable).canonicalize()? == self.0.image_path,
+            "background Runtime OS process image differs from readiness");
+        Ok(())
+    }
+}
+
+
+/// Opt in through the real local host startup, never by an HTTP field or an
+/// ambient account lookup. This preserves the historical loopback/Host/Origin
+/// boundary; it does not authenticate a particular Client2 process.
+pub(crate) fn install_legacy_host() -> Result<()> {
+    if BACKGROUND_READINESS.get().is_none() { return Ok(()); }
+    let startup = STARTUP.get().context("legacy host startup is absent")?;
+    anyhow::ensure!(startup.grant.is_none() && !startup.auth_control && !startup.paused_control,
+        "legacy host cannot inherit service, maintenance or strict client-only grants");
+    LEGACY_HOST_SESSION.set(read_private_file(&startup.context.profile.join("session.json"))?
+        .as_deref().map(hash))
+        .map_err(|_| anyhow::anyhow!("legacy host session snapshot was already installed"))?;
+    verify_legacy_host()?;
+    let instance_id = BACKGROUND_INSTANCE.get().context("legacy host instance is absent")?.clone();
+    respire_commands::legacy_host::install(respire_protocol::RuntimeRequestScope {
+        account_id: startup.context.account_id.clone(), instance_id,
+        generation: respire_commands::rpc_worker::generation_on_wire(startup.context.sync_generation),
+    }, hash(startup.context.root.display().to_string().as_bytes()), verify_legacy_host)
+}
+
+fn verify_legacy_host() -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if LEGACY_HOST_REVOKED.load(Ordering::Acquire) {
+        anyhow::bail!("legacy host binding was revoked; a new host startup is required");
+    }
+    let result = (|| -> Result<()> {
+        let startup = STARTUP.get().context("legacy host startup is absent")?;
+        anyhow::ensure!(BACKGROUND_READINESS.get().is_some() && BACKGROUND_INSTANCE.get().is_some()
+            && startup.grant.is_none() && !startup.auth_control && !startup.paused_control,
+            "legacy host mode changed");
+        let expected = LEGACY_HOST_SESSION.get().context("legacy host session snapshot is absent")?;
+        anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
+            "interrupted authentication requires recovery");
+        verify_authority(None, &startup.context)?;
+        // The parent verified image bytes and OS process identity at launch.
+        // Do not re-hash the entire executable on every old-client poll. The
+        // running actor remains bound to its original root/profile/session/path.
+        anyhow::ensure!(respire_app::service::main_data_dir().canonicalize()? == startup.context.root
+            && respire_app::service::data_dir().canonicalize()? == startup.context.profile
+            && std::env::current_exe()?.canonicalize()? == startup.context.image_path,
+            "legacy host profile or image path changed");
+        anyhow::ensure!(&read_private_file(&startup.context.profile.join("session.json"))?
+            .as_deref().map(hash) == expected, "legacy host session changed");
+        Ok(())
+    })();
+    if result.is_err() { LEGACY_HOST_REVOKED.store(true, Ordering::Release); }
+    result
+}
+
+/// Report configured-mode readiness over the actual parent's inherited pipe.
+pub(crate) fn publish_legacy_ready() -> Result<()> {
+    if BACKGROUND_READINESS.get().is_some() {
+        verify_legacy_host()?;
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &respire_commands::rpc_serve::health_body())?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
+    Ok(())
 }

@@ -70,15 +70,28 @@ impl KeyRequest {
 }
 
 pub(crate) fn verify_target_runtime(receipt: &HostKeyResult) -> Result<()> {
-    use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult};
+    use sha2::{Digest, Sha256};
     ensure!(receipt.verification_required && receipt.outcome == HostKeyOutcome::Pending
         && matches!(receipt.operation, HostKeyOperation::Fivekeys { .. }), "fivekeys candidate is not awaiting verification");
-    // Reuse the account verifier's live image, birth, scope and store checks;
-    // this local view is not an account admission or a public business receipt.
-    crate::auth_control::verify_target_runtime(&HostAuthAccountResult {
-        operation_id: receipt.operation_id.clone(), outcome: HostAuthAccountOutcome::AwaitingVerification,
-        source_profile: receipt.source_profile.clone(), target_profile: receipt.target_profile.clone(),
-        account_id: receipt.account_id.clone(), session_sha256: receipt.session_sha256.clone(),
-        super_password: None, login: None,
-    })
+    let target = receipt.target_profile.as_ref().context("fivekeys target missing")?;
+    let HostKeyOperation::Fivekeys { addr, user, .. } = &receipt.operation
+        else { anyhow::bail!("not a fivekeys receipt"); };
+    let account = if user.is_empty() {
+        ensure!(addr.trim().is_empty() && receipt.account_id.is_none()
+            && matches!(&receipt.identity, HostAuthIdentity::Unbound { operation_id, session_sha256 }
+                if operation_id == &receipt.operation_id && Some(session_sha256) == receipt.session_sha256.as_ref()),
+            "offline recovery identity differs from its receipt");
+        format!("{:x}", Sha256::digest(target.display().to_string().as_bytes()))
+    } else {
+        let account = format!("{:x}", Sha256::digest(user.as_bytes()));
+        ensure!(receipt.account_id.as_ref() == Some(&account)
+            && matches!(&receipt.identity, HostAuthIdentity::Bound { account_id, session_sha256 }
+                if account_id == &account && Some(session_sha256) == receipt.session_sha256.as_ref()),
+            "fivekeys account differs from its receipt");
+        account
+    };
+    let root = respire_app::service::main_data_dir().canonicalize()?;
+    login_transaction::verify_auth_identity(&root, target, &receipt.identity)?;
+    crate::auth_control::verify_ready_target_runtime(target, &account)?;
+    login_transaction::verify_auth_identity(&root, target, &receipt.identity)
 }

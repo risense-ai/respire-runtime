@@ -122,6 +122,40 @@ fn candidate_keys(record: &AuthRecord) -> Result<crate::memory::SessionKeys> {
         Some(if version == 1 { "" } else { &secret }), &record.alias)
 }
 
+pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, profile: &Path) -> Result<()> {
+    let op = record.key_operation.as_ref().context("offline recovery receipt missing")?;
+    let HostKeyOperation::Fivekeys { addr, user, kdf_salt, wrapped_urk, urk_nonce, use_super } = &op.operation
+        else { anyhow::bail!("unbound recovery is not a fivekeys operation"); };
+    ensure!(addr.trim().is_empty() && user.is_empty() && op.credential_ready
+        && op.target.as_deref() == Some(profile)
+        && record.fingerprint == fingerprint(&record.root, &record.profile, &op.source_identity, &op.operation)?,
+        "offline recovery intent or target changed");
+    if record.phase != AuthPhase::Committed {
+        let active = journal.active.as_ref().context("offline recovery owner missing")?;
+        ensure!(matches!(record.phase, AuthPhase::Prepared | AuthPhase::AwaitingVerification)
+            && active.operation_id.as_deref() == Some(record.operation_id.as_str())
+            && active.directory == profile && active.alias == record.alias && active.owns_config
+            && active.original.as_deref().map(digest) == op.target_original_sha256,
+            "offline recovery no longer owns its candidate");
+        verify_account_config(active)?;
+    }
+    let session = candidate_session(record)?;
+    let version = session["vault_version"].as_i64().context("offline recovery version missing")?;
+    let object = session.as_object().context("offline recovery session must be an object")?;
+    ensure!(session["user"] == "" && session["addr"] == ""
+        && session["auth_operation_id"].as_str() == Some(record.operation_id.as_str())
+        && session["kdf_salt"].as_str() == Some(kdf_salt.as_str())
+        && session["wrapped_urk"].as_str() == Some(wrapped_urk.as_str())
+        && session["urk_nonce"].as_str() == Some(urk_nonce.as_str())
+        && if *use_super { matches!(version, 2 | 4) } else { version == 1 },
+        "offline recovery candidate differs from the supplied kit");
+    ensure!(object.len() == (if version == 1 { 10 } else { 9 })
+        && object.keys().all(|field| matches!(field.as_str(), "user" | "addr" | "vault_version"
+            | "kdf_salt" | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "auth_operation_id")
+            || (version == 1 && field == "secret")), "offline recovery contains unexpected identity material");
+    candidate_keys(record).map(|_| ())
+}
+
 pub(super) fn verify_boot_candidate(record: &AuthRecord, active: &Recovery) -> Result<()> {
     let op = record.key_operation.as_ref().context("key boot receipt missing")?;
     ensure!(matches!(op.operation, HostKeyOperation::Fivekeys { .. }) && op.credential_ready
@@ -322,6 +356,8 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
             let session: Value = serde_json::from_slice(bytes)?;
             if let Some(user) = session["user"].as_str().filter(|user| !user.is_empty()) {
                 HostAuthIdentity::Bound { account_id: digest(user.as_bytes()), session_sha256: digest(bytes) }
+            } else if applied {
+                HostAuthIdentity::Unbound { operation_id: record.operation_id.clone(), session_sha256: digest(bytes) }
             } else { op.source_identity.clone() }
         }
     };
@@ -340,7 +376,7 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
             _ if !op.required_inputs.is_empty() => HostKeyOutcome::AwaitingInput,
             _ => HostKeyOutcome::Pending,
         }, source_profile: record.profile.clone(), target_profile: op.target.clone(),
-        account_id: session.as_ref().and_then(|session| session["user"].as_str().map(|user| digest(user.as_bytes()))),
+        account_id: session.as_ref().and_then(|session| session["user"].as_str().filter(|user| !user.is_empty()).map(|user| digest(user.as_bytes()))),
         session_sha256: if applied { record.candidate_sha256.clone() } else { None }, identity,
         required_inputs: op.required_inputs.clone(), verification_required: record.phase == AuthPhase::AwaitingVerification,
         super_password: if applied && matches!(op.operation, HostKeyOperation::SuperReset { .. }) {

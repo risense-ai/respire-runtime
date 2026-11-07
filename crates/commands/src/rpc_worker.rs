@@ -501,7 +501,8 @@ pub fn shared_exclusive() -> Arc<WriteGate> {
         .clone()
 }
 
-pub(crate) fn generation_on_wire(generation: usize) -> u64 {
+/// Shared with standalone startup checks so grant and serving generations match.
+pub fn generation_on_wire(generation: usize) -> u64 {
     generation.saturating_add(1).max(1) as u64
 }
 

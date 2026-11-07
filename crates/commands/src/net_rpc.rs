@@ -6,7 +6,7 @@
 use std::fs;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::runtime_error::RuntimeError;
@@ -771,6 +771,46 @@ pub struct RuntimeProcessIdentity {
 
 /// An endpoint PID is only a locator. Verify runtime arguments and creation time
 /// before waiting, then compare again before forcefully terminating the process.
+fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
+    let image_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.strip_suffix(" (deleted)").unwrap_or(name));
+    let standalone = image_name == Some("rsrs-runtime");
+    if standalone {
+        if args.get(1) == Some(&"--runtime-internal") {
+            return matches!(&args[2..], ["--runtime-background-internal", "--port", port]
+                if port.parse::<u16>().is_ok_and(|port| port > 0));
+        }
+        let mut args = args.iter().copied().skip(1);
+        while let Some(argument) = args.next() {
+            match argument {
+                "--json" | "--supervised" | "serve" => {}
+                "runtime" if args.next() == Some("start") => {}
+                "--host" if args.next().is_some_and(|value| !value.is_empty()) => {}
+                "--port"
+                    if args
+                        .next()
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .is_some_and(|port| port > 0) => {}
+                "--data-dir" if args.next().is_some() => {}
+                _ => return false,
+            }
+        }
+        // Bare invocation serves too; consumed option values are never modes.
+        return true;
+    }
+    if image_name != Some("rsrs") {
+        return false;
+    }
+    if args.contains(&"--runtime-internal")
+        || (args.contains(&"web") && args.contains(&"--internal"))
+    {
+        return true;
+    }
+    foreground_runtime_arguments(args)
+}
+
 fn foreground_runtime_arguments(args: &[&str]) -> bool {
     let mut args = args.iter().copied().skip(1);
     let command = loop {
@@ -780,6 +820,17 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
         }
     };
     command == Some("runtime") && args.next() == Some("run")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_arguments(command: &[u8]) -> Result<Vec<&str>> {
+    command
+        .strip_suffix(&[0])
+        .context("runtime command line is not terminated")?
+        .split(|byte| *byte == 0)
+        .map(std::str::from_utf8)
+        .collect::<std::result::Result<_, _>>()
+        .context("runtime command line is not UTF-8")
 }
 
 pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
@@ -805,14 +856,10 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     {
         let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
         let command = std::fs::read(directory.join("cmdline"))?;
-        let args: Vec<_> = command
-            .split(|byte| *byte == 0)
-            .filter_map(|arg| std::str::from_utf8(arg).ok())
-            .collect();
+        let args = linux_process_arguments(&command)?;
+        let executable = std::fs::read_link(directory.join("exe"))?;
         anyhow::ensure!(
-            args.contains(&"--runtime-internal")
-                || (args.contains(&"web") && args.contains(&"--internal"))
-                || foreground_runtime_arguments(&args),
+            runtime_role_arguments(&executable, &args),
             "process {pid} is not a runtime; restart refused"
         );
         let stat = std::fs::read_to_string(directory.join("stat"))?;
@@ -821,9 +868,7 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
             .and_then(|(_, fields)| fields.split_whitespace().nth(19))
             .context("runtime process creation time missing")?
             .to_owned();
-        let executable = std::fs::read_link(directory.join("exe"))?
-            .to_string_lossy()
-            .into_owned();
+        let executable = executable.to_string_lossy().into_owned();
         Ok(RuntimeProcessIdentity {
             started_at,
             executable,
@@ -948,6 +993,164 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn foreground_identity_accepts_standalone_serving_modes_and_option_values() {
+        for args in [
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "15169"],
+            vec!["/tmp/path with spaces/rsrs-runtime", "--json", "serve"],
+            vec!["/tmp/rsrs-runtime"],
+            vec!["/tmp/rsrs-runtime", "--json", "runtime", "start"],
+            vec!["/tmp/rsrs-runtime", "--port", "15169", "serve"],
+            vec!["/tmp/rsrs-runtime", "serve", "--data-dir", "--status"],
+            vec![
+                "/tmp/rsrs-runtime",
+                "serve",
+                "--data-dir",
+                "/tmp/profile",
+                "--supervised",
+            ],
+            vec![
+                "/tmp/rsrs-runtime",
+                "serve",
+                "--data-dir",
+                "/tmp/profile",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "15169",
+            ],
+            vec!["/tmp/rsrs", "runtime", "run"],
+            vec!["/tmp/rsrs", "--runtime-internal"],
+            vec!["/tmp/rsrs", "web", "--internal"],
+        ] {
+            assert!(
+                runtime_role_arguments(Path::new(args[0]), &args),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_identity_rejects_conflicting_or_incomplete_standalone_arguments() {
+        for args in [
+            vec!["/tmp/rsrs", "serve"],
+            vec!["/tmp/unrelated", "serve"],
+            vec!["/tmp/rsrs-runtime", "--status"],
+            vec!["/tmp/rsrs-runtime", "serve", "--status"],
+            vec!["/tmp/rsrs-runtime", "serve", "--stop"],
+            vec!["/tmp/rsrs-runtime", "serve", "--version"],
+            vec!["/tmp/rsrs-runtime", "runtime", "start", "--stop"],
+            vec!["/tmp/rsrs-runtime", "runtime", "status"],
+            vec!["/tmp/rsrs-runtime", "runtime"],
+            vec!["/tmp/rsrs-runtime", "serve", "--data-dir"],
+            vec!["/tmp/rsrs-runtime", "serve", "--host"],
+            vec!["/tmp/rsrs-runtime", "serve", "--host", ""],
+            vec!["/tmp/rsrs-runtime", "serve", "--port"],
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "0"],
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "65536"],
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "--status"],
+            vec!["/tmp/rsrs-runtime", "serve", "--direct"],
+            vec!["/tmp/rsrs-runtime", "serve", "--core-worker-internal"],
+            vec!["/tmp/rsrs-runtime", "serve", "--runtime-internal"],
+            vec!["/tmp/rsrs-runtime", "--runtime-internal"],
+            vec!["/tmp/rsrs-runtime", "web", "--internal"],
+            vec!["/tmp/rsrs-runtime", "--status", "--data-dir", "serve"],
+            vec!["/tmp/rsrs-runtime", "serve", "unknown"],
+        ] {
+            assert!(
+                !runtime_role_arguments(Path::new(args[0]), &args),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_identity_requires_the_exact_internal_launcher_shape() {
+        for image in ["/tmp/rsrs-runtime", "/tmp/rsrs-runtime (deleted)"] {
+            assert!(runtime_role_arguments(Path::new(image),
+                &["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169"]));
+        }
+        for args in [
+            vec!["rsrs-runtime", "--runtime-background-internal"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "0"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169", "--status"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--data-dir", "15169"],
+        ] {
+            assert!(!runtime_role_arguments(Path::new("/tmp/rsrs-runtime"), &args));
+        }
+        assert!(!runtime_role_arguments(Path::new("/tmp/foreign"),
+            &["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169"]));
+    }
+
+    #[test]
+    fn runtime_role_uses_the_executable_not_argv_zero() {
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/rsrs"),
+            &["rsrs-runtime", "serve"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/foreign"),
+            &["rsrs", "--runtime-internal"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime"),
+            &["rsrs", "--runtime-internal"]
+        ));
+        assert!(runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime"),
+            &["rsrs", "serve"]
+        ));
+        assert!(runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime (deleted)"),
+            &["rsrs-runtime", "serve"]
+        ));
+        assert!(runtime_role_arguments(
+            Path::new("/tmp/rsrs (deleted)"),
+            &["rsrs", "runtime", "run"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/foreign (deleted)"),
+            &["rsrs-runtime", "serve"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime (deleted) suffix"),
+            &["rsrs-runtime", "serve"]
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_arguments_preserve_empty_values_and_reject_malformed_input() -> Result<()> {
+        assert_eq!(
+            linux_process_arguments(b"rsrs-runtime\0serve\0")?,
+            ["rsrs-runtime", "serve"]
+        );
+        assert_eq!(
+            linux_process_arguments(b"rsrs-runtime\0--host\0\0")?,
+            ["rsrs-runtime", "--host", ""]
+        );
+        assert!(!runtime_role_arguments(
+            Path::new("rsrs-runtime"),
+            &linux_process_arguments(b"rsrs-runtime\0--host\0\0")?
+        ));
+        assert_eq!(
+            linux_process_arguments(b"rsrs-runtime\0serve\0--data-dir\0\0")?,
+            ["rsrs-runtime", "serve", "--data-dir", ""]
+        );
+        assert!(runtime_role_arguments(
+            Path::new("rsrs-runtime"),
+            &linux_process_arguments(b"rsrs-runtime\0serve\0--data-dir\0\0")?
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("rsrs-runtime"),
+            &linux_process_arguments(b"rsrs-runtime\0serve\0\0")?
+        ));
+        assert!(linux_process_arguments(b"").is_err());
+        assert!(linux_process_arguments(b"rsrs-runtime\0serve").is_err());
+        assert!(linux_process_arguments(b"rsrs-runtime\0\xff\0").is_err());
+        Ok(())
+    }
     fn valid_timeout_args(args: &[&str]) -> Vec<String> {
         use clap::Parser;
         crate::cli_def::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))

@@ -281,6 +281,7 @@ enum Admission {
 }
 
 static CONTROL_STATE: Mutex<&'static str> = Mutex::new("running");
+static STARTUP_COMPLETE: AtomicBool = AtomicBool::new(false);
 static STOP_OPERATION: OnceLock<String> = OnceLock::new();
 static STOP_UNFINISHED: Mutex<Vec<Admitted>> = Mutex::new(Vec::new());
 // Order: scope lock, write gate (except short control), ADMISSIONS, then ledger.
@@ -566,9 +567,9 @@ fn start_profile_switch_target(
             }
             let _identity = SCOPE_EXECUTION.read()
                 .map_err(|_| anyhow::anyhow!("scope_mismatch: identity fence poisoned"))?;
-            validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
             let gate = shared_exclusive();
             let _write = gate.acquire(true);
+            validate_job_scope(&scope).map_err(anyhow::Error::msg)?;
             check_sync_context(epoch)?;
             anyhow::ensure!(library == respire_app::service::data_dir(), "model switch library changed");
             let store = respire_app::service::open_store()?;
@@ -1040,6 +1041,10 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
 }
 
 pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
+    dispatch_inner(request, tx, false)
+}
+
+fn dispatch_inner(request: RpcRequest, tx: &Sender<Job>, legacy: bool) -> RpcResponse {
     if request.v != PROTOCOL_V {
         return error_response(
             &request,
@@ -1079,7 +1084,7 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             "model switch in progress; semantic queries and writes are paused; inspect model.progress",
         );
     }
-    let operation = if !matches!(
+    let operation = if (legacy && request.method != "runtime.result") || !matches!(
         request.method.as_str(),
         "runtime.result"
             | "runtime.status"
@@ -1089,15 +1094,15 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             | "model.catalog"
             | "model.progress"
     ) {
-        match operation_identity(&request) {
+        match operation_identity_mode(&request, legacy) {
             Ok(operation) => Some(operation),
             Err((code, error)) => return error_response(&request, &code, &error),
         }
     } else {
         None
     };
-    let _admission = if let Some(operation) = &operation {
-        Some(match admit(&request, operation) {
+    let _admission = if let Some(operation) = operation.as_ref() {
+        Some(match admit_with_retention(&request, operation, legacy) {
             Ok(Admission::New(guard)) => guard,
             Ok(Admission::Replay(response)) => return response,
             Ok(Admission::InProgress) => {
@@ -1139,6 +1144,8 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             }
         }
     } else { None };
+    #[cfg(test)]
+    tests::wait_before_direct_gate(&request.id);
     let gate = shared_exclusive();
     let _held = if operation.is_some() && !matches!(request.method.as_str(), "cli.exec" | "model.control") {
         Some(gate.acquire(true))
@@ -1162,6 +1169,11 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             };
             if let Err((code, error)) = validate_scope(request.scope.as_ref(), &current) {
                 return error_response(&request, &code, &error);
+            }
+            // Direct handlers do not pass through the queued-command boundary.
+            // Recheck the same host binding after any execution-gate wait.
+            if let Err(error) = crate::legacy_host::verify_execution(&current) {
+                return error_response(&request, "legacy_host_binding_changed", &format!("{error:#}"));
             }
         }
         match request.method.as_str() {
@@ -1395,7 +1407,8 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             let Some(scope) = request.scope.as_ref() else {
                 return error_response(&request, "scope_required", "result queries require scope");
             };
-            let storage_id = scoped_operation_key(&operation_scope(scope), id);
+            let storage_id = if legacy { legacy_operation_key(scope, id) }
+                else { scoped_operation_key(&operation_scope(scope), id) };
             let result = cached(&storage_id);
             let pending = INFLIGHT
                 .lock()
@@ -1501,6 +1514,13 @@ pub fn dispatch_deferred(
     tx: &Sender<Job>,
     action: impl FnOnce(RpcResponse) + Send + 'static,
 ) {
+    dispatch_deferred_inner(request, tx, false, action)
+}
+
+fn dispatch_deferred_inner(
+    request: RpcRequest, tx: &Sender<Job>, legacy: bool,
+    action: impl FnOnce(RpcResponse) + Send + 'static,
+) {
     if request.v != PROTOCOL_V {
         action(error_response(
             &request,
@@ -1536,17 +1556,17 @@ pub fn dispatch_deferred(
         return;
     }
     if request.method != "cli.exec" {
-        action(dispatch(request, tx));
+        action(dispatch_inner(request, tx, legacy));
         return;
     }
-    let operation = match operation_identity(&request) {
+    let operation = match operation_identity_mode(&request, legacy) {
         Ok(operation) => operation,
         Err((code, error)) => {
             action(error_response(&request, &code, &error));
             return;
         }
     };
-    let admission = match admit(&request, &operation) {
+    let admission = match admit_with_retention(&request, &operation, legacy) {
         Ok(Admission::New(guard)) => guard,
         Ok(Admission::Replay(response)) => {
             action(response);
@@ -2093,6 +2113,20 @@ pub fn handle_http_rpc(body: &[u8]) -> Result<RpcResponse> {
     Ok(dispatch(request, &tx))
 }
 
+/// Internal compatibility entry: no wire flag can change retention policy.
+pub(crate) fn handle_http_legacy(request: RpcRequest) -> Result<RpcResponse> {
+    let tx = JOB_TX.get().context("runtime worker is not running")?
+        .lock().map_err(|_| anyhow::anyhow!("runtime worker lock poisoned"))?.clone();
+    Ok(dispatch_inner(request, &tx, true))
+}
+pub(crate) fn handle_http_legacy_deferred(request: RpcRequest,
+    action: impl FnOnce(RpcResponse) + Send + 'static) -> Result<()> {
+    let tx = JOB_TX.get().context("runtime worker is not running")?
+        .lock().map_err(|_| anyhow::anyhow!("runtime worker lock poisoned"))?.clone();
+    dispatch_deferred_inner(request, &tx, true, action);
+    Ok(())
+}
+
 pub fn handle_http_rpc_deferred(
     body: &[u8],
     action: impl FnOnce(RpcResponse) + Send + 'static,
@@ -2135,6 +2169,10 @@ pub(crate) fn endpoint_identity(url: &str) -> Result<Value> {
     }))
 }
 
+pub fn startup_complete() -> bool {
+    STARTUP_COMPLETE.load(Ordering::Acquire)
+}
+
 pub fn health_body() -> Value {
     let roots = match respire_app::service::resolved_roots()
         .and_then(|roots| serde_json::to_value(roots).map_err(anyhow::Error::from))
@@ -2154,7 +2192,7 @@ pub fn health_body() -> Value {
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    json!({
+    let mut body = json!({
         "server": "respire",
         "bin": bin_version(),
         "pid": std::process::id(),
@@ -2206,7 +2244,9 @@ pub fn health_body() -> Value {
             "recent_timing_micros": timings,
             "timing_scope": "queue admission to execution start; command execution to reply consumption",
         },
-    })
+    });
+    body["startup_complete"] = json!(startup_complete());
+    body
 }
 
 fn write_stop_receipt(directory: &std::path::Path, receipt: &RuntimeStopReceipt) -> Result<()> {
@@ -2705,6 +2745,16 @@ fn dispatch_loop_inner(
     }
     kick_index();
     kick_autosync();
+    STARTUP_COMPLETE.store(true, Ordering::Release);
+    // The private legacy host frame must follow successful library/queue setup,
+    // not merely socket binding. Failure revokes the endpoint and fails closed.
+    if let Err(error) = crate::host_hooks::runtime_listener_ready() {
+        eprintln!("runtime private readiness failed: {error:#}");
+        if let Some(startup) = startup.as_ref() {
+            startup.revoke();
+        }
+        stop_process(1);
+    }
     let mut pending = VecDeque::<Job>::new();
     let mut idle_since = Instant::now();
     loop {
@@ -3105,6 +3155,23 @@ fn operation_identity(request: &RpcRequest) -> Result<OperationIdentity, (String
     operation_identity_for_scope(request, scope)
 }
 
+// Legacy result IDs remain valid across a legitimate in-process generation
+// transition, but never cross an account or process instance. Modern keys retain
+// their existing generation fencing and lifetime idempotency policy.
+fn legacy_operation_key(scope: &RuntimeRequestScope, id: &str) -> String {
+    scoped_operation_key(&format!("legacy:{}:{}:{}:{}", scope.account_id.len(),
+        scope.account_id, scope.instance_id.len(), scope.instance_id), id)
+}
+fn operation_identity_mode(request: &RpcRequest, legacy: bool)
+    -> Result<OperationIdentity, (String, String)> {
+    let mut operation = operation_identity(request)?;
+    if legacy {
+        operation.storage_id = legacy_operation_key(&operation.scope, &operation.operation_id);
+        operation.storage_key = operation.storage_id.clone();
+    }
+    Ok(operation)
+}
+
 // The writer already owns the shared gate; other executors take it before
 // this check, then retain the captured generation in their thread context.
 fn validate_job_scope(scope: &RuntimeRequestScope) -> Result<(), String> {
@@ -3114,7 +3181,8 @@ fn validate_job_scope(scope: &RuntimeRequestScope) -> Result<(), String> {
     }
     validate_business_config()?;
     validate_scope(Some(scope), &current_scope()).map_err(|(code, _)| code)?;
-    respire_app::service::ensure_runtime_profile().map_err(|error| format!("scope_mismatch: {error:#}"))
+    respire_app::service::ensure_runtime_profile().map_err(|error| format!("scope_mismatch: {error:#}"))?;
+    crate::legacy_host::verify_execution(scope).map_err(|error| format!("{error:#}"))
 }
 
 fn capture_scoped(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResult {
@@ -3240,6 +3308,11 @@ fn admit(
     request: &RpcRequest,
     operation: &OperationIdentity,
 ) -> Result<Admission, (String, String)> {
+    admit_with_retention(request, operation, false)
+}
+
+fn admit_with_retention(request: &RpcRequest, operation: &OperationIdentity,
+    legacy: bool) -> Result<Admission, (String, String)> {
     let _scope_held = SCOPE_EXECUTION.read().map_err(|_| (
         "scope_mismatch".to_owned(), "identity fence poisoned".to_owned(),
     ))?;
@@ -3248,7 +3321,32 @@ fn admit(
     let mut admitted = ADMISSIONS.lock().map_err(|_| (
         "admission_lock_poisoned".to_owned(), "runtime admission lock is poisoned".to_owned(),
     ))?;
-    admit_locked(request, operation, &request_current_scope(request)?, &mut admitted)
+    let current = request_current_scope(request)?;
+    if legacy { admit_legacy_locked(request, operation, &current, &mut admitted) }
+    else { admit_locked(request, operation, &current, &mut admitted) }
+}
+
+// Released v1 semantics: only inflight and last-64 completed results. No
+// persistence or lifetime tombstones; an unknown result never authorizes retry.
+fn admit_legacy_locked(request: &RpcRequest, operation: &OperationIdentity,
+    current: &RuntimeRequestScope, admitted: &mut Vec<Admitted>)
+    -> Result<Admission, (String, String)> {
+    validate_scope(request.scope.as_ref(), current)?;
+    validate_scope(Some(&operation.scope), current)?;
+    let mut inflight = INFLIGHT.lock().map_err(|_| (
+        "admission_lock_poisoned".into(), "inflight lock poisoned".into()))?;
+    let cache = CACHE.lock().map_err(|_| (
+        "admission_lock_poisoned".into(), "cache lock poisoned".into()))?;
+    if let Some(entry) = cache.iter().find(|entry| entry.operation_id == operation.storage_id) {
+        return Ok(Admission::Replay(entry.response.clone()));
+    }
+    if inflight.contains(&operation.storage_id) { return Ok(Admission::InProgress); }
+    if request.method != "model.control" && business_paused() {
+        return Err(("runtime_maintenance".into(), "runtime is draining".into()));
+    }
+    inflight.insert(operation.storage_id.clone());
+    admitted.push(Admitted { operation_id: operation.operation_id.clone(), kind: "rpc" });
+    Ok(Admission::New(AdmissionGuard(operation.operation_id.clone())))
 }
 
 #[cfg(test)]
@@ -3359,7 +3457,166 @@ pub fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    static DIRECT_GATE_BARRIER: std::sync::OnceLock<(String, Arc<std::sync::Barrier>)> = std::sync::OnceLock::new();
+    pub(super) fn wait_before_direct_gate(id: &str) {
+        if let Some((_, barrier)) = DIRECT_GATE_BARRIER.get().filter(|(expected, _)| expected == id) {
+            barrier.wait(); barrier.wait();
+        }
+    }
+    #[test]
+    fn legacy_v1_retention_and_generation_isolated() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for mode in ["exercise", "restart"] {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "rpc_serve::tests::legacy_v1_retention_helper", "--ignored", "--nocapture"])
+                .env("RSRS_SYNTHETIC_LEGACY_TEST", mode)
+                .env("RSRS_SYNTHETIC_LEGACY_ROOT", root.path())
+                .stdin(std::process::Stdio::null()).status()?;
+            anyhow::ensure!(status.success(), "isolated legacy v1 test failed: {mode}");
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore = "spawned separately by the legacy v1 retention test"]
+    fn legacy_v1_retention_helper() -> Result<()> {
+        static VALID: AtomicBool = AtomicBool::new(true);
+        static EFFECTS: AtomicUsize = AtomicUsize::new(0);
+        fn verify() -> Result<()> {
+            anyhow::ensure!(VALID.load(Ordering::Acquire), "synthetic account changed"); Ok(())
+        }
+        fn execute(_: Vec<String>) -> crate::output_state::Captured {
+            EFFECTS.fetch_add(1, Ordering::AcqRel);
+            crate::output_state::Captured { exit: 7, envelope: ResultEnvelope::new(
+                "synthetic", OutputStatus::Fail, json!({"synthetic":true}), Vec::new()) }
+        }
+        fn prepare(id: &str, method: &str, args: &[&str]) -> Result<(RpcRequest, crate::legacy_host::Projection)> {
+            crate::legacy_host::prepare(&serde_json::to_vec(&json!({"v":1,"id":id,
+                "method":method,"args":args,"lifecycle":null}))?)?.context("legacy mode absent")
+        }
+        let root = std::path::PathBuf::from(std::env::var_os("RSRS_SYNTHETIC_LEGACY_ROOT")
+            .context("missing synthetic root")?);
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::set_var("RSRS_M3_DIR", root.join("models"));
+        std::fs::write(root.join("client.json"), br#"{"service_mode":"off","autosync":false,"cure_auto":false}"#)?;
+        assert!(crate::host_hooks::install(crate::host_hooks::HostHooks {
+            capture_run: Some(execute), ..Default::default()
+        }));
+        let initial = current_scope();
+        crate::legacy_host::install(initial.clone(), "synthetic-installation".into(), verify)?;
+        let (jobs, queued) = std::sync::mpsc::channel();
+        if std::env::var("RSRS_SYNTHETIC_LEGACY_TEST").as_deref() == Ok("restart") {
+            let previous: Value = serde_json::from_slice(&std::fs::read(root.join("previous.json"))?)?;
+            assert_eq!(previous["account_id"], initial.account_id);
+            assert_ne!(previous["instance_id"], initial.instance_id);
+            let (query, projection) = prepare("inspect-after-restart", "runtime.result", &["before-restart"])?;
+            let response = crate::legacy_host::project(dispatch_inner(query, &jobs, true), projection);
+            assert_eq!(response.envelope.context("missing lookup")?.summary["state"], "unknown");
+            assert_eq!(EFFECTS.load(Ordering::Acquire), 0);
+            return Ok(());
+        }
+        let old_wire = serde_json::to_vec(&json!({"v":1,"id":"optional-fields","method":"cli.exec",
+            "args":["--json","status"],"queue_wait_ms":1200,"lifecycle":null}))?;
+        let (optional, _) = crate::legacy_host::prepare(&old_wire)?.context("missing old request")?;
+        assert_eq!(optional.queue_wait_ms, Some(1200));
+        assert!(crate::legacy_host::prepare(&serde_json::to_vec(&optional)?)?.is_none(),
+            "modern scoped request must keep modern retention");
+        let (request, original_projection) = prepare("same-id", "cli.exec", &["--json", "sync-reset"])?;
+        let modern_before = operation_identity_mode(&request, false).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let legacy_before = operation_identity_mode(&request, true).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let (reply, results) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let reply = reply.clone();
+            dispatch_deferred_inner(request.clone(), &jobs, true, move |response| { let _ = reply.send(response); });
+        }
+        let job = queued.recv_timeout(Duration::from_secs(5))?;
+        assert!(queued.try_recv().is_err(), "same inflight ID must queue only once");
+        assert_eq!(results.recv_timeout(Duration::from_secs(5))?.code.as_deref(), Some("request_in_progress"));
+        assert!(job.deadline.start());
+        let captured = {
+            let _scope = SCOPE_EXECUTION.write().map_err(|_| anyhow::anyhow!("scope poisoned"))?;
+            let gate = shared_exclusive(); let _held = gate.acquire(true);
+            let captured = capture_scoped_locked(&job.scope, job.args);
+            // The same production generation transition used after sync-reset.
+            advance_generation(scope_generation(&job.scope).map_err(anyhow::Error::msg)?)?;
+            captured
+        };
+        job.reply.send(captured).map_err(anyhow::Error::msg)?;
+        let original = crate::legacy_host::project(results.recv_timeout(Duration::from_secs(5))?, original_projection);
+        assert_eq!(original.exit, 7); assert!(!original.ok);
+        assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
+        assert_eq!(current_scope().generation, initial.generation + 1);
+        assert!(capture_scoped(&initial, vec!["status".into()]).is_err(),
+            "old queued generation must not execute after the transition");
+        assert!(crate::legacy_host::health().is_ok(), "legal generation change must not revoke the actor");
+        let (after, _) = prepare("same-id", "cli.exec", &["--json", "sync-reset"])?;
+        let modern_after = operation_identity_mode(&after, false).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let legacy_after = operation_identity_mode(&after, true).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_ne!(modern_before.storage_id, modern_after.storage_id);
+        assert_eq!(legacy_before.storage_id, legacy_after.storage_id);
+        let (query, projection) = prepare("inspect-same-id", "runtime.result", &["same-id"])?;
+        let found = crate::legacy_host::project(dispatch_inner(query, &jobs, true), projection);
+        let summary = found.envelope.context("missing original result")?.summary;
+        assert_eq!(summary["state"], "completed");
+        assert_eq!(summary["response"]["id"], "same-id"); assert_eq!(summary["response"]["exit"], 7);
+        let (reply, result) = std::sync::mpsc::channel();
+        dispatch_deferred_inner(after, &jobs, true, move |response| { let _ = reply.send(response); });
+        assert_eq!(result.recv_timeout(Duration::from_secs(5))?.exit, 7);
+        assert!(queued.try_recv().is_err()); assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
+        // Adapter admission/cache capacity, not full HTTP engine performance.
+        for number in 0..4_100 {
+            let (request, _) = prepare(&format!("poll-{number}"), "cli.exec", &["--json", "status"])?;
+            let operation = operation_identity_mode(&request, true).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let guard = match admit_with_retention(&request, &operation, true) {
+                Ok(Admission::New(guard)) => guard, _ => anyhow::bail!("poll incorrectly consumed a lifetime slot"),
+            };
+            remember(&operation.storage_id, &status_response(&request));
+            INFLIGHT.lock().map_err(|_| anyhow::anyhow!("inflight poisoned"))?.remove(&operation.storage_id);
+            drop(guard);
+        }
+        assert_eq!(CACHE.lock().map_err(|_| anyhow::anyhow!("cache poisoned"))?.len(), 64);
+        assert!(IDEMPOTENCY.lock().map_err(|_| anyhow::anyhow!("ledger poisoned"))?.is_empty());
+        assert!(OPERATION_KEYS.lock().map_err(|_| anyhow::anyhow!("keys poisoned"))?.is_empty());
+        let (query, projection) = prepare("inspect-expired", "runtime.result", &["same-id"])?;
+        let unknown = crate::legacy_host::project(dispatch_inner(query, &jobs, true), projection);
+        assert_eq!(unknown.envelope.context("missing expired lookup")?.summary["state"], "unknown");
+        assert_eq!(EFFECTS.load(Ordering::Acquire), 1, "queries never resubmit business");
+        let (retained, _) = prepare("before-restart", "cli.exec", &["--json", "status"])?;
+        let retained_key = operation_identity_mode(&retained, true).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        remember(&retained_key.storage_id, &status_response(&retained));
+        assert!(cached(&retained_key.storage_id).is_some());
+        std::fs::write(root.join("previous.json"), serde_json::to_vec(&initial)?)?;
+        // Modern retention still keeps a lifetime tombstone after a lost receipt.
+        let modern = operation_identity_mode(&retained, false).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let guard = match admit_with_retention(&retained, &modern, false) {
+            Ok(Admission::New(guard)) => guard, _ => anyhow::bail!("modern admission changed"),
+        };
+        INFLIGHT.lock().map_err(|_| anyhow::anyhow!("inflight poisoned"))?.remove(&modern.storage_id);
+        drop(guard);
+        assert!(matches!(admit_with_retention(&retained, &modern, false), Ok(Admission::Unknown)));
+        // A direct handler already admitted before revocation must recheck after
+        // the execution gate. Invalid payloads distinguish rejection before the
+        // real model handlers without configuring or loading any model.
+        let (configure, _) = prepare("waiting-configure", "model.configure", &["{}"])?;
+        let (control, _) = prepare("waiting-control", "model.control", &["not-an-action"])?;
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        DIRECT_GATE_BARRIER.set((configure.id.clone(), barrier.clone()))
+            .map_err(|_| anyhow::anyhow!("direct gate barrier already installed"))?;
+        let worker_jobs = jobs.clone();
+        let worker = std::thread::spawn(move || dispatch_inner(configure, &worker_jobs, true));
+        barrier.wait();
+        let gate = shared_exclusive();
+        let held = gate.acquire(true);
+        barrier.wait();
+        VALID.store(false, Ordering::Release); assert!(crate::legacy_host::health().is_err());
+        VALID.store(true, Ordering::Release);
+        drop(held);
+        let refused = worker.join().map_err(|_| anyhow::anyhow!("direct handler panicked"))?;
+        assert_eq!(refused.code.as_deref(), Some("legacy_host_binding_changed"));
+        assert_eq!(dispatch_inner(control, &jobs, true).code.as_deref(), Some("legacy_host_binding_changed"));
+        assert!(capture_scoped(&current_scope(), vec!["status".into()]).is_err());
+        assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
+        Ok(())
+    }
     fn fixture_scope(account: &str, generation: u64) -> RuntimeRequestScope {
         RuntimeRequestScope {
             account_id: account.to_owned(),

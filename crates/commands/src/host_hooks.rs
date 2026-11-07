@@ -58,6 +58,7 @@ pub type RuntimeIsUp = fn() -> bool;
 pub type ChangeProfile = fn(Box<dyn FnOnce() -> anyhow::Result<()> + Send>) -> anyhow::Result<()>;
 pub type ManagedId = fn() -> Option<&'static str>;
 pub type VerifyManagedBoot = fn() -> Result<()>;
+pub type RuntimeListenerReady = fn() -> Result<()>;
 pub type RecordExit = fn(bool);
 pub type CredentialState = fn() -> &'static str;
 pub type CaptureRun = fn(Vec<String>) -> crate::output_state::Captured;
@@ -82,6 +83,7 @@ pub struct HostHooks {
     pub change_profile: Option<ChangeProfile>,
     pub managed_id: Option<ManagedId>,
     pub verify_managed_boot: Option<VerifyManagedBoot>,
+    pub runtime_listener_ready: Option<RuntimeListenerReady>,
     pub record_exit: Option<RecordExit>,
     pub credential_state: Option<CredentialState>,
     pub capture_run: Option<CaptureRun>,
@@ -105,6 +107,7 @@ static RUNTIME_IS_UP: OnceLock<RuntimeIsUp> = OnceLock::new();
 static CHANGE_PROFILE: OnceLock<ChangeProfile> = OnceLock::new();
 static MANAGED_ID: OnceLock<ManagedId> = OnceLock::new();
 static VERIFY_MANAGED_BOOT: OnceLock<VerifyManagedBoot> = OnceLock::new();
+static RUNTIME_LISTENER_READY: OnceLock<RuntimeListenerReady> = OnceLock::new();
 static RECORD_EXIT: OnceLock<RecordExit> = OnceLock::new();
 static CREDENTIAL_STATE: OnceLock<CredentialState> = OnceLock::new();
 static CAPTURE_RUN: OnceLock<CaptureRun> = OnceLock::new();
@@ -131,6 +134,7 @@ pub fn install(hooks: HostHooks) -> bool {
         change_profile,
         managed_id,
         verify_managed_boot,
+        runtime_listener_ready,
         record_exit,
         credential_state,
         capture_run,
@@ -154,6 +158,7 @@ pub fn install(hooks: HostHooks) -> bool {
         change_profile.map(|hook| CHANGE_PROFILE.set(hook).is_ok()),
         managed_id.map(|hook| MANAGED_ID.set(hook).is_ok()),
         verify_managed_boot.map(|hook| VERIFY_MANAGED_BOOT.set(hook).is_ok()),
+        runtime_listener_ready.map(|hook| RUNTIME_LISTENER_READY.set(hook).is_ok()),
         record_exit.map(|hook| RECORD_EXIT.set(hook).is_ok()),
         credential_state.map(|hook| CREDENTIAL_STATE.set(hook).is_ok()),
         capture_run.map(|hook| CAPTURE_RUN.set(hook).is_ok()),
@@ -306,6 +311,15 @@ pub fn managed_id() -> Option<&'static str> {
 /// Prove this startup is authorized by the host's managed coordinator.
 pub fn verify_managed_boot() -> Result<()> {
     match VERIFY_MANAGED_BOOT.get() {
+        Some(hook) => hook(),
+        None => Ok(()),
+    }
+}
+
+/// Only the owning host may receive a private readiness frame. Ordinary hosts
+/// without this optional hook keep their existing readiness behavior.
+pub fn runtime_listener_ready() -> Result<()> {
+    match RUNTIME_LISTENER_READY.get() {
         Some(hook) => hook(),
         None => Ok(()),
     }

@@ -121,6 +121,50 @@ jobs:
           set -euo pipefail
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-core-sdk.mjs "$target"
+      - name: Prepare official pinned standalone Runtime for lifecycle tests
+        id: official-runtime-fixture
+        shell: bash
+        env:
+          EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: 9338a6654cf395525668dd9faaea3f401abe2d5a
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          cargo build --locked -p respire_host_frontend --example host-fixture-cli
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
+          const cli = resolve('target/debug/examples/host-fixture-cli');
+          const env = {...process.env, RSRS_DATA_DIR: root};
+          // Keep the test environment intact; only the official installer may download.
+          delete env.RSRS_CORE_TEST_MODE;
+          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('host-frontend/runtime-pin.json', 'utf8'));
+          const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime');
+          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          assert.equal(selected.version, pin.required);
+          assert.ok(selected.release?.metadata_json, 'Official Runtime receipt is required');
+          assert.equal(hash(selected.release.metadata_json), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.schema_version, 2);
+          assert.equal(metadata.runtime_version, pin.required);
+          assert.match(process.env.EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA, /^[a-f0-9]{40}$/);
+          assert.equal(metadata.source_commit, process.env.EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA);
+          assert.equal(metadata.binary_sha256, selected.sha256);
+          assert.equal(hash(readFileSync(runtime)), selected.sha256);
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `root=${root}\n`);
+          NODE
       - name: Run the workspace source tests
         id: source-tests
         env:
