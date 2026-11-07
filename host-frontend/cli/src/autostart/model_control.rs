@@ -49,6 +49,15 @@ fn account(profile: &Path) -> Result<Option<String>> {
         .map(|user| super::hash(user.as_bytes())))
 }
 
+// Runtime scopes always have an identity; an absent session uses the canonical
+// profile path, while the optional account binding remains absent in the grant.
+pub(super) fn owner_scope_id(profile: &Path, account_id: Option<&str>) -> Result<String> {
+    match account_id {
+        Some(account_id) => Ok(account_id.to_owned()),
+        None => Ok(super::hash(profile.canonicalize()?.display().to_string().as_bytes())),
+    }
+}
+
 /// Host entry point. Only a previously serving owner is restarted on success.
 pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(AssetsStatus, bool)> {
     crate::runtime_policy::require_host("model preparation")?;
@@ -137,8 +146,9 @@ pub(super) fn verify_model_owner(
     let birth = crate::autostart::process_birth(health.pid)?.context("model owner exited during verification")?;
     let prefix = if cfg!(windows) { "windows-filetime-" }
         else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
+    let expected_scope = owner_scope_id(profile, expected_account)?;
     anyhow::ensure!(health.managed_id.as_deref() == managed.map(|config| config.id.as_str())
-        && Some(health.account_id.as_str()) == expected_account
+        && health.account_id == expected_scope
         && Path::new(&health.installation_root).canonicalize()? == root
         && health.installation_id == super::hash(root.display().to_string().as_bytes())
         && Path::new(&health.data_dir).canonicalize()? == profile
@@ -474,4 +484,43 @@ fn validate_plan_response(
         );
     }
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod owner_scope_tests {
+    use super::*;
+
+    #[test]
+    fn absent_account_uses_the_canonical_profile_scope() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let profile = root.path().join("profile");
+        let other = root.path().join("other");
+        std::fs::create_dir(&profile)?;
+        std::fs::create_dir(&other)?;
+        let canonical = profile.canonicalize()?;
+        let expected = super::super::hash(canonical.display().to_string().as_bytes());
+        assert_eq!(account(&profile)?, None);
+        assert_eq!(owner_scope_id(&profile, None)?, expected);
+        assert_eq!(owner_scope_id(&profile.join("..").join("profile"), None)?, expected);
+        assert_ne!(owner_scope_id(&other, None)?, expected);
+        let bound = "a".repeat(64);
+        assert_eq!(owner_scope_id(&profile, Some(&bound))?, bound);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_existing_session_does_not_become_anonymous() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let session = root.path().join("session.json");
+        for bytes in [b"not-json".as_slice(), br#"{}"#, br#"{"user":""}"#] {
+            std::fs::write(&session, bytes)?;
+            assert!(account(root.path()).is_err());
+            assert_eq!(std::fs::read(&session)?, bytes);
+        }
+        std::fs::write(&session, br#"{"user":"synthetic-owner"}"#)?;
+        let bound = account(root.path())?.context("bound test account missing")?;
+        assert_eq!(bound, super::super::hash(b"synthetic-owner"));
+        assert_eq!(owner_scope_id(root.path(), Some(&bound))?, bound);
+        Ok(())
+    }
 }

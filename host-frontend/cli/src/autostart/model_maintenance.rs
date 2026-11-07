@@ -69,11 +69,12 @@ fn verify_owner(
     } else {
         "darwin-lstart-"
     };
+    let expected_scope = super::model_control::owner_scope_id(profile, expected_account)?;
     // Unlike normal preparation, reset must accept a correctly identified owner
     // whose inference is stalled. Identity and installation checks are unchanged.
     anyhow::ensure!(
         health.managed_id.as_deref() == managed.map(|config| config.id.as_str())
-            && Some(health.account_id.as_str()) == expected_account
+            && health.account_id == expected_scope
             && Path::new(&health.installation_root).canonicalize()? == root
             && Path::new(&health.data_dir).canonicalize()? == profile
             && health.installation_id == hash(root.display().to_string().as_bytes())
