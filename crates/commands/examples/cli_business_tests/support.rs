@@ -108,5 +108,11 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
     }
     anyhow::ensure!(std::fs::symlink_metadata(&receipt)?.is_file(), "Runtime fixture receipt missing");
     std::fs::copy(receipt, root.join("runtime.json"))?;
+    if std::env::var("RSRS_TEST_EXPECT_CLIENT2_HOST").as_deref() == Ok("1") {
+        let cli = cli_bin()?;
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin)?;
+        std::fs::copy(cli, bin.join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
+    }
     Ok(())
 }

@@ -30,17 +30,28 @@ fn runtime_health(port: u16, stage: &str) -> Result<serde_json::Value, Box<dyn s
     if std::env::var("RSRS_TEST_EXPECT_CLIENT2_HOST").as_deref() == Ok("1") {
         let legacy: serde_json::Value = ureq::get(&url)
             .timeout(Duration::from_secs(5)).call()?.into_json()?;
-        let expected = support::cli_bin()?.canonicalize()?;
-        let valid = legacy["compatibility_host"] == "client2-v0256"
+        use sha2::{Digest, Sha256};
+        let root = health["installation_root"].as_str().ok_or("Runtime installation root missing")?;
+        let expected = std::path::Path::new(root).join("bin")
+            .join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }).canonicalize()?;
+        let same_cli = Sha256::digest(std::fs::read(&expected)?)
+            == Sha256::digest(std::fs::read(support::cli_bin()?)?);
+        let pid = u32::try_from(legacy["pid"].as_u64().ok_or("legacy host PID missing")?)?;
+        let actual_image: std::path::PathBuf = {
+            #[cfg(target_os = "linux")]
+            { std::fs::read_link(format!("/proc/{pid}/exe"))?.canonicalize()? }
+            #[cfg(not(target_os = "linux"))]
+            { return Err("this opt-in account host fixture requires native Linux".into()); }
+        };
+        let live = respire_commands::net_rpc::process_is_running(pid)?;
+        let valid = same_cli && live && actual_image == expected
+            && legacy["compatibility_host"] == "client2-v0256"
             && legacy["backend_instance_id"] == health["instance_id"]
             && legacy["pid"] != health["pid"]
             && legacy["data_dir"] == health["data_dir"]
             && legacy["installation_root"] == health["installation_root"]
             && legacy["exe"].as_str().is_some_and(|path| std::path::Path::new(path)
-                .canonicalize().is_ok_and(|path| path == expected))
-            && legacy["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
-                .is_some_and(|pid| respire_spawn::process_birth(pid)
-                    .is_ok_and(|birth| birth.is_some()));
+                .canonicalize().is_ok_and(|path| path == expected));
         eprintln!("client2-account-host {}", serde_json::json!({"stage":stage, "passed":valid}));
         if !valid {
             return Err("legacy Client2 host identity was not preserved across profile maintenance".into());
