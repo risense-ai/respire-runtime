@@ -64,6 +64,8 @@ jobs:
           node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
       - name: Build actual candidate
         run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Verify native diagnostics stay outside worker IPC
+        run: cargo test --locked -p respire_core_sdk --lib core_wire_tests::worker_stdout_keeps_protocol_private -- --exact
       - name: Download and authenticate the published old CLI
         env:
           GH_TOKEN: ${{ github.token }}

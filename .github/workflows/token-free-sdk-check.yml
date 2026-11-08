@@ -11,6 +11,7 @@ on:
       source_sha: {required: true, type: string}
       target: {required: true, type: string}
       cache_key: {required: true, type: string}
+      archive_cache_key: {required: true, type: string}
       runner_os: {required: true, type: string}
     # Deliberately no secret declarations or inheritance.
 permissions:
@@ -80,6 +81,23 @@ jobs:
         env:
           SDK_TARGET: ${{ inputs.target }}
         run: node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
+      - uses: actions/cache/restore@v4
+        id: sdk-archive-restore
+        with:
+          path: .sdk-archives/${{ inputs.target }}
+          key: ${{ inputs.archive_cache_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Observe actual compressed SDK bytes without private credentials
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+          EXPECTED_KEY: ${{ inputs.archive_cache_key }}
+          MATCHED_KEY: ${{ steps.sdk-archive-restore.outputs.cache-matched-key }}
+        run: |
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          node scripts/sdk-ci-cache.mjs observe "$SDK_TARGET"
       - name: Build the runtime binary with the pinned SDK
         if: ${{ !contains(inputs.target, '-musl') }}
         shell: bash

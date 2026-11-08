@@ -1,9 +1,12 @@
 import {createHash} from 'node:crypto';
-import {existsSync,lstatSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
+import {existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {gunzipSync} from 'node:zlib';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {prepareSdk} from '../crates/core-sdk/prepare-sdk.mjs';
+import {inspectArchive,prepareSdk} from '../crates/core-sdk/prepare-sdk.mjs';
+import {downloadPrivateSdk} from '../crates/core-sdk/private-sdk-download.mjs';
 
 export const TARGETS=['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch64-apple-darwin','x86_64-apple-darwin','x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-musl'];
 const required=(ok,message)=>{if(!ok)throw Error(message);};
@@ -16,11 +19,36 @@ export function canonicalEntry(target,input){
  return {sdk_version:v,private_repository:'risense-ai/respire-core',release_tag:`sdk-v${v}`,url:base+'.manifest.json',archive_url:base+'.tar.gz',manifest_sha256:input.manifest_sha256,archive_sha256:input.archive_sha256,redistribution:'approved'};
 }
 export function cacheKey(target,entry){return `core-sdk-native-v1-${target}-${createHash('sha256').update(JSON.stringify(canonicalEntry(target,entry))).digest('hex')}`;}
+export function archiveCacheKey(target,entry){return `core-sdk-archive-v1-${target}-${createHash('sha256').update(JSON.stringify(canonicalEntry(target,entry))).digest('hex')}`;}
+
+// Observe the compressed bytes and their embedded manifest, never a lock-only claim.
+export function observeSdkArchive(archive,target,input){
+ const entry=canonicalEntry(target,input),hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+ required(Buffer.isBuffer(archive)&&archive.length>0&&archive.length<=128*1024*1024,'SDK archive must be bounded actual bytes');
+ const archiveHash=hash(archive);required(archiveHash===entry.archive_sha256,'Observed SDK archive hash mismatch');
+ inspectArchive(archive);
+ const bytes=gunzipSync(archive),text=data=>data.toString('utf8').split('\0')[0];
+ let manifestBytes=null;
+ for(let offset=0;offset+512<=bytes.length;){
+  const header=bytes.subarray(offset,offset+512);if(header.every(byte=>byte===0))break;
+  const size=Number.parseInt(text(header.subarray(124,136)).trim(),8);
+  const name=[text(header.subarray(345,500)),text(header.subarray(0,100))].filter(Boolean).join('/').replace(/^\.\//,'');
+  if(name==='manifest.json'){
+   required(header[156]!==53&&manifestBytes===null&&size<=1024*1024,'SDK manifest must be one bounded ordinary file');
+   manifestBytes=bytes.subarray(offset+512,offset+512+size);
+  }
+  offset+=512+Math.ceil(size/512)*512;
+ }
+ required(manifestBytes!==null,'SDK archive has no manifest');
+ const manifestHash=hash(manifestBytes),manifest=JSON.parse(manifestBytes);
+ required(manifestHash===entry.manifest_sha256&&manifest.target===target&&manifest.sdk_version===entry.sdk_version,'Observed SDK manifest identity mismatch');
+ return {version:manifest.sdk_version,manifest_sha256:manifestHash,archive_sha256:archiveHash};
+}
 export function planCaches(lock,crateLock){
  required(lock.schema_version===1&&crateLock.schema_version===1&&lock.targets&&crateLock.targets,'Invalid SDK lock schema');
  const targets=TARGETS.filter(t=>Object.hasOwn(lock.targets,t));
  required(targets.length===TARGETS.length&&Object.keys(lock.targets).length===targets.length&&Object.keys(crateLock.targets).length===targets.length&&targets.every(t=>Object.hasOwn(crateLock.targets,t)),'Require exact current SDK locks for all eight release targets');
- const include=targets.map(target=>{const entry=canonicalEntry(target,lock.targets[target]);required(JSON.stringify(entry)===JSON.stringify(canonicalEntry(target,crateLock.targets[target])),'SDK lock copies differ');return {target,entry,key:cacheKey(target,entry)};});
+ const include=targets.map(target=>{const entry=canonicalEntry(target,lock.targets[target]);required(JSON.stringify(entry)===JSON.stringify(canonicalEntry(target,crateLock.targets[target])),'SDK lock copies differ');return {target,entry,key:cacheKey(target,entry),archive_key:archiveCacheKey(target,entry)};});
  required(new Set(include.map(x=>x.entry.sdk_version)).size===1,'Mixed private SDK versions');return {include};
 }
 export function auditSdkDirectory(directory,target,entry){
@@ -34,13 +62,31 @@ function readLock(path){required(lstatSync(path).isFile()&&lstatSync(path).size<
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
  const [command,...args]=process.argv.slice(2);
  if(command==='plan'){console.log(JSON.stringify(planCaches(readLock(args[0]),readLock(args[1]))));}
- else if(command==='key'){const target=args[0],lock=readLock('sdk/core-sdk.lock.json'),entry=lock.targets[target];required(entry,'Unknown target');console.log(entry.private_repository?cacheKey(target,entry):'');}
+ else if(command==='key'||command==='archive-key'){const target=args[0],lock=readLock('sdk/core-sdk.lock.json'),entry=lock.targets[target];required(entry,'Unknown target');console.log(entry.private_repository?(command==='key'?cacheKey(target,entry):archiveCacheKey(target,entry)):'');}
+ else if(command==='observe'){
+  const target=args[0],entry=readLock('sdk/core-sdk.lock.json').targets[target],path=resolve('.sdk-archives',target,'sdk.tar.gz');
+  required(lstatSync(path).isFile()&&!lstatSync(path).isSymbolicLink()&&lstatSync(path).size<=128*1024*1024,'Observed SDK archive must be a bounded ordinary file');
+  auditSdkDirectory(resolve('.sdk',target),target,canonicalEntry(target,entry));
+  console.log(JSON.stringify(observeSdkArchive(readFileSync(path),target,entry)));
+ }
  else if(command==='prepare'){
   const [target,json]=args,entry=canonicalEntry(target,JSON.parse(json));
   required(process.env.GITHUB_REPOSITORY==='risense-ai/respire-runtime'&&process.env.GITHUB_REF==='refs/heads/main'&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch','SDK cache producer is trusted main manual only');
   for(const name of ['RSRS_CORE_SDK_DIR','ONEMEMORY_CORE_SDK_DIR','RESPIRE_CORE_SDK_DIR'])delete process.env[name];
   const temp=mkdtempSync(join(tmpdir(),'sdk-cache-lock-')),path=join(temp,'lock.json'),directory=resolve('.sdk',target);
   required(!existsSync(directory),'Credential-bearing producer requires a fresh SDK directory; cache restore/reuse is forbidden');
-  try{writeFileSync(path,JSON.stringify({schema_version:1,targets:{[target]:entry}}));await prepareSdk(target,directory,path);auditSdkDirectory(directory,target,entry);}finally{rmSync(temp,{recursive:true});}
- }else throw Error('Usage: sdk-ci-cache.mjs plan <lock> <crate-lock> | key <target> | prepare <target> <entry-json>');
+  const archiveDirectory=resolve('.sdk-archives',target);
+  required(!existsSync(archiveDirectory),'Credential-bearing producer requires a fresh SDK archive directory');
+  try{
+   writeFileSync(path,JSON.stringify({schema_version:1,targets:{[target]:entry}}));
+   const archive=await downloadPrivateSdk(entry,target,'archive');
+   observeSdkArchive(archive,target,entry);
+   mkdirSync(archiveDirectory,{recursive:true});writeFileSync(join(archiveDirectory,'sdk.tar.gz'),archive,{flag:'wx'});
+   mkdirSync(directory,{recursive:true});
+   const extraction=spawnSync('tar',['-xzf','sdk.tar.gz','-C',directory],{cwd:archiveDirectory,encoding:'utf8'});
+   if(extraction.error)throw extraction.error;
+   required(extraction.status===0,'SDK archive extraction failed');
+   await prepareSdk(target,directory,path);auditSdkDirectory(directory,target,entry);
+  }finally{rmSync(temp,{recursive:true});}
+ }else throw Error('Usage: sdk-ci-cache.mjs plan <lock> <crate-lock> | key <target> | archive-key <target> | observe <target> | prepare <target> <entry-json>');
 }
