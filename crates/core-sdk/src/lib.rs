@@ -338,12 +338,7 @@ mod core_wire_tests {
         const CHILD: &str = "RSRS_TEST_WORKER_STDOUT_CHILD";
         if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("1")) {
             let mut protocol = super::ffi::worker_stdout()?;
-            extern "C" {
-                fn puts(text: *const std::ffi::c_char) -> std::ffi::c_int;
-                fn fflush(stream: *mut std::ffi::c_void) -> std::ffi::c_int;
-            }
-            anyhow::ensure!(unsafe { puts(c"worker-native-diagnostic".as_ptr()) } >= 0);
-            anyhow::ensure!(unsafe { fflush(std::ptr::null_mut()) } == 0);
+            super::ffi::worker_stdout_test_diagnostic()?;
             std::io::stdout().write_all(b"worker-rust-diagnostic\n")?;
             std::io::stdout().flush()?;
             protocol.write_all(b"worker-protocol-private\n")?;
@@ -631,6 +626,17 @@ mod ffi {
             }
             Ok(std::fs::File::from(protocol))
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn worker_stdout_test_diagnostic() -> Result<()> {
+        extern "C" {
+            fn puts(text: *const std::ffi::c_char) -> std::ffi::c_int;
+            fn fflush(stream: *mut std::ffi::c_void) -> std::ffi::c_int;
+        }
+        anyhow::ensure!(unsafe { puts(c"worker-native-diagnostic".as_ptr()) } >= 0);
+        anyhow::ensure!(unsafe { fflush(std::ptr::null_mut()) } == 0);
+        Ok(())
     }
 
     pub(super) fn abi_version() -> u32 {
