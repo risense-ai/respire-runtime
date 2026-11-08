@@ -36,6 +36,12 @@ jobs:
           ref: 57bc070826949994c3f7ce9a64277160704bdfe5
           path: .client2-source
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-magpie
+          ref: a3ae9b3035d02b181ba7a8ddae251495d092dd63
+          path: .magpie-source
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.0'
@@ -94,7 +100,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-cli
-          ref: bf3cc6be91935a34877b86397529520eb7e25944
+          ref: 3ea88b26749022d596cc8edfbd65b05be1732745
           path: .cli-source
           persist-credentials: false
       - name: Build the fixed CLI compatibility consumer
@@ -142,7 +148,9 @@ jobs:
             --cli .cli-source/target/debug/rsrs \
             --runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
             --runtime-version "$version" --client2-source .client2-source \
-            --go "$(command -v go)" --report "$RUNNER_TEMP/joint-candidate-regression.json"
+            --go "$(command -v go)" \
+            --magpie-source .magpie-source --node "$(command -v node)" \
+            --report "$RUNNER_TEMP/joint-candidate-regression.json"
       - name: Preserve joint candidate results (not G1 evidence)
         if: always()
         uses: actions/upload-artifact@v4
