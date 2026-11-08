@@ -284,6 +284,9 @@ static CONTROL_STATE: Mutex<&'static str> = Mutex::new("running");
 static STARTUP_COMPLETE: AtomicBool = AtomicBool::new(false);
 static STOP_OPERATION: OnceLock<String> = OnceLock::new();
 static STOP_UNFINISHED: Mutex<Vec<Admitted>> = Mutex::new(Vec::new());
+const FORCE_DRAIN_GRACE: Duration = Duration::from_secs(4);
+static STOP_FORCE_REQUESTED: Mutex<Option<Instant>> = Mutex::new(None);
+static STOP_FORCE_TRIGGERED: AtomicBool = AtomicBool::new(false);
 // Order: scope lock, write gate (except short control), ADMISSIONS, then ledger.
 // Stop takes scope + ADMISSIONS; generation advances take ADMISSIONS without upgrading scope.
 static SCOPE_EXECUTION: std::sync::RwLock<()> = std::sync::RwLock::new(());
@@ -1984,7 +1987,7 @@ pub fn control_state() -> &'static str {
 fn health_state() -> &'static str {
     match control_state() {
         "maintenance_requested" | "draining" => "draining",
-        "resources_closing" | "compatibility_timeout" => "stopping",
+        "resources_closing" | "forced_timeout" | "compatibility_timeout" => "stopping",
         "drained" => "stopped",
         "running" => "ready",
         other => other,
@@ -2026,15 +2029,66 @@ fn stop_operation_status(request_id: &str, operation_id: &str) -> Value {
 }
 
 fn drain_busy() -> bool {
+    drain_background_busy()
+        || ADMISSIONS
+            .lock()
+            .map_or(true, |items| items.iter().any(|item| item.kind != "stop"))
+}
+
+fn drain_background_busy() -> bool {
     RUNNING.load(Ordering::Acquire) != 0
         || WRITE_RUNNING.load(Ordering::Acquire)
         || CLASSIFY_RUNNING.load(Ordering::Acquire)
         || sync_running()
         || index_has_work()
         || PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
-        || ADMISSIONS
-            .lock()
-            .map_or(true, |items| items.iter().any(|item| item.kind != "stop"))
+}
+
+fn validate_stop_force(expected: &Value, accepted: Option<&str>) -> Result<bool> {
+    match expected.get("force") {
+        None | Some(Value::Bool(false)) => Ok(false),
+        Some(Value::Bool(true)) => {
+            anyhow::ensure!(
+                accepted.is_some_and(|id| expected["operation_id"].as_str() == Some(id)),
+                "stop_operation_mismatch"
+            );
+            Ok(true)
+        }
+        Some(_) => bail!("invalid_stop_force"),
+    }
+}
+
+fn force_stop_after_grace() {
+    std::thread::sleep(FORCE_DRAIN_GRACE);
+    let background_busy = drain_background_busy();
+    {
+        let admitted = ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner());
+        if control_state() != "draining"
+            || (!background_busy && !admitted.iter().any(|item| item.kind != "stop"))
+        {
+            return;
+        }
+        // An admitted operation may already have committed. Retirement never proves abortion.
+        mark_stop_unfinished(
+            admitted.iter().filter(|item| item.kind != "stop").cloned().collect(),
+        );
+        STOP_FORCE_TRIGGERED.store(true, Ordering::Release);
+        set_control_state("forced_timeout");
+    }
+    // Reap the owned native child to unblock callers, then retain the ordinary host joins/flush.
+    if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+        eprintln!("explicit forced stop could not confirm Core worker cleanup: {error:#}");
+    }
+    wake_dispatcher();
+    SYNC_CV.notify_all();
+    INDEX_CV.notify_all();
+}
+
+pub fn stop_force_deadline_ms() -> Option<u64> {
+    STOP_FORCE_REQUESTED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .map(|started| FORCE_DRAIN_GRACE.saturating_sub(started.elapsed()).as_millis() as u64)
 }
 
 pub(crate) fn advance_generation(generation: usize) -> Result<()> {
@@ -2071,6 +2125,19 @@ pub fn request_drain_exit(expected: &Value) -> Result<&'static str> {
             &account_identity(),
             crate::rpc_worker::wire_generation(),
         )?;
+        let force = validate_stop_force(expected, STOP_OPERATION.get().map(String::as_str))?;
+        if force {
+            let mut requested = STOP_FORCE_REQUESTED
+                .lock()
+                .map_err(|_| anyhow::anyhow!("force stop state poisoned"))?;
+            if requested.is_none() {
+                let _controller = std::thread::Builder::new()
+                    .name("runtime-force-stop".to_owned())
+                    .spawn(force_stop_after_grace)
+                    .context("start explicit force stop controller")?;
+                *requested = Some(Instant::now());
+            }
+        }
         operation_id = STOP_OPERATION.get_or_init(|| uuid::Uuid::new_v4().to_string());
         if STOPPING.swap(true, Ordering::AcqRel) {
             return Ok(operation_id.as_str());
@@ -2312,12 +2379,24 @@ fn final_stop_receipt(operation_id: &str, success: bool) -> RuntimeStopReceipt {
         runtime_version: runtime_identity().runtime_version,
         account_id: account_identity(),
         generation: crate::rpc_worker::wire_generation(),
-        state: if success && unfinished.is_empty() {
-            RuntimeStopOutcome::Drained
-        } else {
-            RuntimeStopOutcome::Failed
-        },
+        state: stop_outcome(
+            success,
+            STOP_FORCE_TRIGGERED.load(Ordering::Acquire),
+            unfinished.is_empty(),
+        ),
         unfinished,
+    }
+}
+
+fn stop_outcome(clean: bool, forced: bool, unfinished_empty: bool) -> RuntimeStopOutcome {
+    if !clean {
+        RuntimeStopOutcome::Failed
+    } else if forced {
+        RuntimeStopOutcome::ForcedTimeout
+    } else if unfinished_empty {
+        RuntimeStopOutcome::Drained
+    } else {
+        RuntimeStopOutcome::Failed
     }
 }
 
@@ -2347,6 +2426,9 @@ fn stop_process(code: i32) -> ! {
             let written = std::fs::create_dir_all(&directory)
                 .map_err(anyhow::Error::from)
                 .and_then(|_| write_stop_receipt(&directory, &receipt));
+            if receipt.state == RuntimeStopOutcome::ForcedTimeout {
+                exit_code = 1;
+            }
             if let Err(error) = written {
                 eprintln!("runtime failed to persist its final stop receipt: {error:#}");
                 exit_code = 1;
@@ -3016,7 +3098,10 @@ fn dispatch_loop_inner(
         }
         drain_busy()
     });
-    set_control_state("resources_closing");
+    {
+        let _admitted = ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner());
+        set_control_state("resources_closing");
+    }
     STORE_READY.store(false, Ordering::Release);
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
         eprintln!("Core worker shutdown failed: {error:#}");
@@ -3026,8 +3111,16 @@ fn dispatch_loop_inner(
     }
     drop(_store);
     drop(_lock);
-    mark_stop_unfinished(Vec::new());
-    set_control_state(if clean { "drained" } else { "failed" });
+    if !STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
+        mark_stop_unfinished(Vec::new());
+    }
+    set_control_state(if !clean {
+        "failed"
+    } else if STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
+        "forced_timeout"
+    } else {
+        "drained"
+    });
     stop_process(if clean { 0 } else { 1 });
 }
 
@@ -4061,6 +4154,25 @@ mod tests {
         };
         let expected = json!({"installation_id":"installation-1", "instance_id":"instance-1", "account_id":"account-1", "generation":7});
         validate_stop_target(&expected, &process, "account-1", 7)?;
+        assert!(!validate_stop_force(&expected, None)?);
+        let mut force = expected.clone();
+        force["force"] = json!(false);
+        force["operation_id"] = json!("unrelated-old-field");
+        assert!(!validate_stop_force(&force, None)?);
+        force["force"] = json!(true);
+        assert!(validate_stop_force(&force, None).is_err());
+        assert!(validate_stop_force(&force, Some("accepted-stop")).is_err());
+        force["operation_id"] = json!("accepted-stop");
+        assert!(validate_stop_force(&force, Some("accepted-stop"))?);
+        for invalid in [Value::Null, json!(1), json!("true"), json!({})] {
+            force["force"] = invalid;
+            assert!(validate_stop_force(&force, Some("accepted-stop")).is_err());
+        }
+        assert_eq!(stop_outcome(true, false, true), RuntimeStopOutcome::Drained);
+        assert_eq!(stop_outcome(true, false, false), RuntimeStopOutcome::Failed);
+        assert_eq!(stop_outcome(true, true, false), RuntimeStopOutcome::ForcedTimeout);
+        assert_eq!(stop_outcome(false, true, false), RuntimeStopOutcome::Failed);
+        assert_eq!(FORCE_DRAIN_GRACE, Duration::from_secs(4));
         for key in ["installation_id", "instance_id", "account_id", "generation"] {
             let mut missing = expected.clone();
             missing

@@ -275,14 +275,24 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
         };
         let operation_id = match crate::rpc_serve::request_drain_exit(&expected) {
             Ok(operation_id) => operation_id,
-            Err(_) => {
+            Err(error) => {
+                let (status, code) = match error.to_string().as_str() {
+                    "stop_identity_mismatch" => (409, "stop_identity_mismatch"),
+                    "stop_operation_mismatch" => (409, "stop_operation_mismatch"),
+                    "invalid_stop_force" => (400, "invalid_stop_force"),
+                    _ => {
+                        eprintln!("runtime stop could not be accepted: {error:#}");
+                        (503, "stop_unavailable")
+                    }
+                };
                 return (
-                    409,
+                    status,
                     "application/json; charset=utf-8",
-                    br#"{"error":"stop_identity_mismatch"}"#.to_vec(),
+                    serde_json::json!({"error":code}).to_string().into_bytes(),
                 )
             }
         };
+        let force_deadline = crate::rpc_serve::stop_force_deadline_ms();
         return (
             200,
             "application/json; charset=utf-8",
@@ -292,8 +302,8 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
                 "request_id": uuid::Uuid::new_v4().to_string(),
                 "operation_id": operation_id,
                 "state": "accepted",
-                "deadline_ms": null,
-                "timeout_state": null,
+                "deadline_ms": force_deadline,
+                "timeout_state": force_deadline.map(|_| "forced_timeout"),
                 "admitted": crate::rpc_serve::admitted_list(),
             })
             .to_string()
