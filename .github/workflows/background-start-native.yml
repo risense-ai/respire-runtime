@@ -66,3 +66,63 @@ jobs:
         run: cargo build --locked -p respire_runtime --bin rsrs-runtime
       - name: Exercise background startup, reuse and verified drain
         run: python3 scripts/test-background-start-native.py
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-cli
+          ref: f80ac4193487d758d5b02bcdb3e4c3fc3ddabe5d
+          path: .cli-source
+          persist-credentials: false
+      - name: Build the fixed CLI compatibility consumer
+        run: cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
+      - name: Package the actual candidate for the existing CLI installer
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/joint-candidate-payload"
+          mkdir "$payload"
+          cp target/debug/rsrs-runtime "$payload/rsrs-runtime-$RUNTIME_TARGET"
+          node scripts/stage-core-runtime.mjs "$payload"
+          tar --format=ustar -czf "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" -C "$payload" .
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, tomllib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          payload = root / 'joint-candidate-payload'
+          target = os.environ['RUNTIME_TARGET']
+          binary = f'rsrs-runtime-{target}'
+          archive = root / f'rsrs-runtime-{target}.tar.gz'
+          version = tomllib.loads(pathlib.Path('runtime/Cargo.toml').read_text())['package']['version']
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          files = []
+          for path in sorted(payload.rglob('*')):
+              assert not path.is_symlink(), path
+              if path.is_file():
+                  files.append({'path': path.relative_to(payload).as_posix(),
+                                'size': path.stat().st_size, 'sha256': digest(path)})
+          metadata = dict(schema_version=2, runtime_version=version, tag=f'v{version}',
+              channel='dev', target_triple=target, archive_file=archive.name,
+              archive_sha256=digest(archive), binary_file=binary, binary_sha256=digest(payload / binary),
+              source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              compat={'min_cli': '1.0.21-dev.5', 'max_cli': '*'},
+              protocol_range={'minimum': 1, 'maximum': 1},
+              capabilities={'business_executor': '1', 'mcp_server': '1'}, files=files)
+          (root / f'runtime-build-{target}.json').write_text(json.dumps(metadata) + '\n')
+          PY
+      - name: Exercise unchanged Client2 and CLI against this Runtime candidate
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("runtime/Cargo.toml", "rb"))["package"]["version"])')"
+          python3 .cli-source/scripts/test-client2-launcher-compat.py \
+            --cli .cli-source/target/debug/rsrs \
+            --runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
+            --runtime-version "$version" --client2-source .client2-source \
+            --go "$(command -v go)" --report "$RUNNER_TEMP/joint-candidate-regression.json"
+      - name: Preserve joint candidate results (not G1 evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: joint-candidate-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/joint-candidate-regression.json
+          if-no-files-found: warn
+          retention-days: 1
