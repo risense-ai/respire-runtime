@@ -23,6 +23,32 @@ fn isolated_command(models: Option<&std::path::Path>) -> std::io::Result<Command
     Ok(command)
 }
 
+fn runtime_health(port: u16, stage: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let url = format!("http://127.0.0.1:{port}/api/health");
+    let health: serde_json::Value = ureq::get(&url).set("X-Respire-Health", "runtime-v1")
+        .timeout(Duration::from_secs(5)).call()?.into_json()?;
+    if std::env::var("RSRS_TEST_EXPECT_CLIENT2_HOST").as_deref() == Ok("1") {
+        let legacy: serde_json::Value = ureq::get(&url)
+            .timeout(Duration::from_secs(5)).call()?.into_json()?;
+        let expected = support::cli_bin()?.canonicalize()?;
+        let valid = legacy["compatibility_host"] == "client2-v0256"
+            && legacy["backend_instance_id"] == health["instance_id"]
+            && legacy["pid"] != health["pid"]
+            && legacy["data_dir"] == health["data_dir"]
+            && legacy["installation_root"] == health["installation_root"]
+            && legacy["exe"].as_str().is_some_and(|path| std::path::Path::new(path)
+                .canonicalize().is_ok_and(|path| path == expected))
+            && legacy["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+                .is_some_and(|pid| respire_spawn::process_birth(pid)
+                    .is_ok_and(|birth| birth.is_some()));
+        eprintln!("client2-account-host {}", serde_json::json!({"stage":stage, "passed":valid}));
+        if !valid {
+            return Err("legacy Client2 host identity was not preserved across profile maintenance".into());
+        }
+    }
+    Ok(health)
+}
+
 #[test]
 fn space_create_list_use_remove() -> Result<(), Box<dyn std::error::Error>> {
     use serde_json::Value;
@@ -140,10 +166,8 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         Ok(value)
     };
     let health = |profile: &std::path::Path, stage: &str| -> Result<u64, Box<dyn std::error::Error>> {
-        let status: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
-            .timeout(Duration::from_secs(5))
-            .call().map_err(|error| format!("owned space health stage={stage}: {error}"))?
-            .into_json()?;
+        let status = runtime_health(port, "space-profile")
+            .map_err(|error| format!("owned space health stage={stage}: {error}"))?;
         let executable = status["exe"].as_str().ok_or("Runtime executable missing")?;
         if status["data_dir"].as_str().map(std::path::Path::new) != Some(profile)
             || std::path::Path::new(executable).canonicalize()? != installed_runtime.canonicalize()?
@@ -356,8 +380,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
                 account_id: joined_account.clone(),
                 session_sha256: format!("{:x}", Sha256::digest(&joined_session)),
             })?;
-        let resumed: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
-            .timeout(Duration::from_secs(5)).call()?.into_json()?;
+        let resumed = runtime_health(port, "space-profile")?;
         if resumed["pid"] != resumed_pid || resumed["account_id"] != joined_account {
             return Err("resumed space health differs from its authenticated session".into());
         }
@@ -1338,8 +1361,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             || serde_json::to_value(LocalStore::open(&original.join("rsrs.db"))?.all(true)?)? != source_rows {
             return Err("committed import changed source data/session or unrelated configuration".into());
         }
-        let owner: Value = ureq::get(&format!("http://127.0.0.1:{runtime_port}/api/health"))
-            .timeout(Duration::from_secs(5)).call()?.into_json()?;
+        let owner = runtime_health(runtime_port, "import-target")?;
         let official = runtime_bin()?;
         let installed = root.join("runtime")
             .join(official.parent().and_then(std::path::Path::file_name).ok_or("official Runtime version missing")?)
@@ -1523,8 +1545,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                 .ok_or("restarted migration source missing")?)?, target.canonicalize()?);
             assert!(execute(&["--json", "--client-only", "status"])?.status.success(),
                 "restarted migration source failed scoped owner verification");
-            let health: Value = ureq::get(&format!("http://127.0.0.1:{runtime_port}/api/health"))
-                .timeout(Duration::from_secs(5)).call()?.into_json()?;
+            let health = runtime_health(runtime_port, "restart-target")?;
             assert_eq!(health["store_ready"], true);
             assert_eq!(health["account_id"], format!("{:x}", Sha256::digest(b"authorized")));
             assert_eq!(std::fs::canonicalize(health["data_dir"].as_str()
