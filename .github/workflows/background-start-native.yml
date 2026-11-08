@@ -64,7 +64,30 @@ jobs:
           node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
       - name: Build actual candidate
         run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Download and authenticate the published old CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/legacy-cli"
+          gh api repos/risense-ai/respire-cli/releases/tags/v1.0.21-dev.6 > "$RUNNER_TEMP/legacy-cli/release.json"
+          gh release download v1.0.21-dev.6 --repo risense-ai/respire-cli \
+            --pattern "rsrs-$RUNTIME_TARGET" --dir "$RUNNER_TEMP/legacy-cli"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'legacy-cli'
+          release = json.loads((root / 'release.json').read_text())
+          assert release['tag_name'] == 'v1.0.21-dev.6' and release['prerelease'] and not release['draft']
+          binary = root / ('rsrs-' + os.environ['RUNTIME_TARGET'])
+          asset, = [entry for entry in release['assets'] if entry['name'] == binary.name]
+          data = binary.read_bytes()
+          assert len(data) == asset['size']
+          assert 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest']
+          binary.chmod(0o700)
+          PY
       - name: Exercise background startup, reuse and verified drain
+        env:
+          LEGACY_CLI_PATH: ${{ runner.temp }}/legacy-cli/rsrs-${{ matrix.target }}
         run: python3 scripts/test-background-start-native.py
       - uses: actions/checkout@v5
         with:
@@ -123,6 +146,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: joint-candidate-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/joint-candidate-regression.json
+          path: |
+            ${{ runner.temp }}/background-candidate-regression.json
+            ${{ runner.temp }}/joint-candidate-regression.json
+            ${{ runner.temp }}/runtime-build-${{ matrix.target }}.json
           if-no-files-found: warn
           retention-days: 1

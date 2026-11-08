@@ -97,6 +97,16 @@ def main():
         assert health['image_sha256'] == evidence['binary_sha256']
         assert health['runtime_version'] == version and health['bin'] == version
         evidence['health'] = health
+        legacy = Path(os.environ['LEGACY_CLI_PATH']).resolve(strict=True)
+        legacy_env = dict(env, RSRS_NO_AUTOSTART='1', RSRS_UPDATE_CHECK='0', RSRS_NO_AUTOSYNC='1')
+        result = subprocess.run([str(legacy), '--json', 'status'], env=legacy_env,
+                                capture_output=True, timeout=150)
+        evidence['legacy_cli'] = {'version': '1.0.21-dev.6', 'binary_sha256': digest(legacy),
+            'exit': result.returncode, 'stdout': result.stdout.decode('utf-8'),
+            'stderr': result.stderr.decode('utf-8')}
+        assert result.returncode == 0, evidence['legacy_cli']
+        status = json.loads(evidence['legacy_cli']['stdout'])
+        assert status['command'] == 'status' and status['status'] == 'ok' and status['errors'] == [], status
         assert command('start')['result'] == 'already_running'
         assert command('status')['pid'] == health['pid']
         client2('stop')
@@ -114,6 +124,8 @@ def main():
             evidence['passed'] = False
             raise
         finally:
+            (Path(os.environ['RUNNER_TEMP']) / 'background-candidate-regression.json').write_text(
+                json.dumps(evidence, indent=2) + '\n', encoding='utf-8')
             print(json.dumps(evidence, indent=2), flush=True)
     shutil.rmtree(root)
 
