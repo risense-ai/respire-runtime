@@ -1,0 +1,57 @@
+name: Native candidate background startup
+on:
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - 'crates/commands/src/net_rpc.rs'
+      - 'spawn/**'
+      - 'scripts/test-background-start-native.py'
+      - '.github/workflows/background-start-native.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      RUNTIME_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Resolve exact existing SDK cache
+        id: sdk
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: restore
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify SDK without private download credentials
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        run: |
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+      - name: Build actual candidate
+        run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Exercise background startup, reuse and verified drain
+        run: python3 scripts/test-background-start-native.py
