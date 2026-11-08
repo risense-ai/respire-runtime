@@ -32,7 +32,7 @@
       "id": "runtime.mcp-initialize-tools-list",
       "area": "runtime-business-mcp",
       "status": "missing",
-      "reason": "Real-process MCP initialization, tools/list and scoped status assertions are wired into native release smoke; frozen-candidate native execution reports remain absent.",
+      "reason": "Real-process MCP initialization, tools/list and scoped status assertions are wired into native release smoke; frozen-candidate native execution reports remain absent. A reviewed producer draft now maps the existing exact assertions to fresh same-run native execution, but trusted original SDK archive input, candidate native execution and all remaining required suites are still prerequisites; status is intentionally missing.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -61,7 +61,39 @@
           "job": "native-regression",
           "scope": "Initialize, catalog, real status envelope and unchanged process identity. No full G1 or memory write/read acceptance."
         }
-      ]
+      ],
+      "required_cases": [
+        "initialize",
+        "tools/list",
+        "tools/call:memory_status",
+        "same-process-after-call"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": {
+        "test": "runRuntimeMcpProbe",
+        "command": "node scripts/smoke-runtime-release.mjs",
+        "file": "scripts/runtime-mcp-probe.mjs"
+      },
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-smoke.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-smoke",
+        "job_name": "g1-native-smoke",
+        "matrix": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ]
+      }
     },
     {
       "id": "runtime.stop-clean-drained",
@@ -197,7 +229,7 @@
       "id": "runtime.client-json-bad-config",
       "area": "idempotency-bad-config",
       "status": "missing",
-      "reason": "Native release smoke asserts a scoped structured invalid_config reply, preserved malformed client.json and inference bytes, and successful scoped recovery; frozen-candidate native reports remain absent.",
+      "reason": "Native release smoke asserts a scoped structured invalid_config reply, preserved malformed client.json and inference bytes, and successful scoped recovery; frozen-candidate native reports remain absent. A reviewed producer draft now maps the existing exact assertions to fresh same-run native execution, but trusted original SDK archive input, candidate native execution and all remaining required suites are still prerequisites; status is intentionally missing.",
       "partial_asset_suite": [
         {
           "file": "scripts/smoke-runtime-release.mjs",
@@ -214,7 +246,39 @@
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "scoped-structured-invalid-config-envelope",
+        "invalid-client-config-bytes-preserved",
+        "inference-settings-preserved-on-rejection",
+        "scoped-recovery-preserves-inference-settings"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": {
+        "test": "assertBadConfigResponse",
+        "command": "node scripts/smoke-runtime-release.mjs",
+        "file": "scripts/smoke-runtime-release.mjs"
+      },
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-smoke.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-smoke",
+        "job_name": "g1-native-smoke",
+        "matrix": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ]
+      }
     }
   ]
 }
