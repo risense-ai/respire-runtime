@@ -1558,9 +1558,20 @@ impl Fixture {
     }
 }
 
-fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<()> {
-    use std::sync::atomic::Ordering;
-    let mut fixture = Fixture::new()?;
+struct StopWriteEvidence {
+    root_id: String,
+    child_id: String,
+    parent_id: String,
+    child: MemoryEntry,
+    original_root: StoredMemory,
+    original_child: StoredMemory,
+    original_parent: StoredMemory,
+    before_boundary: i64,
+    before_outgoing: std::collections::HashSet<String>,
+}
+
+impl StopWriteEvidence {
+    fn seed(fixture: &Fixture) -> anyhow::Result<Self> {
     let root_id = uuid::Uuid::new_v4().simple().to_string();
     let child_id = uuid::Uuid::new_v4().simple().to_string();
     let parent_id = uuid::Uuid::new_v4().simple().to_string();
@@ -1582,19 +1593,115 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     let before_boundary = fixture.store()?.outgoing_boundary()?;
     let before_outgoing: std::collections::HashSet<_> = fixture.store()?.outgoing()?.into_iter()
         .map(|operation| operation.op_id).collect();
+
+        Ok(Self { root_id, child_id, parent_id, child, original_root, original_child,
+            original_parent, before_boundary, before_outgoing })
+    }
+
+    fn provider(&self) -> anyhow::Result<HeldClassifyProvider> {
+        HeldClassifyProvider::with_response(Some(json!({"choices":[{"message":{"content":
+            format!("{} > {}", &self.child_id[..8], &self.parent_id[..8])}}]})))
+    }
+
+    fn args(&self, endpoint: &str) -> Vec<String> {
+        ["--json", "classify", "--backend", "jev", "--api-base", endpoint,
+            "--auto", "--rounds", "1", "--min-kids", "2", "--segments", "1",
+            "--limit", "3", "--samples", "1"].into_iter().map(str::to_owned).collect()
+    }
+
+    fn assert_result(&self, result: &Value, request: &Value) {
+        for key in ["v", "id", "operation_id", "scope", "idempotency_key"] {
+            assert_eq!(result[key], request[key], "accepted write identity changed: {key}");
+        }
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["exit"], 0);
+        assert_eq!(result["envelope"]["command"], "classify");
+        assert_eq!(result["envelope"]["status"], "ok");
+        assert_eq!(result["envelope"]["details"]["applied"], 1);
+        assert_eq!(result["envelope"]["details"]["ops"], json!([{"id":self.child_id,"parent":self.parent_id}]));
+    }
+
+    fn assert_committed(&self, fixture: &Fixture) -> anyhow::Result<()> {
+        let root_id = self.root_id.as_str();
+        let child_id = self.child_id.as_str();
+        let parent_id = self.parent_id.as_str();
+        let child = &self.child;
+        let original_root = &self.original_root;
+        let original_child = &self.original_child;
+        let original_parent = &self.original_parent;
+        let before_boundary = self.before_boundary;
+        let before_outgoing = &self.before_outgoing;
+    let after = fixture.store()?.all(true)?;
+    assert_eq!(after.len(), 3);
+    let written = after.iter().find(|row| row.id == child_id).context("committed child missing")?;
+    assert_ne!(written.ciphertext, original_child.ciphertext);
+    assert_ne!(written.nonce, original_child.nonce);
+    assert_eq!(written.local_parent_id, parent_id);
+    let opened = MemoryEngine::open(&fixture.keys, written)?;
+    assert_eq!(opened.parent_id, parent_id);
+    assert_eq!(MemoryEngine::payload_parent(&fixture.keys, written)?, parent_id);
+    assert_eq!(opened.content, child.content);
+    assert!(fixture.store()?.outgoing_boundary()? > before_boundary);
+    let outgoing = fixture.store()?.outgoing()?;
+    let added: Vec<_> = outgoing.iter().filter(|operation| !before_outgoing.contains(&operation.op_id)).collect();
+    assert!(added.iter().any(|operation| operation.blob.id == child_id
+        && operation.blob.ciphertext == written.ciphertext && operation.blob.nonce == written.nonce),
+        "committed encrypted child is missing from the actual outbox");
+    for operation in added {
+        let expected = if operation.blob.id == child_id { written }
+            else if operation.blob.id == root_id { &original_root }
+            else if operation.blob.id == parent_id { &original_parent }
+            else { anyhow::bail!("unexpected memory in the accepted-write outbox") };
+        assert_eq!(operation.blob.ciphertext, expected.ciphertext);
+        assert_eq!(operation.blob.nonce, expected.nonce);
+        if operation.blob.id == child_id {
+            assert_eq!(MemoryEngine::payload_parent(&fixture.keys, &operation.blob)?, parent_id);
+        }
+    }
+    for original in [original_root, original_parent] {
+        let unchanged = after.iter().find(|row| row.id == original.id).context("unchanged row missing")?;
+        assert_eq!(unchanged.ciphertext, original.ciphertext);
+        assert_eq!(unchanged.nonce, original.nonce);
+        assert_eq!(unchanged.local_parent_id, original.local_parent_id);
+    }
+
+        Ok(())
+    }
+
+    fn assert_uncommitted(&self, fixture: &Fixture) -> anyhow::Result<()> {
+        let rows = fixture.store()?.all(true)?;
+        assert_eq!(rows.len(), 3);
+        for original in [&self.original_root, &self.original_child, &self.original_parent] {
+            let row = rows.iter().find(|row| row.id == original.id).context("forced fixture row missing")?;
+            assert_eq!(row.ciphertext, original.ciphertext);
+            assert_eq!(row.nonce, original.nonce);
+            assert_eq!(row.local_parent_id, original.local_parent_id);
+        }
+        for operation in fixture.store()?.outgoing()? {
+            let original = [&self.original_root, &self.original_child, &self.original_parent]
+                .into_iter().find(|row| row.id == operation.blob.id)
+                .context("forced outbox contains an unexpected memory")?;
+            assert_eq!(operation.blob.ciphertext, original.ciphertext);
+            assert_eq!(operation.blob.nonce, original.nonce);
+        }
+        Ok(())
+    }
+}
+
+fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    let mut fixture = Fixture::new()?;
+    let write = StopWriteEvidence::seed(&fixture)?;
     let health = fixture.start_standalone_for_stop()?;
     assert!(health["managed_id"].is_null());
-    let mut provider = HeldClassifyProvider::with_response(Some(json!({
-        "choices":[{"message":{"content":format!("{} > {}", &child_id[..8], &parent_id[..8])}}]
-    })))?;
+    let mut provider = write.provider()?;
     let rpc_url = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
     let stop_url = format!("http://127.0.0.1:{}/api/runtime/stop", fixture.port);
     let scope = json!({"account_id":health["account_id"],"instance_id":health["instance_id"],"generation":health["generation"]});
     let business_operation = "native-stop-successful-encrypted-write";
     let request = json!({"v":1,"id":"native-stop-held-write","method":"cli.exec",
         "operation_id":business_operation,"idempotency_key":business_operation,"scope":scope,
-        "args":["--json","classify","--backend","jev","--api-base",provider.endpoint,
-            "--auto","--rounds","1","--min-kids","2","--segments","1","--limit","3","--samples","1"]});
+        "args":write.args(&provider.endpoint)});
     let (url, original) = (rpc_url.clone(), request.clone());
     let business = std::thread::spawn(move || stop_native_post(&url, &original));
     provider.received.recv_timeout(Duration::from_secs(30))
@@ -1637,50 +1744,11 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     assert_eq!(provider.calls.load(Ordering::Acquire), 1);
     provider.release.store(true, Ordering::Release);
     let (_, result) = business.join().map_err(|_| anyhow::anyhow!("accepted write client panicked"))??;
-    assert_eq!(result["id"], request["id"]);
-    assert_eq!(result["operation_id"], business_operation);
-    assert_eq!(result["ok"], true);
-    assert_eq!(result["exit"], 0);
-    assert_eq!(result["envelope"]["command"], "classify");
-    assert_eq!(result["envelope"]["status"], "ok");
-    assert_eq!(result["envelope"]["details"]["applied"], 1);
-    assert_eq!(result["envelope"]["details"]["ops"], json!([{"id":child_id,"parent":parent_id}]));
+    write.assert_result(&result, &request);
     let receipt = fixture.finish_standalone_stop(&health, &accepted["operation_id"], false)?;
     assert_eq!(receipt["unfinished"], json!([]));
     assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
-    let after = fixture.store()?.all(true)?;
-    assert_eq!(after.len(), 3);
-    let written = after.iter().find(|row| row.id == child_id).context("committed child missing")?;
-    assert_ne!(written.ciphertext, original_child.ciphertext);
-    assert_ne!(written.nonce, original_child.nonce);
-    assert_eq!(written.local_parent_id, parent_id);
-    let opened = MemoryEngine::open(&fixture.keys, written)?;
-    assert_eq!(opened.parent_id, parent_id);
-    assert_eq!(MemoryEngine::payload_parent(&fixture.keys, written)?, parent_id);
-    assert_eq!(opened.content, child.content);
-    assert!(fixture.store()?.outgoing_boundary()? > before_boundary);
-    let outgoing = fixture.store()?.outgoing()?;
-    let added: Vec<_> = outgoing.iter().filter(|operation| !before_outgoing.contains(&operation.op_id)).collect();
-    assert!(added.iter().any(|operation| operation.blob.id == child_id
-        && operation.blob.ciphertext == written.ciphertext && operation.blob.nonce == written.nonce),
-        "committed encrypted child is missing from the actual outbox");
-    for operation in added {
-        let expected = if operation.blob.id == child_id { written }
-            else if operation.blob.id == root_id { &original_root }
-            else if operation.blob.id == parent_id { &original_parent }
-            else { anyhow::bail!("unexpected memory in the accepted-write outbox") };
-        assert_eq!(operation.blob.ciphertext, expected.ciphertext);
-        assert_eq!(operation.blob.nonce, expected.nonce);
-        if operation.blob.id == child_id {
-            assert_eq!(MemoryEngine::payload_parent(&fixture.keys, &operation.blob)?, parent_id);
-        }
-    }
-    for original in [original_root, original_parent] {
-        let unchanged = after.iter().find(|row| row.id == original.id).context("unchanged row missing")?;
-        assert_eq!(unchanged.ciphertext, original.ciphertext);
-        assert_eq!(unchanged.nonce, original.nonce);
-        assert_eq!(unchanged.local_parent_id, original.local_parent_id);
-    }
+    write.assert_committed(&fixture)?;
     provider.finish()?;
     assert_eq!(provider.calls.load(Ordering::Acquire), 1);
     eprintln!("NATIVE_ACCEPTED_WRITE_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
@@ -1696,7 +1764,19 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
 #[test]
 fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
+    enum OwnedStopMode { Registered, Client2Owned }
+    let owned_mode = match std::env::var_os("RSRS_TEST_NATIVE_OWNED_STOP") {
+        None => None,
+        Some(mode) if mode == "registered" => Some(OwnedStopMode::Registered),
+        Some(mode) if mode == "client2-owned" => Some(OwnedStopMode::Client2Owned),
+        Some(_) => anyhow::bail!("unsupported native owned-stop fixture mode"),
+    };
     stop_native_commits_accepted_encrypted_write_after_drain()?;
+    match owned_mode {
+        Some(OwnedStopMode::Registered) => stop_native_registered_held_write()?,
+        Some(OwnedStopMode::Client2Owned) => stop_native_client2_owned_held_write()?,
+        None => {},
+    }
     for forced in [false, true] {
         let checkpoint = |stage: &str| eprintln!("NATIVE_STOP_CHECKPOINT mode={} stage={stage}",
             if forced { "forced" } else { "normal" });
@@ -1864,6 +1944,774 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
             "accepted":accepted,"force_requests":force_requests,"business_result":result,
             "final_receipt":receipt,"provider_http_status":401,"provider_requests":provider.calls.load(Ordering::Acquire),
             "same_key_result":replayed,"stale_scope_result":stale,"restarted_receipt":restarted_receipt}));
+    }
+    Ok(())
+}
+// Explicit isolated native acceptance only: this installs a real user service.
+// It is intentionally absent from ordinary cargo-test runs and G1 certificates.
+fn assert_owned_stop_lock_held(root: &Path, backend_pid: u32, backend_identity: &Value) -> anyhow::Result<()> {
+    anyhow::ensure!(backend_pid != std::process::id(), "lock check must run outside the backend process");
+    anyhow::ensure!(stop_native_worker_identity(backend_pid)?.as_ref() == Some(backend_identity),
+        "backend identity changed before library lock observation");
+    match respire::lock::LibraryLock::acquire(root, Duration::from_millis(100)) {
+        Ok(_) => anyhow::bail!("owned Runtime released its library lock before business cleanup"),
+        Err(error) => anyhow::ensure!(error.to_string().starts_with("memory library still locked after "),
+            "library lock check failed without proving contention: {error:#}"),
+    }
+    anyhow::ensure!(stop_native_worker_identity(backend_pid)?.as_ref() == Some(backend_identity),
+        "backend identity changed during library lock observation");
+    Ok(())
+}
+
+struct RegisteredStopFixture {
+    fixture: Option<Fixture>,
+    alias: String,
+    backends: Vec<String>,
+    registration_attempted: bool,
+}
+
+impl RegisteredStopFixture {
+    fn fixture(&self) -> anyhow::Result<&Fixture> {
+        self.fixture.as_ref().context("registered fixture is unavailable")
+    }
+
+    fn command(&self, args: &[&str]) -> anyhow::Result<Command> {
+        let fixture = self.fixture()?;
+        let mut command = fixture.command(args);
+        // The service must unlock the checkpointed OS credential itself.
+        for name in ["RSRS_SUPER", "RSRS_USER", "RSRS_PASS", "TYPESAFE_API_KEY", "DS_API_KEY"] {
+            command.env_remove(name);
+        }
+        command.env("RSRS_BIN_DIR", fixture.home.path().join("data/bin"));
+        Ok(command)
+    }
+
+    fn probe_command(&self, probe: &Path, action: &str) -> anyhow::Result<Command> {
+        let template = self.command(&[])?;
+        let mut command = Command::new(probe);
+        command.arg(action).current_dir(self.fixture()?.home.path());
+        for (name, value) in template.get_envs() {
+            match value { Some(value) => { command.env(name, value); }, None => { command.env_remove(name); } }
+        }
+        Ok(command)
+    }
+
+    fn run(&self, args: &[&str]) -> anyhow::Result<Value> {
+        let output = self.command(args)?.output()?;
+        anyhow::ensure!(output.status.success(), "registered lifecycle command failed with exit code {:?}", output.status.code());
+        Ok(serde_json::from_slice::<Value>(&output.stdout)?["summary"].clone())
+    }
+
+    fn health(&self) -> anyhow::Result<Value> {
+        let fixture = self.fixture()?;
+        let health: Value = ureq::AgentBuilder::new().try_proxy_from_env(false).build()
+            .get(&format!("http://127.0.0.1:{}/api/health", fixture.port))
+            .set("X-Respire-Health", "runtime-v1")
+            .timeout(Duration::from_secs(3)).call()?.into_json()?;
+        let root = fixture.home.path().join("data").canonicalize()?;
+        let registration: Value = serde_json::from_slice(&std::fs::read(root.join("runtime/autostart/registration.json"))?)?;
+        anyhow::ensure!(registration["enabled"] == true && health["managed_id"] == registration["id"]
+            && health["managed_id"].as_str().is_some_and(|id| !id.is_empty()), "not a registered supervisor child");
+        for field in ["installation_root", "data_dir"] {
+            anyhow::ensure!(Path::new(health[field].as_str().context("registered root missing")?).canonicalize()? == root,
+                "registered Runtime root mismatch");
+        }
+        for field in ["image_path", "exe"] {
+            anyhow::ensure!(Path::new(health[field].as_str().context("registered image missing")?).canonicalize()? == fixture.runtime,
+                "registered Runtime image mismatch");
+        }
+        Ok(health)
+    }
+
+    fn cleanup(&mut self) -> anyhow::Result<()> {
+        if self.registration_attempted {
+            let summary = self.run(&["--json", "runtime", "autostart", "remove", "--stop"])?;
+            anyhow::ensure!(summary["enabled"] == false && summary["registered"] == false
+                && summary["runtime"]["running"] == false, "registered cleanup did not remove and stop the service");
+            self.registration_attempted = false;
+        }
+        for backend in &self.backends {
+            respire::keystore::remove_imported(&self.alias, "super", backend)?;
+            anyhow::ensure!(respire::keystore::read_imported(&self.alias, "super", backend).is_err(),
+                "registered credential remained after cleanup");
+        }
+        self.backends.clear();
+        Ok(())
+    }
+}
+
+impl Drop for RegisteredStopFixture {
+    fn drop(&mut self) {
+        if self.cleanup().is_err() {
+            // Preserve the root/registration if owned cleanup fails; never delete
+            // paths still referenced by a real registered service or hide failure.
+            if let Some(fixture) = self.fixture.take() { std::mem::forget(fixture); }
+            eprintln!("REGISTERED_STOP_CLEANUP_FAILED explicit owned recovery required");
+        }
+    }
+}
+
+fn stop_native_registered_held_write() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+        && std::env::var("RUNNER_ENVIRONMENT").as_deref() == Ok("github-hosted"),
+        "real OS registration requires an ephemeral GitHub-hosted runner");
+    let probe = PathBuf::from(std::env::var_os("RSRS_CLIENT2_PROBE_BIN")
+        .context("registered caller-timeout requires the source-bound original Go probe")?).canonicalize()?;
+    anyhow::ensure!(probe.is_file(), "original Go probe is not a file");
+    let probe_digest = format!("{:x}", Sha256::digest(std::fs::read(&probe)?));
+    for mode in ["normal", "caller-timeout", "explicit-force"] {
+    let fixture = Fixture::new()?;
+    anyhow::ensure!(fixture.business_cli.is_none(), "registered control requires the bound modern CLI");
+    let mut owned = RegisteredStopFixture { fixture: Some(fixture),
+        alias: format!("login-{}", uuid::Uuid::new_v4().simple()), backends: Vec::new(), registration_attempted: false };
+    let alias = owned.alias.clone();
+    let secret = owned.fixture()?.secret.clone();
+    let backend = respire::keystore::import_credential_checkpoint(&alias, "super", &secret, |backend| {
+        anyhow::ensure!(matches!(backend, "native" | "secret_service"), "registered fixture requires persistent OS credentials");
+        owned.backends.push(backend.to_owned());
+        Ok(())
+    })?;
+    anyhow::ensure!(respire::keystore::read_imported(&alias, "super", backend)? == secret,
+        "registered credential checkpoint readback mismatch");
+    let fixture = owned.fixture.as_mut().context("fixture missing")?;
+    let root = fixture.home.path().join("data");
+    let mut session: Value = serde_json::from_slice(&std::fs::read(root.join("session.json"))?)?;
+    session["keyring_account"] = json!(alias);
+    session["keyring_backend"] = json!(backend);
+    std::fs::write(root.join("session.json"), serde_json::to_vec(&session)?)?;
+    // Use the existing public classification file contract, with only a synthetic key.
+    anyhow::ensure!(respire::keystore::load_classify_key("typesafe").is_none(), "fixture classification slot is not empty");
+    std::fs::write(root.join("classify.json"), br#"{"api_key":"synthetic-native-stop-key"}"#)?;
+    support::install_runtime_fixture(&root)?;
+    let selected: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
+    fixture.runtime = root.join("runtime").join(selected["version"].as_str().context("installed version missing")?)
+        .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?;
+    std::fs::create_dir_all(root.join("bin"))?;
+    std::fs::copy(&fixture.cli, root.join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
+    let write = StopWriteEvidence::seed(fixture)?;
+    owned.registration_attempted = true;
+    let enabled = owned.run(&["--json", "runtime", "autostart", "enable", "--now"])?;
+    anyhow::ensure!(enabled["enabled"] == true && enabled["registered"] == true, "real OS registration did not complete");
+    let health = owned.health()?;
+    anyhow::ensure!(health["store_ready"] == true, "registered service could not unlock its actual persistent credential");
+    let fixture = owned.fixture()?;
+    let runtime_pid = u32::try_from(health["pid"].as_u64().context("runtime PID missing")?)?;
+    let runtime_identity = stop_native_worker_identity(runtime_pid)?.context("registered backend is not live")?;
+    let claim: Value = serde_json::from_slice(&std::fs::read(root.join("runtime/autostart/launch")
+        .join(format!("launch-{}.claimed", health["instance_id"].as_str().context("instance missing")?)))?)?;
+    let grant_json = claim["grant_json"].as_str().context("consumed grant JSON missing")?;
+    assert_eq!(claim["schema_version"], 2);
+    assert_eq!(claim["grant_sha256"], format!("{:x}", Sha256::digest(grant_json.as_bytes())));
+    let grant: Value = serde_json::from_str(grant_json)?;
+    let supervisor_pid = u32::try_from(grant["supervisor_pid"].as_u64().context("supervisor PID missing")?)?;
+    anyhow::ensure!(supervisor_pid != runtime_pid && supervisor_pid != std::process::id(), "supervisor identity collapsed into backend/harness");
+    let supervisor_identity = stop_native_worker_identity(supervisor_pid)?.context("registered supervisor is not live")?;
+    let registration: Value = serde_json::from_slice(&std::fs::read(root.join("runtime/autostart/registration.json"))?)?;
+    anyhow::ensure!(Path::new(supervisor_identity["image"].as_str().context("supervisor image missing")?).canonicalize()?
+        == Path::new(registration["executable"].as_str().context("registration executable missing")?).canonicalize()?
+        && supervisor_identity["birth"] == grant["supervisor_birth"] && claim["pid"] == health["pid"]
+        && grant["managed_id"] == health["managed_id"], "registered launcher/backend claim differs from live OS identity");
+    let prefix = if cfg!(windows) { "windows-filetime-" } else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
+    assert_eq!(health["process_start_id"], format!("{prefix}{}", claim["process_start_id"].as_str().context("claimed birth missing")?));
+    assert_eq!(runtime_identity["birth"], claim["process_start_id"]);
+    anyhow::ensure!(Path::new(runtime_identity["image"].as_str().context("backend OS image missing")?).canonicalize()? == fixture.runtime,
+        "registered backend OS image mismatch");
+    if let Some(parent) = runtime_identity.get("parent") { assert_eq!(*parent, json!(supervisor_pid)); }
+    assert_eq!(health["image_sha256"], format!("{:x}", Sha256::digest(std::fs::read(&fixture.runtime)?)));
+    let mut provider = write.provider()?;
+    let rpc_url = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
+    let request = json!({"v":1,"id":"registered-stop-original","method":"cli.exec",
+        "operation_id":"registered-stop-classify","idempotency_key":"registered-stop-classify",
+        "scope":{"account_id":health["account_id"],"instance_id":health["instance_id"],"generation":health["generation"]},
+        "args":write.args(&provider.endpoint)});
+    let (url, original) = (rpc_url.clone(), request.clone());
+    let business = std::thread::spawn(move || stop_native_post(&url, &original));
+    provider.received.recv_timeout(Duration::from_secs(30)).context("registered business did not reach the actual provider")?;
+    let active = owned.health()?;
+    assert!(active["control"]["admitted"].as_array().context("admissions missing")?.iter()
+        .any(|item| item["operation_id"] == request["operation_id"]));
+    let worker_pid = u32::try_from(active["inference"]["worker_pid"].as_u64().context("Core PID missing")?)?;
+    let worker_identity = stop_native_worker_identity(worker_pid)?.context("actual Core worker missing")?;
+    anyhow::ensure!(Path::new(worker_identity["image"].as_str().context("Core OS image missing")?).canonicalize()? == fixture.runtime,
+        "registered Core OS image mismatch");
+    if let Some(parent) = worker_identity.get("parent") { assert_eq!(*parent, json!(runtime_pid)); }
+    assert!(active["inference"]["worker_host_callbacks_active"].as_u64().is_some_and(|n| n > 0));
+    assert!(active["inference"]["worker_call_deadline_secs"].as_u64().is_some_and(|n| n >= 30));
+    assert_owned_stop_lock_held(&root, runtime_pid, &runtime_identity)?;
+    std::thread::sleep(Duration::from_millis(4200));
+    assert!(!business.is_finished());
+    let stop_output_path = root.join("registered-stop.stdout");
+    let started_stop = std::time::Instant::now();
+    let mut stop_command = if mode == "normal" { owned.command(&["--json", "runtime", "stop"])? }
+        else { owned.probe_command(&probe, "stop")? };
+    let mut stop = stop_command
+        .stdout(std::fs::File::create(&stop_output_path)?)
+        .stderr(std::fs::File::create(root.join("registered-stop.stderr"))?).spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let pending = loop {
+        let observed = owned.health()?;
+        if observed["control"]["state"] == "draining" { break observed; }
+        anyhow::ensure!(stop.try_wait()?.is_none() && std::time::Instant::now() < deadline, "registered stop failed before drain");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let operation = pending["control"]["operation_id"].clone();
+    anyhow::ensure!(operation.as_str().is_some_and(|id| !id.is_empty()), "registered stop operation missing");
+    let mut caller_timeout_ms = None;
+    if mode == "normal" {
+        std::thread::sleep(Duration::from_millis(4200));
+        assert!(stop.try_wait()?.is_none());
+    } else {
+        let deadline = started_stop + Duration::from_secs(45);
+        loop {
+            if let Some(status) = stop.try_wait()? {
+                assert!(!status.success(), "old managed caller completed before the held business");
+                break;
+            }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "original managed caller did not hit its 35s deadline");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let output: Value = serde_json::from_slice(&std::fs::read(&stop_output_path)?)?;
+        assert!(output["action_error"].as_str().context("old managed caller error missing")?
+            .contains("通过 CLI 生命周期协调器停止 Runtime"));
+        assert!(started_stop.elapsed() >= Duration::from_secs(35));
+        caller_timeout_ms = Some(started_stop.elapsed().as_millis());
+    }
+    assert!(!business.is_finished());
+    assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+    assert_eq!(stop_native_worker_identity(supervisor_pid)?.as_ref(), Some(&supervisor_identity));
+    let held = owned.health()?;
+    assert_eq!(held["control"]["state"], "draining");
+    assert_eq!(held["inference"]["worker_retired"], false);
+    let registration: Value = serde_json::from_slice(&std::fs::read(root.join("runtime/autostart/registration.json"))?)?;
+    assert_eq!(registration["manually_stopped"], true);
+    assert_eq!(registration["maintenance"], true);
+    let mut replay = request.clone(); replay["id"] = json!("registered-stop-retry");
+    let (_, same_key) = stop_native_post(&rpc_url, &replay)?;
+    assert_eq!(same_key["code"], "request_in_progress");
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    assert_owned_stop_lock_held(&root, runtime_pid, &runtime_identity)?;
+    let mut force_response = None;
+    if mode == "explicit-force" {
+        let force = json!({"installation_id":health["installation_id"],"instance_id":health["instance_id"],
+            "account_id":health["account_id"],"generation":health["generation"],"operation_id":operation,"force":true});
+        let (status, response) = stop_native_post(&format!("http://127.0.0.1:{}/api/runtime/stop", fixture.port), &force)?;
+        assert_eq!(status, 200); assert_eq!(response["operation_id"], operation);
+        assert_eq!(response["timeout_state"], "forced_timeout");
+        assert!(response["deadline_ms"].as_u64().is_some_and(|ms| ms <= 4000));
+        force_response = Some(response);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let observed = owned.health()?;
+            if observed["inference"]["retired_worker"]["worker_reaped"] == true { break; }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "registered force did not retire the original Core");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+        assert!(!business.is_finished());
+        assert_owned_stop_lock_held(&root, runtime_pid, &runtime_identity)?;
+    }
+    provider.release.store(true, Ordering::Release);
+    let (_, result) = business.join().map_err(|_| anyhow::anyhow!("registered business thread panicked"))??;
+    assert_eq!(result["id"], request["id"]);
+    assert_eq!(result["operation_id"], request["operation_id"]);
+    if mode == "explicit-force" { assert_eq!(result["ok"], false); }
+    else { write.assert_result(&result, &request); }
+    if mode == "normal" {
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        loop {
+            if let Some(status) = stop.try_wait()? { anyhow::ensure!(status.success(), "registered normal stop failed"); break; }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "registered stop did not finish");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if stop_native_worker_identity(runtime_pid)?.as_ref() != Some(&runtime_identity)
+            && stop_native_worker_identity(supervisor_pid)?.as_ref() != Some(&supervisor_identity)
+            && stop_native_worker_identity(worker_pid)?.as_ref() != Some(&worker_identity) { break; }
+        anyhow::ensure!(std::time::Instant::now() < deadline, "registered backend/supervisor/Core did not exit");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let receipt_path = root.join("runtime").join(format!("stop-{}.json", health["instance_id"].as_str().context("instance missing")?));
+    let receipt_bytes = std::fs::read(&receipt_path)?;
+    let receipt: Value = serde_json::from_slice(&receipt_bytes)?;
+    assert_eq!(receipt["schema_version"], 1); assert_eq!(receipt["protocol_version"], 1);
+    assert_eq!(receipt["operation_id"], operation);
+    for key in ["installation_id", "instance_id", "pid", "process_start_id", "image_path", "image_sha256", "runtime_version", "account_id", "generation"] {
+        assert_eq!(receipt[key], health[key], "registered final identity changed: {key}");
+    }
+    assert_eq!(receipt["state"], if mode == "explicit-force" { "forced_timeout" } else { "drained" });
+    if mode == "explicit-force" {
+        let unfinished = receipt["unfinished"].as_array().context("registered forced unfinished list missing")?;
+        assert_eq!(unfinished.iter().filter(|item| item["operation_id"] == request["operation_id"]
+            && item["result"] == "unknown").count(), 1);
+    } else { assert_eq!(receipt["unfinished"], json!([])); }
+    assert_ne!(stop_native_worker_identity(runtime_pid)?.as_ref(), Some(&runtime_identity));
+    assert_ne!(stop_native_worker_identity(supervisor_pid)?.as_ref(), Some(&supervisor_identity));
+    assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+    // Exceed both the 10s systemd/launchd delay and 60s Task Scheduler retry interval.
+    let quiet = std::time::Instant::now() + Duration::from_secs(65);
+    while std::time::Instant::now() < quiet {
+        match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", fixture.port).parse()?, Duration::from_secs(1)) {
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
+            other => anyhow::bail!("registered owner resurrected or listener state unproved: {other:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert_eq!(owned.run(&["--json", "runtime", "autostart", "status"])?["runtime"]["running"], false);
+    let lock = respire::lock::LibraryLock::acquire(&root, Duration::from_secs(1))?; drop(lock);
+    if mode == "explicit-force" { write.assert_uncommitted(fixture)?; }
+    else { write.assert_committed(fixture)?; }
+    let recovery = if mode != "normal" {
+        owned.run(&["--json", "runtime", "restart"])?;
+        let recovered = owned.health()?;
+        assert_ne!(recovered["instance_id"], health["instance_id"]);
+        let recovered_pid = u32::try_from(recovered["pid"].as_u64().context("recovered registered PID missing")?)?;
+        let recovered_os = stop_native_worker_identity(recovered_pid)?.context("recovered registered actor missing")?;
+        let recovered_claim: Value = serde_json::from_slice(&std::fs::read(root.join("runtime/autostart/launch")
+            .join(format!("launch-{}.claimed", recovered["instance_id"].as_str().context("recovered instance missing")?)))?)?;
+        let recovered_grant: Value = serde_json::from_str(recovered_claim["grant_json"].as_str().context("recovered grant missing")?)?;
+        let recovered_supervisor = u32::try_from(recovered_grant["supervisor_pid"].as_u64().context("recovered supervisor missing")?)?;
+        let recovered_supervisor_os = stop_native_worker_identity(recovered_supervisor)?.context("recovered supervisor not live")?;
+        let recovered_worker = match recovered["inference"].get("worker_pid").context("recovered registered Core observation missing")? {
+            Value::Null => None,
+            value => {
+                let pid = u32::try_from(value.as_u64().context("recovered registered Core PID is invalid")?)?;
+                let identity = stop_native_worker_identity(pid)?.context("recovered registered Core not live")?;
+                anyhow::ensure!(Path::new(identity["image"].as_str().context("recovered registered Core image missing")?).canonicalize()?
+                    == fixture.runtime, "recovered registered Core OS image mismatch");
+                if let Some(parent) = identity.get("parent") { assert_eq!(*parent, json!(recovered_pid)); }
+                Some((pid, identity))
+            }
+        };
+        replay["id"] = json!("registered-old-scope-after-explicit-recovery");
+        let (_, stale) = stop_native_post(&rpc_url, &replay)?;
+        assert_eq!(stale["code"], "scope_mismatch");
+        assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        owned.run(&["--json", "runtime", "stop"])?;
+        let final_recovered: Value = serde_json::from_slice(&std::fs::read(root.join("runtime")
+            .join(format!("stop-{}.json", recovered["instance_id"].as_str().context("recovered instance missing")?)))?)?;
+        assert_eq!(final_recovered["state"], "drained"); assert_eq!(final_recovered["unfinished"], json!([]));
+        for key in ["installation_id","instance_id","pid","process_start_id","image_path","image_sha256","runtime_version","account_id","generation"] {
+            assert_eq!(final_recovered[key], recovered[key], "recovered registered receipt mismatch: {key}");
+        }
+        assert_ne!(stop_native_worker_identity(recovered_pid)?.as_ref(), Some(&recovered_os));
+        assert_ne!(stop_native_worker_identity(recovered_supervisor)?.as_ref(), Some(&recovered_supervisor_os));
+        if let Some((pid, identity)) = recovered_worker.as_ref() {
+            assert_ne!(stop_native_worker_identity(*pid)?.as_ref(), Some(identity));
+        }
+        assert_eq!(std::fs::read(&receipt_path)?, receipt_bytes, "explicit recovery rewrote the old receipt");
+        Some(json!({"identity":recovered,"receipt":final_recovered,"stale_scope_result":stale}))
+    } else { None };
+    provider.finish()?; assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    owned.cleanup()?;
+    eprintln!("NATIVE_REGISTERED_STOP_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
+        "startup_mode":"cli-supervised","case":mode,"forced":mode == "explicit-force","passed":true,"runtime_identity":health,
+        "probe_sha256":probe_digest,"business_sender":"modern-harness",
+        "stop_sender":if mode == "normal" { "modern-cli" } else { "original-go-client2-managed" },
+        "caller_timeout_ms":caller_timeout_ms,"runtime_compatibility_timeout_claimed":false,
+        "explicit_force_response":force_response,"recovery":recovery,
+        "runtime_os_identity":runtime_identity,"supervisor_os_identity":supervisor_identity,"worker_os_identity":worker_identity,
+        "active_health":active,"held_health":held,"business_result":result,"same_key_result":same_key,"final_receipt":receipt,
+        "provider_http_status":200,"encrypted_write_committed":mode != "explicit-force",
+        "forced_operation_remains_unknown":mode == "explicit-force","provider_requests":1,"quiet_after_stop_ms":65000,"credential_cleanup_verified":true}));
+    }
+    Ok(())
+}
+
+
+// Same safe keyring/installed-bundle preparation as the registered case; this
+// mode starts through the original Go Manager, never the service supervisor.
+fn prepare_client2_stop_fixture() -> anyhow::Result<RegisteredStopFixture> {
+    let fixture = Fixture::new()?;
+    anyhow::ensure!(fixture.business_cli.is_none(), "Client2-owned control requires the bound modern CLI");
+    let mut owned = RegisteredStopFixture { fixture: Some(fixture),
+        alias: format!("login-{}", uuid::Uuid::new_v4().simple()), backends: Vec::new(), registration_attempted: false };
+    let alias = owned.alias.clone();
+    let secret = owned.fixture()?.secret.clone();
+    let backend = respire::keystore::import_credential_checkpoint(&alias, "super", &secret, |backend| {
+        anyhow::ensure!(matches!(backend, "native" | "secret_service"), "registered fixture requires persistent OS credentials");
+        owned.backends.push(backend.to_owned());
+        Ok(())
+    })?;
+    anyhow::ensure!(respire::keystore::read_imported(&alias, "super", backend)? == secret,
+        "registered credential checkpoint readback mismatch");
+    let fixture = owned.fixture.as_mut().context("fixture missing")?;
+    let root = fixture.home.path().join("data");
+    let mut session: Value = serde_json::from_slice(&std::fs::read(root.join("session.json"))?)?;
+    session["keyring_account"] = json!(alias);
+    session["keyring_backend"] = json!(backend);
+    std::fs::write(root.join("session.json"), serde_json::to_vec(&session)?)?;
+    // Use the existing public classification file contract, with only a synthetic key.
+    anyhow::ensure!(respire::keystore::load_classify_key("typesafe").is_none(), "fixture classification slot is not empty");
+    std::fs::write(root.join("classify.json"), br#"{"api_key":"synthetic-native-stop-key"}"#)?;
+    support::install_runtime_fixture(&root)?;
+    let selected: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
+    fixture.runtime = root.join("runtime").join(selected["version"].as_str().context("installed version missing")?)
+        .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?;
+    std::fs::create_dir_all(root.join("bin"))?;
+    std::fs::copy(&fixture.cli, root.join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
+    Ok(owned)
+}
+
+
+struct Client2OwnedStopFixture {
+    owned: Option<RegisteredStopFixture>,
+    probe: PathBuf,
+    observed_host: Option<Value>,
+    observed_actors: Vec<(u32, Value)>,
+    identity_observation_complete: bool,
+    start_attempted: bool,
+    completed: bool,
+}
+
+impl Client2OwnedStopFixture {
+    fn owned(&self) -> anyhow::Result<&RegisteredStopFixture> {
+        self.owned.as_ref().context("Client2-owned fixture missing")
+    }
+
+    fn command(&self, action: &str) -> anyhow::Result<Command> {
+        let owned = self.owned()?;
+        let template = owned.command(&[])?;
+        let mut command = Command::new(&self.probe);
+        command.arg(action).current_dir(owned.fixture()?.home.path());
+        for (name, value) in template.get_envs() {
+            match value { Some(value) => { command.env(name, value); }, None => { command.env_remove(name); } }
+        }
+        Ok(command)
+    }
+
+    fn health(&self, backend: bool) -> anyhow::Result<Value> {
+        let fixture = self.owned()?.fixture()?;
+        let mut request = ureq::AgentBuilder::new().try_proxy_from_env(false).build()
+            .get(&format!("http://127.0.0.1:{}/api/health", fixture.port)).timeout(Duration::from_secs(3));
+        if backend { request = request.set("X-Respire-Health", "runtime-v1"); }
+        let health: Value = request.call()?.into_json()?;
+        let root = fixture.home.path().join("data").canonicalize()?;
+        anyhow::ensure!(health["server"] == "respire" && health["v"] == 1 && health["managed_id"].is_null(),
+            "Client2-owned mode must not use the registered supervisor");
+        for field in ["data_dir", "installation_root"] {
+            anyhow::ensure!(Path::new(health[field].as_str().context("Client2-owned root missing")?).canonicalize()? == root,
+                "Client2-owned scope root mismatch");
+        }
+        let expected = if backend { &fixture.runtime } else {
+            Path::new(fixture.cli.as_path())
+        };
+        // Legacy host uses the original Client2-selected Runtime image even
+        // though its process implements only the compatibility coordinator.
+        let expected = if backend { expected.to_path_buf() } else {
+            let selected: Value = serde_json::from_slice(&std::fs::read(root.join("client2/runtime.json"))?)?;
+            root.join("client2/runtime").join(selected["version"].as_str().context("Client2 version missing")?)
+                .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?
+        };
+        anyhow::ensure!(Path::new(health["exe"].as_str().context("Client2-owned image missing")?).canonicalize()? == expected,
+            "Client2-owned image mismatch");
+        Ok(health)
+    }
+
+    fn cleanup(&mut self) -> anyhow::Result<()> {
+        if self.completed { return Ok(()); }
+        let fixture = self.owned()?.fixture()?;
+        anyhow::ensure!(!self.start_attempted || self.observed_host.is_some(),
+            "Client2 startup outcome is unverified; preserve root and credential for explicit recovery");
+        anyhow::ensure!(!self.start_attempted || self.identity_observation_complete,
+            "Client2 actor observation incomplete; preserve root and credential for explicit recovery");
+        if let Some(expected) = self.observed_host.as_ref() {
+            match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", fixture.port).parse()?, Duration::from_secs(1)) {
+                Ok(_) => {
+                    let observed = self.health(false)?;
+                    for key in ["pid", "exe", "installation_root", "data_dir"] {
+                        anyhow::ensure!(observed[key] == expected[key], "Client2-owned cleanup target changed");
+                    }
+                    let output = self.command("stop")?.output()?;
+                    anyhow::ensure!(output.status.success(), "original Go owned cleanup failed");
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for (pid, identity) in &self.observed_actors {
+            anyhow::ensure!(stop_native_worker_identity(*pid)?.as_ref() != Some(identity),
+                "observed Client2 host/backend/Core is still live; preserve root and credential");
+        }
+        self.owned.as_mut().context("owned fixture missing")?.cleanup()?;
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for Client2OwnedStopFixture {
+    fn drop(&mut self) {
+        if self.cleanup().is_err() {
+            // Do not delete a possibly live root or its recovery credential.
+            if let Some(owned) = self.owned.take() { std::mem::forget(owned); }
+            eprintln!("CLIENT2_OWNED_STOP_CLEANUP_FAILED explicit owned recovery required");
+        }
+    }
+}
+
+fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+        && std::env::var("RUNNER_ENVIRONMENT").as_deref() == Ok("github-hosted"),
+        "Client2-owned native acceptance requires an ephemeral GitHub-hosted runner");
+    let probe = PathBuf::from(std::env::var_os("RSRS_CLIENT2_PROBE_BIN")
+        .context("supply the source-bound existing original Go Client2 probe executable")?).canonicalize()?;
+    anyhow::ensure!(probe.is_file(), "original Client2 probe is not a file");
+    // The producer must independently bind this binary to the unchanged 57bc070
+    // source and the existing CLI probe fixtures; a caller-provided digest alone
+    // is not a source certificate. Keep this raw report gate=not-evaluated.
+    let probe_digest = format!("{:x}", Sha256::digest(std::fs::read(&probe)?));
+    for mode in ["normal", "caller-timeout", "explicit-force"] {
+        let owned = prepare_client2_stop_fixture()?;
+        let write = StopWriteEvidence::seed(owned.fixture()?)?;
+        let root = owned.fixture()?.home.path().join("data");
+        let selected: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
+        let version = selected["version"].as_str().context("installed Runtime version missing")?;
+        let version_dir = owned.fixture()?.runtime.parent().context("Runtime bundle missing")?.to_path_buf();
+        let target = root.join("client2/runtime").join(version);
+        let mut pending = vec![(version_dir, target.clone())];
+        while let Some((source, destination)) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&source)?;
+            anyhow::ensure!(!metadata.file_type().is_symlink(), "Client2 fixture bundle contains a link");
+            #[cfg(windows)] {
+                use std::os::windows::fs::MetadataExt;
+                anyhow::ensure!(metadata.file_attributes() & 0x400 == 0, "Client2 fixture contains a reparse point");
+            }
+            if metadata.is_dir() {
+                std::fs::create_dir_all(&destination)?;
+                for entry in std::fs::read_dir(&source)? { let entry = entry?; pending.push((entry.path(), destination.join(entry.file_name()))); }
+            } else {
+                anyhow::ensure!(metadata.is_file(), "Client2 fixture bundle contains a non-file");
+                std::fs::copy(source, destination)?;
+            }
+        }
+        // Original InstalledRuntime is exactly version+sha256. This is the
+        // original launcher fixture installation shape, not an OS registration.
+        std::fs::write(root.join("client2/runtime.json"), serde_json::to_vec(&json!({"version":version,"sha256":selected["sha256"]}))?)?;
+        let mut client2 = Client2OwnedStopFixture { owned: Some(owned), probe: probe.clone(), observed_host: None, observed_actors: Vec::new(), identity_observation_complete: false, start_attempted: false, completed: false };
+        client2.start_attempted = true;
+        let started = client2.command("start")?.output()?;
+        anyhow::ensure!(started.status.success(), "original Go Manager.Start failed");
+        let startup: Value = serde_json::from_slice(&started.stdout)?;
+        for key in ["health_error", "diagnostic_error", "business_error", "catalog_error", "progress_error", "variants_error"] {
+            assert_eq!(startup[key], "", "original Go startup/RPC failed: {key}");
+        }
+        let host = client2.health(false)?;
+        client2.observed_host = Some(host.clone());
+        let backend = client2.health(true)?;
+        let host_pid = u32::try_from(host["pid"].as_u64().context("legacy host PID missing")?)?;
+        let backend_pid = u32::try_from(backend["pid"].as_u64().context("backend PID missing")?)?;
+        assert_ne!(host_pid, backend_pid);
+        let host_os = stop_native_worker_identity(host_pid)?.context("actual legacy host missing")?;
+        let backend_os = stop_native_worker_identity(backend_pid)?.context("actual backend missing")?;
+        client2.observed_actors.extend([(host_pid, host_os.clone()), (backend_pid, backend_os.clone())]);
+        assert_eq!(host["compatibility_host"], "client2-v0256");
+        assert_eq!(host["backend_pid"], backend["pid"]);
+        assert_eq!(host["backend_instance_id"], backend["instance_id"]);
+        assert_eq!(host["backend_process_start_id"], backend["process_start_id"]);
+        assert_eq!(host_os["birth"], host["host_birth"]);
+        assert_eq!(Path::new(host_os["image"].as_str().context("host OS image missing")?).canonicalize()?,
+            Path::new(host["exe"].as_str().context("host image missing")?).canonicalize()?);
+        assert_eq!(host["host_image_sha256"], format!("{:x}", Sha256::digest(std::fs::read(host["exe"].as_str().context("host image missing")?)?)));
+        assert_eq!(Path::new(backend_os["image"].as_str().context("backend OS image missing")?).canonicalize()?, client2.owned()?.fixture()?.runtime);
+        let prefix = if cfg!(windows) { "windows-filetime-" } else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
+        assert_eq!(backend["process_start_id"], format!("{prefix}{}", backend_os["birth"].as_str().context("backend OS birth missing")?));
+        assert_eq!(backend["image_sha256"], format!("{:x}", Sha256::digest(std::fs::read(&client2.owned()?.fixture()?.runtime)?)));
+        let mut provider = write.provider()?;
+        let request = json!({"v":1,"id":uuid::Uuid::new_v4().to_string(),"method":"cli.exec",
+            "operation_id":uuid::Uuid::new_v4().to_string(),"idempotency_key":uuid::Uuid::new_v4().to_string(),
+            "scope":{"account_id":backend["account_id"],"instance_id":backend["instance_id"],"generation":backend["generation"]},
+            "args":write.args(&provider.endpoint)});
+        let rpc_url = format!("http://127.0.0.1:{}/api/rpc", client2.owned()?.fixture()?.port);
+        let (url, original) = (rpc_url.clone(), request.clone());
+        client2.identity_observation_complete = false;
+        let business = std::thread::spawn(move || stop_native_post(&url, &original));
+        provider.received.recv_timeout(Duration::from_secs(30)).context("actual Client2-owned SDK callback missing")?;
+        let active = client2.health(true)?;
+        let worker_pid = u32::try_from(active["inference"]["worker_pid"].as_u64().context("Core worker missing")?)?;
+        let worker_os = stop_native_worker_identity(worker_pid)?.context("actual Core worker missing")?;
+        client2.observed_actors.push((worker_pid, worker_os.clone()));
+        assert_eq!(Path::new(worker_os["image"].as_str().context("Core OS image missing")?).canonicalize()?, client2.owned()?.fixture()?.runtime);
+        if let Some(parent) = worker_os.get("parent") { assert_eq!(*parent, json!(backend_pid)); }
+        assert!(active["control"]["admitted"].as_array().context("admission missing")?.iter()
+            .any(|item| item["operation_id"] == request["operation_id"]));
+        assert!(active["inference"]["worker_host_callbacks_active"].as_u64().is_some_and(|n| n > 0));
+        assert!(active["inference"]["worker_call_deadline_secs"].as_u64().is_some_and(|n| n >= 30));
+        client2.identity_observation_complete = true;
+        let fixture = client2.owned()?.fixture()?;
+        assert_owned_stop_lock_held(&root, backend_pid, &backend_os)?;
+        std::thread::sleep(Duration::from_millis(4200)); assert!(!business.is_finished());
+        let stop_output_path = root.join("original-go-stop.stdout");
+        let mut stop = client2.command("stop")?.stdout(std::fs::File::create(&stop_output_path)?)
+            .stderr(std::fs::File::create(root.join("original-go-stop.stderr"))?).spawn()?;
+        let started_stop = std::time::Instant::now();
+        let deadline = started_stop + Duration::from_secs(15);
+        let pending = loop {
+            let health = client2.health(true)?;
+            if health["control"]["state"] == "draining" { break health; }
+            anyhow::ensure!(stop.try_wait()?.is_none() && std::time::Instant::now() < deadline, "original Go stop did not request drain");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let operation = pending["control"]["operation_id"].clone();
+        anyhow::ensure!(operation.as_str().is_some_and(|id| !id.is_empty()), "original stop operation missing");
+        let mut caller_timeout_ms = None;
+        if mode == "normal" {
+            std::thread::sleep(Duration::from_millis(4200)); assert!(stop.try_wait()?.is_none());
+        } else {
+            let deadline = started_stop + Duration::from_secs(40);
+            loop {
+                if let Some(status) = stop.try_wait()? {
+                    assert!(!status.success(), "old caller unexpectedly completed while business was held"); break;
+                }
+                anyhow::ensure!(std::time::Instant::now() < deadline, "original Go caller did not return within its original timeout");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let stop_result: Value = serde_json::from_slice(&std::fs::read(&stop_output_path)?)?;
+            assert!(stop_result["action_error"].as_str().context("old caller timeout error missing")?
+                .contains("尚未退出，未强制结束进程"));
+            assert!(started_stop.elapsed() >= Duration::from_secs(30));
+            caller_timeout_ms = Some(started_stop.elapsed().as_millis());
+        }
+        assert!(!business.is_finished());
+        assert_eq!(stop_native_worker_identity(host_pid)?.as_ref(), Some(&host_os));
+        assert_eq!(stop_native_worker_identity(backend_pid)?.as_ref(), Some(&backend_os));
+        assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_os));
+        let after_caller = client2.health(true)?;
+        assert_eq!(after_caller["control"]["state"], "draining");
+        assert_eq!(after_caller["inference"]["worker_retired"], false);
+        let mut replay = request.clone(); replay["id"] = json!(uuid::Uuid::new_v4().to_string());
+        let (_, same_key) = stop_native_post(&rpc_url, &replay)?;
+        assert_eq!(same_key["code"], "request_in_progress"); assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        assert_owned_stop_lock_held(&root, backend_pid, &backend_os)?;
+        let mut force_receipt = None;
+        if mode == "explicit-force" {
+            // The old Stop(bool) is ownedOnly, never force. This is a separate,
+            // explicit modern request tied to the original stop operation/actor.
+            let force = json!({"installation_id":backend["installation_id"],"instance_id":backend["instance_id"],
+                "account_id":backend["account_id"],"generation":backend["generation"],"operation_id":operation,"force":true});
+            let (status, receipt) = stop_native_post(&format!("http://127.0.0.1:{}/api/runtime/stop", fixture.port), &force)?;
+            assert_eq!(status, 200); assert_eq!(receipt["operation_id"], operation);
+            assert_eq!(receipt["timeout_state"], "forced_timeout");
+            assert!(receipt["deadline_ms"].as_u64().is_some_and(|ms| ms <= 4000));
+            force_receipt = Some(receipt);
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                let health = client2.health(true)?;
+                if health["inference"]["retired_worker"]["worker_reaped"] == true { break; }
+                anyhow::ensure!(std::time::Instant::now() < deadline, "explicit force did not retire the original Core worker");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_os));
+            assert!(!business.is_finished());
+            assert_owned_stop_lock_held(&root, backend_pid, &backend_os)?;
+        }
+        provider.release.store(true, Ordering::Release);
+        let (_, result) = business.join().map_err(|_| anyhow::anyhow!("Client2-owned modern business thread panicked"))??;
+        assert_eq!(result["id"], request["id"]); assert_eq!(result["operation_id"], request["operation_id"]);
+        if mode == "explicit-force" { assert_eq!(result["ok"], false); }
+        else { write.assert_result(&result, &request); }
+        if mode == "normal" {
+            let deadline = std::time::Instant::now() + Duration::from_secs(40);
+            loop {
+                if let Some(status) = stop.try_wait()? { anyhow::ensure!(status.success(), "original normal Go Stop failed"); break; }
+                anyhow::ensure!(std::time::Instant::now() < deadline, "original Go Stop did not complete after business");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&stop_output_path)?)?["stopped"], true);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if stop_native_worker_identity(host_pid)?.as_ref() != Some(&host_os)
+                && stop_native_worker_identity(backend_pid)?.as_ref() != Some(&backend_os)
+                && stop_native_worker_identity(worker_pid)?.as_ref() != Some(&worker_os) { break; }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "Client2-owned host/backend/Core did not finish exit");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let original_receipt_path = root.join("runtime")
+            .join(format!("stop-{}.json", backend["instance_id"].as_str().context("backend instance missing")?));
+        let original_receipt_bytes = std::fs::read(&original_receipt_path)?;
+        let final_receipt: Value = serde_json::from_slice(&original_receipt_bytes)?;
+        assert_eq!(final_receipt["schema_version"], 1); assert_eq!(final_receipt["protocol_version"], 1);
+        assert_eq!(final_receipt["operation_id"], operation);
+        for key in ["installation_id","instance_id","pid","process_start_id","image_path","image_sha256","runtime_version","account_id","generation"] {
+            assert_eq!(final_receipt[key], backend[key], "Client2-owned final receipt identity changed: {key}");
+        }
+        assert_eq!(final_receipt["state"], if mode == "explicit-force" { "forced_timeout" } else { "drained" });
+        if mode == "explicit-force" {
+            let unfinished = final_receipt["unfinished"].as_array().context("forced unfinished records missing")?;
+            assert_eq!(unfinished.iter().filter(|item| item["operation_id"] == request["operation_id"] && item["result"] == "unknown").count(), 1);
+        } else { assert_eq!(final_receipt["unfinished"], json!([])); }
+        match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", fixture.port).parse()?, Duration::from_secs(1)) {
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
+            other => anyhow::bail!("Client2-owned stopped listener did not refuse: {other:?}"),
+        }
+        let lock = respire::lock::LibraryLock::acquire(&root, Duration::from_secs(1))?; drop(lock);
+        if mode == "explicit-force" { write.assert_uncommitted(fixture)?; }
+        else { write.assert_committed(fixture)?; }
+        // Explicit recovery starts a new actor; querying the old fingerprint
+        // cannot re-execute it or convert an old unknown result to success.
+        client2.identity_observation_complete = false;
+        let restarted_output = client2.command("start")?.output()?;
+        anyhow::ensure!(restarted_output.status.success(), "explicit original Go recovery start failed");
+        let recovered_host = client2.health(false)?;
+        let recovered = client2.health(true)?;
+        assert_ne!(recovered["instance_id"], backend["instance_id"]);
+        let recovered_host_pid = u32::try_from(recovered_host["pid"].as_u64().context("recovered host PID missing")?)?;
+        let recovered_pid = u32::try_from(recovered["pid"].as_u64().context("recovered backend PID missing")?)?;
+        let recovered_host_os = stop_native_worker_identity(recovered_host_pid)?.context("recovered host missing")?;
+        let recovered_os = stop_native_worker_identity(recovered_pid)?.context("recovered backend missing")?;
+        client2.observed_actors.extend([(recovered_host_pid, recovered_host_os.clone()), (recovered_pid, recovered_os.clone())]);
+        assert_ne!(recovered_host_os, host_os); assert_ne!(recovered_os, backend_os);
+        let recovered_worker = match recovered["inference"].get("worker_pid").context("recovered Core observation missing")? {
+            Value::Null => None,
+            value => {
+                let pid = u32::try_from(value.as_u64().context("recovered Core PID is invalid")?)?;
+                let identity = stop_native_worker_identity(pid)?.context("recovered Core worker not live")?;
+                anyhow::ensure!(Path::new(identity["image"].as_str().context("recovered Core OS image missing")?).canonicalize()?
+                    == client2.owned()?.fixture()?.runtime, "recovered Core OS image mismatch");
+                if let Some(parent) = identity.get("parent") { assert_eq!(*parent, json!(recovered_pid)); }
+                client2.observed_actors.push((pid, identity.clone()));
+                Some((pid, identity))
+            }
+        };
+        client2.observed_host = Some(recovered_host.clone());
+        client2.identity_observation_complete = true;
+        replay["id"] = json!(uuid::Uuid::new_v4().to_string());
+        let (_, stale) = stop_native_post(&rpc_url, &replay)?;
+        assert_eq!(stale["code"], "scope_mismatch"); assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        let recovered_stop = client2.command("stop")?.output()?;
+        anyhow::ensure!(recovered_stop.status.success(), "explicit recovered actor did not stop normally");
+        let recovered_receipt: Value = serde_json::from_slice(&std::fs::read(root.join("runtime")
+            .join(format!("stop-{}.json", recovered["instance_id"].as_str().context("recovered instance missing")?)))?)?;
+        assert_eq!(recovered_receipt["state"], "drained"); assert_eq!(recovered_receipt["unfinished"], json!([]));
+        for key in ["installation_id","instance_id","pid","process_start_id","image_path","image_sha256","runtime_version","account_id","generation"] {
+            assert_eq!(recovered_receipt[key], recovered[key], "recovered final receipt identity changed: {key}");
+        }
+        assert_ne!(stop_native_worker_identity(recovered_host_pid)?.as_ref(), Some(&recovered_host_os));
+        assert_ne!(stop_native_worker_identity(recovered_pid)?.as_ref(), Some(&recovered_os));
+        if let Some((pid, identity)) = recovered_worker.as_ref() {
+            assert_ne!(stop_native_worker_identity(*pid)?.as_ref(), Some(identity));
+        }
+        assert_eq!(std::fs::read(&original_receipt_path)?, original_receipt_bytes,
+            "explicit recovery changed the original drained/unknown receipt");
+        provider.finish()?; assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        // The listener is now closed, so owned cleanup only removes the exact
+        // synthetic persistent credential; it does not send another stop.
+        client2.cleanup()?;
+        eprintln!("NATIVE_CLIENT2_STOP_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
+            "startup_mode":"client2-owned","case":mode,"business_sender":"modern-harness","stop_sender":"original-go-client2",
+            "probe_sha256":probe_digest,"runtime_identity":backend,"legacy_host":host,
+            "host_os_identity":host_os,"backend_os_identity":backend_os,"worker_os_identity":worker_os,
+            "caller_timeout_ms":caller_timeout_ms,"runtime_compatibility_timeout_claimed":false,"after_caller_health":after_caller,
+            "business_result":result,"same_key_result":same_key,"explicit_force_response":force_receipt,
+            "final_receipt":final_receipt,"recovered_identity":recovered,"recovered_receipt":recovered_receipt,"stale_scope_result":stale,
+            "provider_http_status":200,"encrypted_write_committed":mode != "explicit-force",
+            "forced_operation_remains_unknown":mode == "explicit-force",
+            "provider_requests":1,"credential_cleanup_verified":true,"passed":true}));
     }
     Ok(())
 }
