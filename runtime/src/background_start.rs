@@ -18,7 +18,7 @@ pub(crate) fn is_unavailable(error: &anyhow::Error) -> bool {
     )
 }
 
-fn read_ready(reader: impl Read) -> Result<Health> {
+fn read_ready_value(reader: impl Read) -> Result<serde_json::Value> {
     let mut reader = BufReader::new(reader.take(READY_LIMIT + 1));
     let mut frame = Vec::new();
     reader.read_until(b'\n', &mut frame)?;
@@ -32,7 +32,65 @@ fn read_ready(reader: impl Read) -> Result<Health> {
         value["startup_complete"] == true,
         "Runtime has not completed configured-mode startup"
     );
-    serde_json::from_value(value).context("background Runtime readiness is not a health frame")
+    Ok(value)
+}
+
+fn read_ready(reader: impl Read) -> Result<Health> {
+    serde_json::from_value(read_ready_value(reader)?).context("background Runtime readiness is not a health frame")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn verify_observed_child(value: &serde_json::Value, observer_pid: u32) -> Result<()> {
+    let pid = value["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok());
+    anyhow::ensure!(observer_pid > 0 && value["exit_observer_pid"] == observer_pid
+        && value["startup_complete"] == true && pid.is_some_and(|pid| pid > 0 && pid != observer_pid),
+        "private readiness does not identify this observer and its Runtime child");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn observe_exit() -> Result<i32> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    anyhow::ensure!(args.len() == 3 && args[1] == "--port", "invalid exit observer arguments");
+    let port: u16 = args[2].parse()?;
+    anyhow::ensure!(port > 0, "invalid exit observer port");
+    std::env::set_var("RSRS_RPC_PORT", port.to_string());
+    let expected = crate::startup_identity::background_start_context(port)?;
+    expected.verify_current()?;
+    let mut command = Command::new(expected.image_path());
+    command.args(["--runtime-internal", "--runtime-background-internal", "--port", &port.to_string()])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    let mut child = respire_spawn::spawn_host_control(&mut command)?;
+    let reader = child.stdout.take().context("owned Runtime readiness pipe missing")?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || { let _ = tx.send(read_ready_value(reader)); });
+    let mut value = rx.recv_timeout(READY_TIMEOUT)
+        .with_context(|| format!("Runtime readiness uncertain for owned child {}; inspect before retry", child.id()))??;
+    let ready: Health = serde_json::from_value(value.clone())?;
+    anyhow::ensure!(ready.pid == child.id(), "readiness does not identify the observer's owned child");
+    expected.verify(&ready)?;
+    value["exit_observer_pid"] = serde_json::json!(std::process::id());
+    verify_observed_child(&value, std::process::id())?;
+    let published = (|| -> Result<()> {
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &value)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+        Ok(())
+    })();
+    // Preserve the actual child's wait status through unchanged Client2's
+    // 30-second poll window. Its Darwin API accepts zombies but returns EIO
+    // for an already-reaped, zero-length kinfo_proc record.
+    while net_rpc::instance_is_running(&ready)? {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(35));
+    let status = child.wait()?;
+    published?;
+    anyhow::ensure!(status.success(), "observed Runtime exited unsuccessfully");
+    Ok(0)
 }
 
 pub(crate) fn start(flags: &crate::Flags) -> Result<i32> {
@@ -92,6 +150,7 @@ fn start_inner(flags: &crate::Flags) -> Result<(Health, &'static str)> {
             return Err(error).context("endpoint ownership is uncertain; startup refused")
         }
     }
+    #[cfg(not(target_os = "macos"))]
     let args = [
         "--runtime-internal",
         "--runtime-background-internal",
@@ -99,6 +158,9 @@ fn start_inner(flags: &crate::Flags) -> Result<(Health, &'static str)> {
         &port.to_string(),
     ]
     .map(std::ffi::OsString::from);
+    #[cfg(target_os = "macos")]
+    let args = ["--runtime-exit-observer-internal", "--port", &port.to_string()]
+        .map(std::ffi::OsString::from);
     let mut child = respire_spawn::spawn_binary_with_readiness(expected.image_path(), &args)
         .context("cannot spawn the selected Runtime image")?;
     let pid = child.id();
@@ -110,12 +172,12 @@ fn start_inner(flags: &crate::Flags) -> Result<(Health, &'static str)> {
     std::thread::Builder::new()
         .name("runtime-start-readiness".into())
         .spawn(move || {
-            let _ = tx.send(read_ready(output));
+            let _ = tx.send(read_ready_value(output));
         })?;
     // An uncertain readiness outcome must not cause a second launch, ownership
     // transfer, forced termination, or a fabricated success. Leave any live
     // child for an identity-checked status/stop, and report the exact spawned PID.
-    let ready = rx
+    let value = rx
         .recv_timeout(READY_TIMEOUT)
         .with_context(|| {
             format!(
@@ -123,18 +185,22 @@ fn start_inner(flags: &crate::Flags) -> Result<(Health, &'static str)> {
             )
         })?
         .with_context(|| format!("Runtime startup failed for spawned PID {pid}"))?;
+    let ready: Health = serde_json::from_value(value.clone())?;
     anyhow::ensure!(
         child.try_wait()?.is_none(),
         "background Runtime exited during startup"
     );
+    #[cfg(not(target_os = "macos"))]
     anyhow::ensure!(
         ready.pid == pid,
         "readiness does not identify the spawned Runtime child"
     );
+    #[cfg(target_os = "macos")]
+    verify_observed_child(&value, pid)?;
     expected.verify(&ready)?;
     let live = net_rpc::health().context("initialized Runtime is not reachable")?;
     anyhow::ensure!(
-        live.pid == pid
+        live.pid == ready.pid
             && live.instance_id == ready.instance_id
             && live.process_start_id == ready.process_start_id,
         "Runtime listener changed after private readiness"
@@ -146,6 +212,21 @@ fn start_inner(flags: &crate::Flags) -> Result<(Health, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observer_readiness_requires_the_owned_parent_and_distinct_child() -> Result<()> {
+        let value = serde_json::json!({"startup_complete":true, "pid":123, "exit_observer_pid":456});
+        verify_observed_child(&value, 456)?;
+        for (key, wrong) in [("pid", serde_json::json!(0)), ("pid", serde_json::json!(456)),
+            ("pid", serde_json::json!(u64::MAX)), ("exit_observer_pid", serde_json::json!(789)),
+            ("startup_complete", serde_json::json!(false))] {
+            let mut altered = value.clone();
+            altered[key] = wrong;
+            assert!(verify_observed_child(&altered, 456).is_err(), "{key}");
+        }
+        assert!(verify_observed_child(&value, 0).is_err());
+        Ok(())
+    }
 
     #[test]
     fn rejects_incomplete_or_oversized_readiness() {

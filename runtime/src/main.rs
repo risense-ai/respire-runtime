@@ -109,6 +109,11 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--runtime-exit-observer-internal") {
+        anyhow::ensure!(boot_token.is_none(), "exit observer cannot consume boot authorization");
+        return background_start::observe_exit();
+    }
     if std::env::args_os().skip(1).any(|arg| arg == "--host-rpc-stdio") {
         anyhow::ensure!(boot_token.is_none(), "host RPC cannot consume runtime boot authorization");
         host_account::install_frontend()?;
