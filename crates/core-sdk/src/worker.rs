@@ -282,11 +282,12 @@ fn process() -> Result<Arc<Process>> {
     {
         return Ok(Arc::clone(process));
     }
-    anyhow::ensure!(
-        slot.as_ref()
-            .is_none_or(|process| process.reaped.load(Ordering::Acquire)),
-        "previous Core worker has not exited; replacement prohibited; command was not submitted"
-    );
+    if let Some(process) = slot.as_ref() {
+        // A failed cleanup must not permanently strand the retained child handle.
+        process.retire("retry previous worker cleanup").context(
+            "previous Core worker has not exited; replacement prohibited; command was not submitted",
+        )?;
+    }
     let mut command = Command::new(std::env::current_exe()?);
     // Transport credentials and account keys remain in the owning host. Only
     // OS loader paths and explicit local inference settings reach the child.
