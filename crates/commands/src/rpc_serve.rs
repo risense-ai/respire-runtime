@@ -1150,7 +1150,7 @@ fn dispatch_inner(request: RpcRequest, tx: &Sender<Job>, legacy: bool) -> RpcRes
     #[cfg(test)]
     tests::wait_before_direct_gate(&request.id);
     let gate = shared_exclusive();
-    let _held = if operation.is_some() && !matches!(request.method.as_str(), "cli.exec" | "model.control") {
+    let _held = if operation.is_some() && !matches!(request.method.as_str(), "cli.exec" | "model.control" | "cli.progress") {
         Some(gate.acquire(true))
     } else {
         None
@@ -3414,7 +3414,8 @@ fn admit_with_retention(request: &RpcRequest, operation: &OperationIdentity,
         "scope_mismatch".to_owned(), "identity fence poisoned".to_owned(),
     ))?;
     let gate = shared_exclusive();
-    let _held = if request.method == "model.control" { None } else { Some(gate.acquire(true)) };
+    // Legacy progress must observe the command while it holds the execution gate.
+    let _held = if matches!(request.method.as_str(), "model.control" | "cli.progress") { None } else { Some(gate.acquire(true)) };
     let mut admitted = ADMISSIONS.lock().map_err(|_| (
         "admission_lock_poisoned".to_owned(), "runtime admission lock is poisoned".to_owned(),
     ))?;
@@ -3611,6 +3612,30 @@ mod tests {
             assert_eq!(EFFECTS.load(Ordering::Acquire), 0);
             return Ok(());
         }
+        let progress_scope = crate::progress::Scope::start(Some("busy-parent".into()), false, false)
+            .context("missing progress scope")?;
+        crate::progress::phase("Waiting for synthetic server", "Waiting for synthetic server");
+        let (progress, _) = prepare("progress-during-exclusive", "cli.progress", &["busy-parent"])?;
+        let mut stale_progress = progress.clone();
+        stale_progress.id = "stale-progress".into();
+        let gate = shared_exclusive();
+        let held = gate.acquire(true);
+        let (progress_reply, progress_result) = std::sync::mpsc::channel();
+        let progress_jobs = jobs.clone();
+        let progress_worker = std::thread::spawn(move || {
+            let _ = progress_reply.send(dispatch_inner(progress, &progress_jobs, true));
+        });
+        let observed = progress_result.recv_timeout(Duration::from_secs(5));
+        // Release the gate even when the old blocking behavior regresses.
+        drop(held);
+        progress_worker.join().map_err(|_| anyhow::anyhow!("progress handler panicked"))?;
+        let observed = observed.context("legacy progress blocked behind the business execution gate")?;
+        assert!(observed.ok);
+        assert_eq!(observed.envelope.context("missing progress response")?.summary["phase"],
+            "Waiting for synthetic server");
+        assert_eq!(EFFECTS.load(Ordering::Acquire), 0, "progress must not execute business");
+        assert!(queued.try_recv().is_err(), "progress must not queue business");
+        drop(progress_scope);
         let old_wire = serde_json::to_vec(&json!({"v":1,"id":"optional-fields","method":"cli.exec",
             "args":["--json","status"],"queue_wait_ms":1200,"lifecycle":null}))?;
         let (optional, _) = crate::legacy_host::prepare(&old_wire)?.context("missing old request")?;
@@ -3642,6 +3667,7 @@ mod tests {
         assert_eq!(original.exit, 7); assert!(!original.ok);
         assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
         assert_eq!(current_scope().generation, initial.generation + 1);
+        assert_eq!(dispatch_inner(stale_progress, &jobs, true).code.as_deref(), Some("scope_mismatch"));
         assert!(capture_scoped(&initial, vec!["status".into()]).is_err(),
             "old queued generation must not execute after the transition");
         assert!(crate::legacy_host::health().is_ok(), "legal generation change must not revoke the actor");
@@ -3695,6 +3721,7 @@ mod tests {
         // real model handlers without configuring or loading any model.
         let (configure, _) = prepare("waiting-configure", "model.configure", &["{}"])?;
         let (control, _) = prepare("waiting-control", "model.control", &["not-an-action"])?;
+        let (revoked_progress, _) = prepare("revoked-progress", "cli.progress", &["busy-parent"])?;
         let barrier = Arc::new(std::sync::Barrier::new(2));
         DIRECT_GATE_BARRIER.set((configure.id.clone(), barrier.clone()))
             .map_err(|_| anyhow::anyhow!("direct gate barrier already installed"))?;
@@ -3710,6 +3737,7 @@ mod tests {
         let refused = worker.join().map_err(|_| anyhow::anyhow!("direct handler panicked"))?;
         assert_eq!(refused.code.as_deref(), Some("legacy_host_binding_changed"));
         assert_eq!(dispatch_inner(control, &jobs, true).code.as_deref(), Some("legacy_host_binding_changed"));
+        assert_eq!(dispatch_inner(revoked_progress, &jobs, true).code.as_deref(), Some("legacy_host_binding_changed"));
         assert!(capture_scoped(&current_scope(), vec!["status".into()]).is_err());
         assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
         Ok(())
