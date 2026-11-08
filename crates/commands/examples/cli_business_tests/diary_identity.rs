@@ -1329,13 +1329,19 @@ impl Fixture {
 fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
     for forced in [false, true] {
+        let checkpoint = |stage: &str| eprintln!("NATIVE_STOP_CHECKPOINT mode={} stage={stage}",
+            if forced { "forced" } else { "normal" });
+        checkpoint("start");
         let mut fixture = Fixture::new()?;
+        checkpoint("fixture_ready");
         let mut memory = entry("native-stop-source", "synthetic-diary", "Native classification source", "Synthetic native stop evidence");
         memory.parent_id.clear();
         memory.importance = "important".into();
         fixture.seed(&memory, false)?;
+        checkpoint("memory_seeded");
         let before = serde_json::to_value(fixture.store()?.all(true)?)?;
         let health = fixture.start_standalone_for_stop()?;
+        checkpoint("runtime_ready");
         assert!(health["managed_id"].is_null(), "standalone case must not bypass a lifecycle coordinator");
         let mut provider = HeldClassifyProvider::new()?;
         let rpc_url = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
@@ -1349,6 +1355,7 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
         let business = std::thread::spawn(move || stop_native_post(&url, &original));
         provider.received.recv_timeout(Duration::from_secs(30))
             .context("actual SDK classification did not reach the loopback provider")?;
+        checkpoint("provider_received");
         let io_started = std::time::Instant::now();
         let active = fixture.standalone_stop_health()?;
         assert!(active["control"]["admitted"].as_array().context("admission list missing")?.iter()
@@ -1365,6 +1372,7 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
         assert_eq!(Path::new(worker_identity["image"].as_str().context("worker OS image missing")?).canonicalize()?, fixture.runtime);
         if let Some(parent) = worker_identity.get("parent") { assert_eq!(*parent, health["pid"]); }
         fixture.assert_standalone_stop_lock_held()?;
+        checkpoint("active_verified");
         std::thread::sleep(Duration::from_millis(4200));
         assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
         assert!(!business.is_finished(), "real business completed before stop");
@@ -1378,6 +1386,7 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
         assert!(accepted["deadline_ms"].is_null() && accepted["timeout_state"].is_null());
         let operation = accepted["operation_id"].clone();
         anyhow::ensure!(operation.as_str().is_some_and(|id| !id.is_empty()), "stop operation missing");
+        checkpoint("stop_accepted");
         let accepted_at = std::time::Instant::now();
         let mut force_requests = Vec::new();
         let held_health;
@@ -1396,6 +1405,7 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
             missing.as_object_mut().context("force body missing")?.remove("operation_id");
             assert_eq!(stop_native_post(&stop_url, &missing)?.0, 409);
             assert!(stop_native_post(&stop_url, &identity)?.1["deadline_ms"].is_null());
+            checkpoint("force_identities_rejected");
             let deadline = std::time::Instant::now() + Duration::from_secs(15);
             let mut previous_ms = 4000;
             let mut request_ids = std::collections::HashSet::new();
@@ -1419,6 +1429,7 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
                     assert!(observed["inference"]["host_transport_callbacks_active"].as_u64().is_some_and(|count| count > 0));
                     assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
                     held_health = observed;
+                    checkpoint("worker_reaped");
                     break;
                 }
                 anyhow::ensure!(std::time::Instant::now() < deadline, "repeated force prevented actual worker retirement");
@@ -1433,6 +1444,7 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
             assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
             assert!(accepted_at.elapsed() > Duration::from_secs(4));
             held_health = pending;
+            checkpoint("normal_waited");
         }
         let business_held_after_stop_ms = accepted_at.elapsed().as_millis();
         assert!(!business.is_finished(), "host callback was silently cancelled");
@@ -1442,12 +1454,15 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
         let (_, replayed) = stop_native_post(&rpc_url, &replay)?;
         assert_eq!(replayed["code"], "request_in_progress");
         assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        checkpoint("same_key_checked");
         provider.release.store(true, Ordering::Release);
         let (_, result) = business.join().map_err(|_| anyhow::anyhow!("native business client panicked"))??;
         assert_eq!(result["id"], request["id"]);
         assert_eq!(result["operation_id"], business_operation);
         if forced { assert_eq!(result["ok"], false); }
+        checkpoint("business_completed");
         let receipt = fixture.finish_standalone_stop(&health, &operation, forced)?;
+        checkpoint("runtime_stopped");
         if forced {
             let unfinished = receipt["unfinished"].as_array().context("forced unfinished list missing")?;
             assert_eq!(unfinished.iter().filter(|item| item["operation_id"] == business_operation).count(), 1);
@@ -1456,18 +1471,23 @@ fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyh
         } else { assert_eq!(receipt["unfinished"], json!([])); }
         assert_eq!(provider.calls.load(Ordering::Acquire), 1);
         assert_eq!(serde_json::to_value(fixture.store()?.all(true)?)?, before, "classification changed stored memory");
+        checkpoint("store_unchanged");
         let restarted = fixture.start_standalone_for_stop()?;
+        checkpoint("restarted");
         assert_ne!(restarted["instance_id"], health["instance_id"]);
         replay["id"] = json!("native-stop-original-scope-after-restart");
         let (_, stale) = stop_native_post(&rpc_url, &replay)?;
         assert_eq!(stale["code"], "scope_mismatch");
         assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        checkpoint("stale_rejected");
         let restart_identity = json!({"installation_id":restarted["installation_id"],"instance_id":restarted["instance_id"],
             "account_id":restarted["account_id"],"generation":restarted["generation"]});
         let (_, stopped) = stop_native_post(&stop_url, &restart_identity)?;
         let restarted_receipt = fixture.finish_standalone_stop(&restarted, &stopped["operation_id"], false)?;
+        checkpoint("restart_stopped");
         provider.finish()?;
         assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        checkpoint("complete");
         eprintln!("NATIVE_STOP_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
             "startup_mode":"standalone","forced":forced,"passed":true,"runtime_identity":health,
             "worker_identity":worker_identity,"active_health":active,"held_health":held_health,
