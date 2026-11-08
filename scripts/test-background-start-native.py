@@ -2,6 +2,7 @@
 """Real candidate lifecycle regression; deliberately not a frozen G1 report."""
 import hashlib
 import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import shutil
@@ -57,10 +58,20 @@ def main():
     subprocess.run(['go', 'build', '-buildvcs=false', '-mod=mod', '-o', str(probe / 'probe'), '.'],
                    cwd=probe, check=True, timeout=180)
     (data / 'client2' / 'runtime.json').write_text(json.dumps({'version': version, 'sha256': digest(executable)}))
-    evidence = {'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+    evidence = {'schema': 1, 'evidence_class': 'native-raw', 'gate': 'not-evaluated',
+                'candidate_sha256': None, 'startup_mode': 'client2-owned',
+                'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                'repository': os.environ['GITHUB_REPOSITORY'], 'run_id': os.environ['GITHUB_RUN_ID'],
+                'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                'started_at': datetime.now(timezone.utc).isoformat(), 'case_results': [],
                 'target': os.environ['RUNTIME_TARGET'], 'version': version,
                 'client2_source': client2_sha,
                 'binary_sha256': digest(executable), 'g1_passed': False, 'passed': False, 'commands': []}
+    evidence['source_sha'] = evidence['source']
+
+    def passed_case(name):
+        evidence['case_results'].append({'test_id': 'runtime.stop-clean-drained',
+                                         'name': name, 'status': 'passed'})
 
     def client2(action):
         result = subprocess.run([str(probe / 'probe'), action], env=env, capture_output=True, timeout=150)
@@ -97,6 +108,7 @@ def main():
         assert health['image_sha256'] == evidence['binary_sha256']
         assert health['runtime_version'] == version and health['bin'] == version
         evidence['health'] = health
+        passed_case('client2-owned-os-image-root-digest-verified')
         legacy = Path(os.environ['LEGACY_CLI_PATH']).resolve(strict=True)
         legacy_env = dict(env, RSRS_NO_AUTOSTART='1', RSRS_UPDATE_CHECK='0', RSRS_NO_AUTOSYNC='1')
         result = subprocess.run([str(legacy), '--json', 'status'], env=legacy_env,
@@ -109,13 +121,26 @@ def main():
         assert status['command'] == 'status' and status['status'] == 'ok' and status['errors'] == [], status
         assert command('start')['result'] == 'already_running'
         assert command('status')['pid'] == health['pid']
+        passed_case('client2-owned-repeated-start-reuses-verified-runtime')
         client2('stop')
         receipt = json.loads((data / 'runtime' / f"stop-{health['instance_id']}.json").read_text())
+        evidence['stop_receipt'] = receipt
+        assert receipt['schema_version'] == 1 and receipt['protocol_version'] == 1
+        assert isinstance(receipt['operation_id'], str) and receipt['operation_id']
+        assert Path(receipt['image_path']).resolve() == executable.resolve()
         for key in ('pid', 'installation_id', 'instance_id', 'process_start_id', 'image_sha256',
                     'runtime_version', 'account_id', 'generation'):
             assert receipt[key] == health[key], key
         assert receipt['state'] == 'drained' and receipt['unfinished'] == []
+        passed_case('client2-owned-identity-bound-final-drained-receipt')
         assert command('status')['result'] == 'not_running'
+        passed_case('client2-owned-stopped-runtime-not-discoverable')
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=5):
+                raise AssertionError('stopped Runtime still accepts connections')
+        except ConnectionRefusedError:
+            pass
+        passed_case('client2-owned-listener-closed-after-stop')
         evidence['passed'] = True
     finally:
         try:
@@ -124,6 +149,7 @@ def main():
             evidence['passed'] = False
             raise
         finally:
+            evidence['completed_at'] = datetime.now(timezone.utc).isoformat()
             (Path(os.environ['RUNNER_TEMP']) / 'background-candidate-regression.json').write_text(
                 json.dumps(evidence, indent=2) + '\n', encoding='utf-8')
             print(json.dumps(evidence, indent=2), flush=True)

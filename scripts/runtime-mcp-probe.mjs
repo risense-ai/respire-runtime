@@ -27,13 +27,14 @@ export function validateMcpStatus(result, health) {
 
 // Caller has verified the real process and native archive before invoking this.
 // This is raw acceptance evidence, never a frozen-candidate/G1 certificate.
-export async function runRuntimeMcpProbe(endpoint, version, health) {
+export async function runRuntimeMcpProbe(endpoint, version, health, evidence = {}) {
   const url = new URL(endpoint);
   assert.equal(url.protocol, 'http:');
   assert.equal(url.hostname, '127.0.0.1');
   assert.equal(url.pathname, '/');
   assert.equal(url.username + url.password + url.search + url.hash, '');
-  const evidence = {};
+  evidence.case_results = [];
+  const passed = name => evidence.case_results.push({test_id: 'runtime.mcp-initialize-tools-list', name, status: 'passed'});
   async function call(method, params = {}) {
     const id = `runtime-mcp-${method}`;
     const request = {jsonrpc: '2.0', id, method, params};
@@ -51,6 +52,7 @@ export async function runRuntimeMcpProbe(endpoint, version, health) {
   assert.equal(initialized.serverInfo?.name, 'respire-runtime');
   assert.equal(initialized.serverInfo?.version, version);
   assert.deepEqual(initialized.capabilities?.tools, {});
+  passed('initialize');
   const listed = await call('tools/list');
   assert.ok(Array.isArray(listed.tools) && listed.tools.length > 0);
   const names = listed.tools.map(tool => tool.name);
@@ -61,13 +63,16 @@ export async function runRuntimeMcpProbe(endpoint, version, health) {
     assert.equal(tool.inputSchema?.type, 'object');
   }
   for (const name of ['memory_status', 'memory_remember', 'memory_recall']) assert.ok(names.includes(name));
+  passed('tools/list');
   validateMcpStatus(await call('tools/call', {name: 'memory_status', arguments: {}}), health);
+  passed('tools/call:memory_status');
   const response = await fetch(`${url.origin}/api/health`, {redirect: 'error', signal: AbortSignal.timeout(5000)});
   assert.equal(response.status, 200);
   const after = await response.json();
   for (const key of ['pid', 'instance_id', 'process_start_id', 'image_sha256', 'runtime_version']) {
     assert.equal(after[key], health[key], `MCP changed the verified Runtime identity: ${key}`);
   }
-  evidence.cases = ['initialize', 'tools/list', 'tools/call:memory_status', 'same-process-after-call'];
+  passed('same-process-after-call');
+  evidence.cases = evidence.case_results.map(item => item.name);
   return evidence;
 }

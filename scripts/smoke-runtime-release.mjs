@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawn, execFileSync} from 'node:child_process';
+import {createConnection} from 'node:net';
 import {chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -198,6 +199,8 @@ const metadata = JSON.parse(readFileSync(join(assets, `runtime-build-${target}.j
 assert.equal(metadata.schema_version, 2);
 assert.equal(metadata.target_triple, target);
 assert.equal(metadata.runtime_version, version);
+assert.match(metadata.source_commit ?? '', /^[a-f0-9]{40}$/);
+assert.equal(metadata.source_commit, execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim());
 assert.deepEqual(metadata.protocol_range, {minimum: 1, maximum: 1});
 assert.equal(metadata.capabilities?.business_executor, '1');
 assert.equal(metadata.capabilities?.mcp_server, '1');
@@ -214,11 +217,14 @@ mkdirSync(dataDir);
 mkdirSync(modelDir);
 let child, exitState, spawnError;
 const reportPath = resolve('smoke-report', `runtime-smoke-${target}.json`);
-const report = {target, version, source_commit: metadata.source_commit,
+const report = {schema: 1, evidence_class: 'native-raw', gate: 'not-evaluated', candidate_sha256: null,
+  target, version, source_commit: metadata.source_commit, source_sha: metadata.source_commit,
+  repository: process.env.GITHUB_REPOSITORY, started_at: new Date().toISOString(), case_results: [],
   run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
   archive_sha256: metadata.archive_sha256, binary_sha256: metadata.binary_sha256,
   coverage: ['complete-release-payload', 'os-bound-startup-health', 'real-mcp-initialize-tools-status', 'scoped-model-settings-no-assets', 'bad-client-config-rejection-and-recovery', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
+const passedCase = (test_id, name) => report.case_results.push({test_id, name, status: 'passed'});
 try {
   const tar = archiveTool(process.platform, process.env.SystemRoot);
   const archive = metadata.archive_file;
@@ -312,7 +318,8 @@ try {
   assert.match(health.instance_id ?? '', /^[A-Za-z0-9_-]{1,128}$/);
   assert.ok(health.installation_id && health.account_id && health.process_start_id);
   assert.ok(Number.isSafeInteger(health.generation) && health.generation > 0);
-  report.mcp = await runRuntimeMcpProbe(endpoint, version, health);
+  report.mcp = {};
+  await runRuntimeMcpProbe(endpoint, version, health, report.mcp);
   // Settings must commit without model assets; a self-waiting config lock must time out, not pass health-only smoke.
   assert.deepEqual(readdirSync(modelDir), []);
   report.model_settings = {};
@@ -351,31 +358,54 @@ try {
     report.bad_config = {request, http_status: rejected.status, body};
     assert.equal(rejected.status, 200, 'Malformed config must retain the structured RPC error envelope');
     assertBadConfigResponse(JSON.parse(body), request, health);
+    passedCase('runtime.client-json-bad-config', 'scoped-structured-invalid-config-envelope');
     assert.deepEqual(readFileSync(configPath), malformedConfig, 'Rejected request changed the invalid configuration');
+    passedCase('runtime.client-json-bad-config', 'invalid-client-config-bytes-preserved');
     assert.deepEqual(readFileSync(join(dataDir, 'inference.json')), settingsBytes);
+    passedCase('runtime.client-json-bad-config', 'inference-settings-preserved-on-rejection');
   } finally {
     if (originalConfig === null) rmSync(configPath, {force: true});
     else writeFileSync(configPath, originalConfig);
   }
   await execModel('after-bad-config', []);
   assert.deepEqual(readFileSync(join(dataDir, 'inference.json')), settingsBytes);
+  passedCase('runtime.client-json-bad-config', 'scoped-recovery-preserves-inference-settings');
+  report.stop = {mode: 'standalone', request: Object.fromEntries(
+    ['installation_id', 'instance_id', 'account_id', 'generation'].map(key => [key, health[key]]))};
   const response = await fetch(`${endpoint}/api/runtime/stop`, {
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-Respire-Lifecycle': 'coordinator-v1'},
-    body: JSON.stringify(Object.fromEntries(['installation_id', 'instance_id', 'account_id', 'generation'].map(key => [key, health[key]]))),
+    body: JSON.stringify(report.stop.request),
     signal: AbortSignal.timeout(5000),
   });
+  report.stop.http_status = response.status;
   assert.ok(response.ok);
-  const accepted = await response.json();
+  const accepted = report.stop.accepted = await response.json();
   assert.equal(accepted.ok, true);
   assert.equal(accepted.state, 'accepted');
   assert.ok(typeof accepted.operation_id === 'string' && accepted.operation_id.length > 0);
-  const result = await Promise.race([exited, delay(35000, undefined, {ref: false}).then(() => { throw new Error('Runtime drain did not finish'); })]);
+  passedCase('runtime.stop-clean-drained', 'standalone-stop-accepted');
+  const result = report.stop.exit = await Promise.race([exited, delay(35000, undefined, {ref: false}).then(() => { throw new Error('Runtime drain did not finish'); })]);
   assert.equal(result.code, 0);
   assert.equal(result.signal, null);
+  passedCase('runtime.stop-clean-drained', 'standalone-normal-exit');
   const receiptPath = join(dataDir, 'runtime', `stop-${health.instance_id}.json`);
   const receiptInfo = lstatSync(receiptPath);
   assert.ok(receiptInfo.isFile() && !receiptInfo.isSymbolicLink() && receiptInfo.size <= 1 << 20);
-  assertDrained(JSON.parse(readFileSync(receiptPath, 'utf8')), health, accepted.operation_id);
+  report.stop.receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  assertDrained(report.stop.receipt, health, accepted.operation_id);
+  passedCase('runtime.stop-clean-drained', 'standalone-identity-bound-final-drained-receipt');
+  await new Promise((resolveClosed, rejectOpen) => {
+    const socket = createConnection({host: '127.0.0.1', port});
+    socket.once('connect', () => { socket.destroy(); rejectOpen(new Error('exited Runtime still accepts connections')); });
+    socket.once('error', error => {
+      socket.destroy();
+      if (error.code === 'ECONNREFUSED') resolveClosed();
+      else rejectOpen(error);
+    });
+    socket.setTimeout(5000, () => { socket.destroy(); rejectOpen(new Error('Runtime listener close was not observable')); });
+  });
+  report.stop.listener_closed = true;
+  passedCase('runtime.stop-clean-drained', 'standalone-listener-closed-after-exit');
   report.passed = true;
 } catch (error) {
   report.error = String(error);
@@ -384,6 +414,8 @@ try {
 } finally {
   // Force cleanup is failure-only and never becomes a drained/pass receipt.
   if (child && !exitState) { child.kill(); report.passed = false; process.exitCode = 1; }
+  report.case_results.push(...(report.mcp?.case_results ?? []));
+  report.completed_at = new Date().toISOString();
   mkdirSync(resolve('smoke-report'), {recursive: true});
   writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
   if (report.passed) rmSync(root, {recursive: true});
