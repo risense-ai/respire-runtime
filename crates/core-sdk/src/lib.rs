@@ -333,6 +333,51 @@ mod core_wire_tests {
     }
 
     #[test]
+    fn worker_stdout_keeps_protocol_private() -> anyhow::Result<()> {
+        use std::io::Write;
+        const CHILD: &str = "RSRS_TEST_WORKER_STDOUT_CHILD";
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("1")) {
+            let mut protocol = super::ffi::worker_stdout()?;
+            extern "C" {
+                fn puts(text: *const std::ffi::c_char) -> std::ffi::c_int;
+                fn fflush(stream: *mut std::ffi::c_void) -> std::ffi::c_int;
+            }
+            anyhow::ensure!(unsafe { puts(c"worker-native-diagnostic".as_ptr()) } >= 0);
+            anyhow::ensure!(unsafe { fflush(std::ptr::null_mut()) } == 0);
+            std::io::stdout().write_all(b"worker-rust-diagnostic\n")?;
+            std::io::stdout().flush()?;
+            protocol.write_all(b"worker-protocol-private\n")?;
+            protocol.flush()?;
+            return Ok(());
+        }
+        // Redirection is process-wide, so exercise it outside the test runner.
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "core_wire_tests::worker_stdout_keeps_protocol_private",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()?;
+        anyhow::ensure!(output.status.success(), "stdout isolation child failed");
+        let stdout = String::from_utf8(output.stdout)?;
+        let stderr = String::from_utf8(output.stderr)?;
+        anyhow::ensure!(stdout.contains("worker-protocol-private"));
+        for diagnostic in ["worker-native-diagnostic", "worker-rust-diagnostic"] {
+            anyhow::ensure!(
+                !stdout.contains(diagnostic),
+                "diagnostic entered IPC output"
+            );
+            anyhow::ensure!(
+                stderr.contains(diagnostic),
+                "diagnostic did not reach stderr"
+            );
+        }
+        anyhow::ensure!(!stderr.contains("worker-protocol-private"));
+        Ok(())
+    }
+
+    #[test]
     fn borrowed_request_and_moved_result_preserve_protocol() -> Result<()> {
         for payload in [
             Value::Null,
@@ -545,6 +590,46 @@ mod ffi {
             let code =
                 unsafe { rs_core_model_input_abort(self.pointer.as_ptr(), ticket, &mut output) };
             Ok((code, output.bytes()?))
+        }
+    }
+
+    pub(super) fn worker_stdout() -> Result<std::fs::File> {
+        // Keep the IPC pipe private before any native library can write to stdout.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+            extern "C" {
+                fn dup2(old: std::ffi::c_int, new: std::ffi::c_int) -> std::ffi::c_int;
+            }
+            let protocol = std::io::stdout()
+                .as_fd()
+                .try_clone_to_owned()
+                .context("duplicate Core worker protocol output")?;
+            if unsafe { dup2(2, 1) } == -1 {
+                return Err(std::io::Error::last_os_error()).context("redirect Core worker stdout");
+            }
+            Ok(std::fs::File::from(protocol))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsHandle, AsRawHandle};
+            extern "C" {
+                fn _dup2(old: std::ffi::c_int, new: std::ffi::c_int) -> std::ffi::c_int;
+            }
+            extern "system" {
+                fn SetStdHandle(kind: u32, handle: *mut std::ffi::c_void) -> i32;
+            }
+            let protocol = std::io::stdout()
+                .as_handle()
+                .try_clone_to_owned()
+                .context("duplicate Core worker protocol output")?;
+            if unsafe { _dup2(2, 1) } == -1 {
+                bail!("redirect Core worker CRT stdout failed (_dup2)");
+            }
+            if unsafe { SetStdHandle((-11i32) as u32, std::io::stderr().as_raw_handle()) } == 0 {
+                return Err(std::io::Error::last_os_error()).context("redirect Core worker stdout");
+            }
+            Ok(std::fs::File::from(protocol))
         }
     }
 

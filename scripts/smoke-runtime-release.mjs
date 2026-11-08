@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawn, execFileSync} from 'node:child_process';
-import {chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {runRuntimeMcpProbe} from './runtime-mcp-probe.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function normalizedPath(value, platform = process.platform) {
@@ -85,6 +86,18 @@ function assertModelResponse(reply, request, health) {
   assert.ok(summary.variants.every(variant => variant.state === 'baseline_missing'));
   return summary;
 }
+function assertBadConfigResponse(reply, request, health) {
+  assert.equal(reply.v, 1);
+  for (const key of ['id', 'operation_id', 'idempotency_key', 'scope']) {
+    assert.deepEqual(reply[key], request[key]);
+  }
+  assert.equal(reply.pid, health.pid);
+  assert.equal(reply.ok, false);
+  assert.equal(reply.exit, 1);
+  assert.equal(reply.code, 'invalid_config');
+  assert.equal(reply.envelope, null);
+  assert.ok(typeof reply.error === 'string' && reply.error.length > 0);
+}
 if (process.argv.includes('--self-check')) {
   const windowsImage = 'D:\\payload\\rsrs-runtime.exe';
   assertSamePath('\\\\?\\D:\\payload\\rsrs-runtime.exe', windowsImage, 'win32');
@@ -143,6 +156,13 @@ if (process.argv.includes('--self-check')) {
     envelope: {command: 'model', status: 'ok', errors: [], summary: {engine: 'cpu', model: 'quantized',
       active_selection: null, variants: [{name: 'quantized', state: 'baseline_missing'}]}}};
   assertModelResponse(reply, request, health);
+  const rejected = {...reply, ok: false, exit: 1, code: 'invalid_config', error: 'invalid fixture JSON', envelope: null};
+  assertBadConfigResponse(rejected, request, health);
+  for (const invalid of [{v: 2}, {id: 'foreign'}, {operation_id: 'foreign'}, {idempotency_key: 'foreign'},
+    {scope: {...request.scope, generation: 2}}, {pid: 3}, {ok: true}, {exit: 0}, {code: 'scope_required'},
+    {error: ''}, {envelope: {status: 'ok'}}]) {
+    assert.throws(() => assertBadConfigResponse({...rejected, ...invalid}, request, health));
+  }
   for (const invalid of [{v: 2}, {id: 'foreign'}, {operation_id: 'foreign'}, {idempotency_key: 'foreign'},
     {scope: {...request.scope, generation: 2}}, {pid: 3}, {ok: false}, {exit: 1}, {error: 'failed'}, {code: 'failed'}]) {
     assert.throws(() => assertModelResponse({...reply, ...invalid}, request, health));
@@ -197,7 +217,7 @@ const reportPath = resolve('smoke-report', `runtime-smoke-${target}.json`);
 const report = {target, version, source_commit: metadata.source_commit,
   run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
   archive_sha256: metadata.archive_sha256, binary_sha256: metadata.binary_sha256,
-  coverage: ['complete-release-payload', 'os-bound-startup-health', 'scoped-model-settings-no-assets', 'normal-stop-final-receipt'],
+  coverage: ['complete-release-payload', 'os-bound-startup-health', 'real-mcp-initialize-tools-status', 'scoped-model-settings-no-assets', 'bad-client-config-rejection-and-recovery', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
 try {
   const tar = archiveTool(process.platform, process.env.SystemRoot);
@@ -292,6 +312,7 @@ try {
   assert.match(health.instance_id ?? '', /^[A-Za-z0-9_-]{1,128}$/);
   assert.ok(health.installation_id && health.account_id && health.process_start_id);
   assert.ok(Number.isSafeInteger(health.generation) && health.generation > 0);
+  report.mcp = await runRuntimeMcpProbe(endpoint, version, health);
   // Settings must commit without model assets; a self-waiting config lock must time out, not pass health-only smoke.
   assert.deepEqual(readdirSync(modelDir), []);
   report.model_settings = {};
@@ -318,6 +339,26 @@ try {
   assert.equal(settings.force_cpu, false);
   await execModel('read', []);
   assert.deepEqual(readdirSync(modelDir), [], 'model settings unexpectedly installed assets');
+  const configPath = join(dataDir, 'client.json');
+  const originalConfig = existsSync(configPath) ? readFileSync(configPath) : null;
+  const malformedConfig = Buffer.from('{');
+  try {
+    writeFileSync(configPath, malformedConfig);
+    const request = {...modelRequest(health, 'bad-config', []), args: ['--json', 'status']};
+    const rejected = await fetch(`${endpoint}/api/rpc`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: AbortSignal.timeout(30000)});
+    const body = await rejected.text();
+    report.bad_config = {request, http_status: rejected.status, body};
+    assert.equal(rejected.status, 200, 'Malformed config must retain the structured RPC error envelope');
+    assertBadConfigResponse(JSON.parse(body), request, health);
+    assert.deepEqual(readFileSync(configPath), malformedConfig, 'Rejected request changed the invalid configuration');
+    assert.deepEqual(readFileSync(join(dataDir, 'inference.json')), settingsBytes);
+  } finally {
+    if (originalConfig === null) rmSync(configPath, {force: true});
+    else writeFileSync(configPath, originalConfig);
+  }
+  await execModel('after-bad-config', []);
+  assert.deepEqual(readFileSync(join(dataDir, 'inference.json')), settingsBytes);
   const response = await fetch(`${endpoint}/api/runtime/stop`, {
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-Respire-Lifecycle': 'coordinator-v1'},
     body: JSON.stringify(Object.fromEntries(['installation_id', 'instance_id', 'account_id', 'generation'].map(key => [key, health[key]]))),
