@@ -812,6 +812,8 @@ fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
 }
 
 fn foreground_runtime_arguments(args: &[&str]) -> bool {
+    let standalone = args.first().is_some_and(|program|
+        Path::new(program).file_name().and_then(|name| name.to_str()) == Some("rsrs-runtime"));
     let mut args = args.iter().copied().skip(1);
     let command = loop {
         match args.next() {
@@ -819,7 +821,8 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
             other => break other,
         }
     };
-    command == Some("runtime") && args.next() == Some("run")
+    (standalone && command == Some("serve"))
+        || (command == Some("runtime") && args.next() == Some("run"))
 }
 
 #[cfg(target_os = "linux")]
@@ -877,44 +880,38 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     #[cfg(all(unix, not(target_os = "linux")))]
     {
         let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
+            .args(["-ww", "-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
             .env("LC_ALL", "C")
             .output()?;
-        anyhow::ensure!(
-            output.status.success(),
-            "cannot inspect runtime process {pid}"
-        );
-        let text = String::from_utf8(output.stdout)?;
-        let text = text.trim_end();
-        let started_at = text
-            .get(..24)
-            .context("runtime process creation time missing")?
-            .to_owned();
-        let command = text
-            .get(24..)
-            .context("runtime process command missing")?
-            .trim();
-        let stable = stable_bin_path();
-        let foreground = command
-            .strip_prefix(stable.to_string_lossy().as_ref())
-            .is_some_and(|tail| {
-                let mut args = vec!["rsrs"];
-                args.extend(tail.split_whitespace());
-                foreground_runtime_arguments(&args)
-            });
-        let args: Vec<_> = command.split_whitespace().collect();
-        anyhow::ensure!(
-            args.contains(&"--runtime-internal")
-                || (args.contains(&"web") && args.contains(&"--internal"))
-                || foreground
-                || foreground_runtime_arguments(&args),
-            "process {pid} is not a runtime; restart refused"
-        );
-        Ok(RuntimeProcessIdentity {
-            started_at,
-            executable: command.to_owned(),
-        })
+        anyhow::ensure!(output.status.success(), "cannot inspect runtime process {pid}");
+        let image = std::process::Command::new("ps")
+            .args(["-ww", "-p", &pid.to_string(), "-o", "comm="])
+            .env("LC_ALL", "C")
+            .output()?;
+        anyhow::ensure!(image.status.success(), "cannot inspect runtime process image");
+        darwin_runtime_identity(&String::from_utf8(output.stdout)?, &String::from_utf8(image.stdout)?)
     }
+}
+
+/// The OS image is a path; the command line is only role evidence. Returning
+/// the latter as the image makes background readiness canonicalize argv text.
+#[cfg(any(test, all(unix, not(target_os = "linux"))))]
+fn darwin_runtime_identity(process: &str, image: &str) -> Result<RuntimeProcessIdentity> {
+    let process = process.trim_end();
+    let executable = image.trim();
+    anyhow::ensure!(executable.starts_with('/') && !executable.contains('\n'),
+        "runtime process image is missing or ambiguous");
+    let started_at = process.get(..24).context("runtime process creation time missing")?;
+    let command = process.get(24..).context("runtime process command missing")?.trim();
+    let tail = command.strip_prefix(executable)
+        .filter(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+        .context("runtime command does not match its process image")?;
+    let mut args = vec![executable];
+    args.extend(tail.split_whitespace());
+    anyhow::ensure!(args.contains(&"--runtime-internal")
+        || (args.contains(&"web") && args.contains(&"--internal"))
+        || foreground_runtime_arguments(&args), "process is not a runtime; restart refused");
+    Ok(RuntimeProcessIdentity { started_at: started_at.to_owned(), executable: executable.to_owned() })
 }
 
 pub fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
@@ -992,6 +989,29 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn darwin_readiness_keeps_the_image_separate_from_arguments() -> Result<()> {
+        let birth = "Sun Nov  8 01:02:03 2026";
+        let image = "/private/var/folders/long path/rsrs-runtime";
+        for arguments in ["--runtime-internal --runtime-background-internal --port 15169",
+            "serve --data-dir /private/var/folders/profile with spaces"] {
+            let identity = darwin_runtime_identity(&format!("{birth}  {image} {arguments}\n"), &format!("{image}\n"))?;
+            assert_eq!(identity.executable, image);
+            assert_eq!(identity.started_at, birth);
+        }
+        for (command, claimed) in [
+            (format!("{image} --runtime-internal"), "/foreign/rsrs-runtime"),
+            (format!("{image}-other --runtime-internal"), image),
+            (format!("{image} --version"), image),
+        ] {
+            assert!(darwin_runtime_identity(&format!("{birth}  {command}"), claimed).is_err());
+        }
+        assert!(darwin_runtime_identity("short", image).is_err());
+        assert!(darwin_runtime_identity(&format!("{birth}  {image} serve"), "rsrs-runtime").is_err());
+        Ok(())
+    }
+
 
     #[test]
     fn foreground_identity_accepts_standalone_serving_modes_and_option_values() {
