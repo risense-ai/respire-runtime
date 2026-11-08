@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-cli
-          ref: 5fd7561bf21157a0e44068b31c845ddb40ebddbe
+          ref: 3abade8b36a3361241f6f1cf70a909936e5e3c89
           path: .cli-source
           persist-credentials: false
       - name: Build the fixed CLI compatibility consumer
@@ -215,7 +215,7 @@ jobs:
             --runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
             --runtime-version "$version" --client2-source .client2-source \
             --go "$(command -v go)" \
-            --magpie-source .magpie-source --node "$(command -v node)" \
+            --magpie-source .magpie-source --node "$(command -v node)" --ordinary-cli-cold-start \
             "$@" --report "$RUNNER_TEMP/joint-candidate-regression.json"
       - name: Preserve joint candidate results (not G1 evidence)
         if: always()
