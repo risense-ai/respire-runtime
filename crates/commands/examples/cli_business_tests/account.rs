@@ -886,7 +886,8 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             assert_eq!(shown["details"]["entry"]["content"],"old authorized private body");
             let retained=serde_json::to_value(LocalStore::open(&target.join("rsrs.db"))?.all(true)?)?;
             let retained_config=std::fs::read(root.join("client.json"))?;
-            assert!(!execute(&["--json","account","use","not-an-existing-account"])? .status.success());
+            // Stable creates valid new profile names; use its original invalid-name refusal contract.
+            assert!(!execute(&["--json","account","use","invalid/account"])? .status.success());
             assert!(std::fs::read(root.join("client.json"))?==retained_config);
             assert_eq!(serde_json::to_value(LocalStore::open(&target.join("rsrs.db"))?.all(true)?)?,retained);
             support::legacy_owner(&root,&target,runtime_port)?;

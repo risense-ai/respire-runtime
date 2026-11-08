@@ -1215,7 +1215,7 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
                 "12345678-1234-4234-8234-123456789abc","--title","old temporary title"])?;
             assert!(ok, "old local update failed: {}",changed["status"]);
             checkpoint("old_restart");
-            let (ok,_)=old.run(&["runtime","start"])?;
+            let (ok,_)=old.run(&["--json","runtime","start"])?;
             assert!(ok);
             support::legacy_owner(old.root.path(),old.root.path(),old.port)?;
             checkpoint("old_restore");
