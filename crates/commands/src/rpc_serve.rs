@@ -1994,7 +1994,11 @@ fn health_state() -> &'static str {
     }
 }
 
-fn mark_stop_unfinished(items: Vec<Admitted>) {
+fn mark_stop_unfinished(mut items: Vec<Admitted>) {
+    // RPC retention and queue execution each hold an admission guard for the
+    // same wire operation. The durable receipt records that operation once.
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.operation_id.clone()));
     *STOP_UNFINISHED
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = items;
