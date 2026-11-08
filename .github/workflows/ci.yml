@@ -57,6 +57,8 @@ jobs:
         run: node scripts/verify-runtime-control-contract.mjs
       - name: Reject invalid required-gate evidence
         run: node scripts/test-required-tests.mjs
+      - name: Verify approved SDK version trains and download boundaries
+        run: node --test scripts/test-sdk-version-trains.mjs
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Run the Rust contract consumer tests
         run: cargo test -p respire_protocol --locked
