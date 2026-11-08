@@ -167,6 +167,10 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             && value["status"] == "warn"
             && value["details"]["keyring"] == false;
         if output.status.code() != Some(expected) && !keyring_warning {
+            eprintln!("account-response-evidence {}", json!({
+                "stage": "space_command", "reason_code": value["summary"]["reason"],
+                "error_type": value["details"]["error_type"]
+            }));
             return Err(format!(
                 "owned space command {args:?} exited {:?}: {stdout} {}",
                 output.status.code(),
@@ -262,10 +266,15 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
                 Ok(())
             });
             let joined = invoke(&["space", "join", &code], if readonly { 2 } else { 0 });
-            let served = worker.join().map_err(|_| "join fixture panicked")?;
+            let served = worker.join().map_err(|_| "join fixture panicked".to_owned())
+                .and_then(|result| result).map_err(|error| format!("join server: {error}"));
             respire_app::keystore::delete_super(&user);
-            served.map_err(|error| format!("join server: {error}"))?;
-            let joined = joined?;
+            let joined = match (joined, served) {
+                (Ok(joined), Ok(())) => joined,
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(_), Err(error)) => return Err(error.into()),
+                (Err(error), Err(server)) => return Err(format!("{error}; {server}").into()),
+            };
             assert_eq!(
                 joined["status"],
                 if readonly || joined["details"]["keyring"] == false {
@@ -313,11 +322,15 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
                 .map_err(|error| error.to_string())
         });
         let rejected = invoke(&["space", "join", &code], 1);
-        worker
-            .join()
-            .map_err(|_| "rejected join fixture panicked")?
-            .map_err(|error| format!("join server: {error}"))?;
-        assert_eq!(rejected?["details"]["error_type"], "runtime");
+        let served = worker.join().map_err(|_| "rejected join fixture panicked".to_owned())
+            .and_then(|result| result).map_err(|error| format!("join server: {error}"));
+        let rejected = match (rejected, served) {
+            (Ok(rejected), Ok(())) => rejected,
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error.into()),
+            (Err(error), Err(server)) => return Err(format!("{error}; {server}").into()),
+        };
+        assert_eq!(rejected["details"]["error_type"], "runtime");
         assert_eq!(std::fs::read(&config)?, before);
         assert!(!library.join("accounts/rejected-join").exists());
         let _before_create_pid = u32::try_from(health(&library, "after-rejected-join")?)?;
@@ -733,6 +746,11 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult};
         assert!(!output.status.success());
         let failure: Value = serde_json::from_slice(&output.stdout)?;
+        eprintln!("account-response-evidence {}", serde_json::json!({
+            "stage": if required.is_some() { "required_input" } else { "wrong_super" },
+            "reason_code": failure["summary"]["reason"],
+            "error_type": failure["details"]["error_type"]
+        }));
         let operation = if required.is_some() {
             assert_eq!(failure["summary"]["reason"], "runtime_error");
             failure["errors"].as_array().ok_or("login errors missing")?
