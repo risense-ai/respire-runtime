@@ -1656,6 +1656,7 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     assert_eq!(written.local_parent_id, parent_id);
     let opened = MemoryEngine::open(&fixture.keys, written)?;
     assert_eq!(opened.parent_id, parent_id);
+    assert_eq!(MemoryEngine::payload_parent(&fixture.keys, written)?, parent_id);
     assert_eq!(opened.content, child.content);
     assert!(fixture.store()?.outgoing_boundary()? > before_boundary);
     let outgoing = fixture.store()?.outgoing()?;
@@ -1671,7 +1672,7 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
         assert_eq!(operation.blob.ciphertext, expected.ciphertext);
         assert_eq!(operation.blob.nonce, expected.nonce);
         if operation.blob.id == child_id {
-            assert_eq!(MemoryEngine::open(&fixture.keys, &operation.blob)?.parent_id, parent_id);
+            assert_eq!(MemoryEngine::payload_parent(&fixture.keys, &operation.blob)?, parent_id);
         }
     }
     for original in [original_root, original_parent] {
