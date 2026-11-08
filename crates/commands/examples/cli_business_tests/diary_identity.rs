@@ -17,6 +17,7 @@ use std::time::Duration;
 
 struct Fixture {
     cli: PathBuf,
+    business_cli: Option<PathBuf>,
     home: tempfile::TempDir,
     port: u16,
     secret: String,
@@ -43,6 +44,19 @@ impl Fixture {
             runtime != cli,
             "CLI shim cannot substitute for the standalone Runtime fixture"
         );
+        let business_cli = match (
+            std::env::var_os("RSRS_TEST_STABLE_DIARY_SUITE"),
+            std::env::var_os("RSRS_TEST_STABLE_CLI_BIN"),
+        ) {
+            (None, None) => None,
+            (Some(suite), Some(binary)) if suite == "stable-diary-remote" => {
+                let binary = PathBuf::from(binary).canonicalize()?;
+                anyhow::ensure!(binary.is_file() && binary != cli && binary != runtime,
+                    "stable business CLI must be separate from the manager and Runtime");
+                Some(binary)
+            }
+            _ => anyhow::bail!("stable business CLI requires the explicit stable-diary-remote suite"),
+        };
         let models = PathBuf::from(
             std::env::var_os("RSRS_CORE_TEST_MODEL_DIR")
                 .context("supply RSRS_CORE_TEST_MODEL_DIR with the verified real CPU model fixture")?,
@@ -79,6 +93,7 @@ impl Fixture {
         )?;
         Ok(Self {
             cli,
+            business_cli,
             home,
             port,
             secret,
@@ -93,7 +108,11 @@ impl Fixture {
 
     /// Build a command confined to this profile, port, and disabled remote services.
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.cli);
+        self.command_for(&self.cli, args)
+    }
+
+    fn command_for(&self, binary: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(binary);
         for (name, _) in std::env::vars_os() {
             if name.to_str().is_some_and(|name| {
                 name.starts_with("RSRS_")
@@ -127,6 +146,32 @@ impl Fixture {
             .env("RSRS_CPU_ORT_MIRROR", "http://127.0.0.1:9");
         command.envs(self.extra_env.iter().map(|(name, value)| (*name, value)));
         command
+    }
+
+    fn business_command(&self, args: &[&str]) -> anyhow::Result<Command> {
+        let Some(binary) = self.business_cli.as_deref() else {
+            return Ok(self.command(args));
+        };
+        anyhow::ensure!(args.contains(&"--client-only")
+            && !args.iter().any(|arg| *arg == "--direct" || arg.starts_with("--direct=")),
+            "stable business calls must be client-only and cannot use direct execution");
+        anyhow::ensure!(self.owns_runtime()?, "candidate Runtime owner changed before stable business call");
+        let mut command = self.command_for(binary, args);
+        command.env("RSRS_CLIENT_ONLY", "1").env("RSRS_NO_AUTOSTART", "1");
+        Ok(command)
+    }
+
+    fn verify_business_owner(&self) -> anyhow::Result<()> {
+        if self.business_cli.is_some() {
+            anyhow::ensure!(self.owns_runtime()?, "candidate Runtime owner changed after stable business call");
+        }
+        Ok(())
+    }
+
+    fn business_output(&self, args: &[&str]) -> anyhow::Result<Output> {
+        let output = self.business_command(args)?.output();
+        self.verify_business_owner()?;
+        Ok(output?)
     }
 
     /// Start an owned runtime and verify its process and profile before use.
@@ -255,7 +300,7 @@ impl Fixture {
         anyhow::ensure!(self.owns_runtime()?, "synthetic runtime is not ready");
         let mut all = vec!["--client-only", "--json"];
         all.extend_from_slice(args);
-        Self::result(self.command(&all).output()?)
+        Self::result(self.business_output(&all)?)
     }
 
     /// Require a successful command and decode its public JSON envelope.
@@ -318,15 +363,14 @@ impl Fixture {
         let boundary = self.store()?.outgoing_boundary()?;
         let outgoing = serde_json::to_value(self.store()?.outgoing()?)?;
         let output = self
-            .command(&[
+            .business_output(&[
                 "--client-only",
                 "--json",
                 "remember",
                 "rejected-private-event",
                 "--importance",
                 "trivial",
-            ])
-            .output()?;
+            ])?;
         assert!(!output.status.success());
         let value: Value = serde_json::from_slice(&output.stdout)?;
         assert!(value["errors"]
@@ -822,14 +866,14 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
         let mut workers = Vec::new();
         for index in 0..2 {
             let marker = format!("pair-{pair}-event-{index}");
-            let mut command = fixture.command(&[
+            let mut command = fixture.business_command(&[
                 "--client-only",
                 "--json",
                 "remember",
                 &marker,
                 "--importance",
                 "trivial",
-            ]);
+            ])?;
             let barrier = std::sync::Arc::clone(&barrier);
             workers.push(std::thread::spawn(move || {
                 barrier.wait();
@@ -837,11 +881,11 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
             }));
         }
         for worker in workers {
-            let value = Fixture::result(
-                worker
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("synthetic client panicked"))??,
-            )?;
+            let output = worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("synthetic client panicked"));
+            fixture.verify_business_owner()?;
+            let value = Fixture::result(output??)?;
             ids.push(
                 value["summary"]["id"]
                     .as_str()
@@ -1071,16 +1115,14 @@ fn important_remember_pending_candidates_preserve_ciphertext_and_outbox() -> any
     let boundary = fixture.store()?.outgoing_boundary()?;
     let outgoing = serde_json::to_value(fixture.store()?.outgoing()?)?;
     anyhow::ensure!(fixture.owns_runtime()?, "synthetic runtime is not ready");
-    let output = fixture
-        .command(&[
-            "--client-only",
-            "--json",
-            "remember",
-            &content,
-            "--importance",
-            "important",
-        ])
-        .output()?;
+    let output = fixture.business_output(&[
+        "--client-only",
+        "--json",
+        "remember",
+        &content,
+        "--importance",
+        "important",
+    ])?;
     assert_eq!(
         output.status.code(),
         Some(2),
