@@ -808,7 +808,18 @@ fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
     {
         return true;
     }
-    foreground_runtime_arguments(args)
+    combined_foreground_runtime_arguments(args)
+}
+
+fn combined_foreground_runtime_arguments(args: &[&str]) -> bool {
+    let mut args = args.iter().copied().skip(1);
+    let command = loop {
+        match args.next() {
+            Some("--json" | "--direct") => continue,
+            other => break other,
+        }
+    };
+    command == Some("runtime") && args.next() == Some("run")
 }
 
 fn foreground_runtime_arguments(args: &[&str]) -> bool {
