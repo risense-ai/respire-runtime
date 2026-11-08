@@ -126,7 +126,7 @@ jobs:
           test -f "$exe"
           bash scripts/verify-linux-arm64-elf.sh "$SDK_TARGET" "$exe" 2>/dev/null || true
           if [ "$SDK_TARGET" = x86_64-apple-darwin ]; then
-            lipo -verify_arch x86_64 "$exe"
+            lipo "$exe" -verify_arch x86_64
             printf '%s\n' 'Intel SDK cross-build on Apple silicon passed; Intel native execution/acceptance remains pending.' >> "$GITHUB_STEP_SUMMARY"
           else
             "$exe" --version
