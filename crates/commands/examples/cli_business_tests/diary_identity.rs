@@ -961,18 +961,34 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
         "operation_id":"same-key-business-effect", "idempotency_key":"same-key-business-effect",
         "scope":scope, "args":["--json", "remember", "idempotent-rpc-marker",
             "--title", "Idempotent RPC effect", "--importance", "important", "--force"]});
-    let post = |request: Value| -> anyhow::Result<Value> {
-        let request_id = request["id"].clone();
+    let send = |request: Value| -> anyhow::Result<(u16, Value)> {
         let response = match ureq::post(&endpoint).timeout(Duration::from_secs(120)).send_json(request) {
             Ok(response) | Err(ureq::Error::Status(_, response)) => response,
             Err(error) => return Err(error.into()),
         };
-        let reply: Value = response.into_json()?;
+        Ok((response.status(), response.into_json()?))
+    };
+    let post = |request: Value| -> anyhow::Result<Value> {
+        let request_id = request["id"].clone();
+        let (status, reply) = send(request)?;
+        assert_eq!(status, 200);
         assert_eq!(reply["v"], 1);
         assert_eq!(reply["id"], request_id);
         assert_eq!(reply["pid"], health["pid"]);
         Ok(reply)
     };
+    // Use an actually completed operation as the changed parent, not a made-up ID.
+    let parent_operation = "fingerprint-known-parent";
+    let mut parent = original.clone();
+    parent["id"] = json!("fingerprint-parent-request");
+    parent["operation_id"] = json!(parent_operation);
+    parent["idempotency_key"] = json!(parent_operation);
+    parent["args"][2] = json!("fingerprint-parent-marker");
+    parent["args"][4] = json!("Fingerprint parent effect");
+    let parent = post(parent)?;
+    assert_eq!(parent["ok"], true, "{parent}");
+    assert_eq!(parent["operation_id"], parent_operation);
+    assert!(parent["envelope"]["summary"]["id"].as_str().is_some_and(|id| !id.is_empty()));
     let before = fixture.store()?.all(true)?.len();
     let barrier = std::sync::Barrier::new(2);
     let replies = std::thread::scope(|threads| -> anyhow::Result<Vec<Value>> {
@@ -1005,7 +1021,7 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
     assert_eq!(fixture.show(stored_id)?["content"], "idempotent-rpc-marker");
     assert_eq!(fixture.store()?.all(true)?.len(), before + 1,
         "concurrent same-fingerprint requests committed more than one record");
-    let mut conflict = original;
+    let mut conflict = original.clone();
     conflict["id"] = json!("same-key-changed-arguments");
     conflict["args"][2] = json!("conflicting-rpc-marker");
     let rejected = post(conflict)?;
@@ -1014,6 +1030,100 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
     assert_eq!(fixture.store()?.all(true)?.len(), before + 1,
         "conflicting or replayed requests committed another record");
     assert_eq!(fixture.show(stored_id)?["content"], "idempotent-rpc-marker");
+    let result = |operation: &str, id: &str| post(json!({"v":1,"id":id,
+        "method":"runtime.result","scope":scope,"args":[operation]}));
+    let receipt = result("same-key-business-effect", "fingerprint-original-receipt")?;
+    assert_eq!(receipt["envelope"]["summary"]["state"], "completed");
+    let retained = receipt["envelope"]["summary"]["response"].clone();
+    let installation = PathBuf::from(health["installation_root"].as_str()
+        .context("fingerprint installation root missing")?);
+    let protected_files = [installation.join("embedding-profiles-v1.json"), installation.join("client.json")];
+    let read_protected = || -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+        protected_files.iter().map(|path| match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }).collect()
+    };
+    let protected_before = read_protected()?;
+    let unchanged = || -> anyhow::Result<()> {
+        assert_eq!(fixture.store()?.all(true)?.len(), before + 1);
+        assert_eq!(fixture.show(stored_id)?["content"], "idempotent-rpc-marker");
+        assert_eq!(read_protected()?, protected_before);
+        assert_eq!(result("same-key-business-effect", "fingerprint-receipt-check")?
+            ["envelope"]["summary"]["response"], retained);
+        Ok(())
+    };
+    let mut changes = Vec::new();
+    for (field, value, expected) in [
+        ("v", json!(2), "protocol_version_mismatch"),
+        // index.prepare is supported, but admission must reject before kick_index.
+        ("method", json!("index.prepare"), "idempotency_conflict"),
+        ("parent_operation_id", json!(parent_operation), "idempotency_conflict"),
+        ("lifecycle", json!("coordinator-v1"), "idempotency_conflict"),
+    ] {
+        let mut request = original.clone();
+        request[field] = value;
+        changes.push((request, expected));
+    }
+    for (field, value) in [
+        ("account_id", json!("different-fingerprint-account")),
+        ("instance_id", json!("different-fingerprint-instance")),
+        ("generation", json!(scope["generation"].as_u64().context("fingerprint generation missing")? + 1)),
+    ] {
+        let mut request = original.clone();
+        request["scope"][field] = value;
+        changes.push((request, "scope_mismatch"));
+    }
+    // cli.exec fingerprints the argument vector, not CLI flag semantics.
+    let mut reordered = original.clone();
+    reordered["args"] = json!(["--json","remember","idempotent-rpc-marker",
+        "--title","Idempotent RPC effect","--force","--importance","important"]);
+    changes.push((reordered, "idempotency_conflict"));
+    for (index, (mut request, expected)) in changes.into_iter().enumerate() {
+        request["id"] = json!(format!("fingerprint-dimension-{index}"));
+        let rejected = post(request)?;
+        assert_eq!(rejected["ok"], false, "{rejected}");
+        assert_eq!(rejected["code"], expected);
+        unchanged()?;
+    }
+    // Schema rejection has an HTTP error body, not a fabricated RPC envelope.
+    for (index, mut malformed) in [original.clone(), original.clone()].into_iter().enumerate() {
+        if index == 0 { malformed["schema_version"] = json!(1); }
+        else { malformed["scope"]["generation"] = json!("not-an-integer"); }
+        let (status, rejected) = send(malformed)?;
+        assert_eq!(status, 400);
+        assert!(rejected["error"].as_str().is_some());
+        assert!(rejected.get("envelope").is_none());
+        unchanged()?;
+    }
+    // This is failure replay: Configure rejects absent profiles before registry I/O.
+    let canonical = json!({"v":1,"id":"canonical-json-first","method":"model.configure",
+        "operation_id":"canonical-json-operation","idempotency_key":"canonical-json-operation",
+        "scope":scope,"args":[r#"{"model_profile":null,"backend_profile":null}"#]});
+    let failed = post(canonical.clone())?;
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["code"], "model_profile_failed");
+    unchanged()?;
+    let mut equivalent = canonical.clone();
+    equivalent["id"] = json!("canonical-json-reordered");
+    equivalent["args"][0] = json!("{ \"backend_profile\": null, \"model_profile\": null }");
+    let replayed = post(equivalent)?;
+    assert_eq!(replayed["ok"], false);
+    assert_eq!(replayed["code"], "model_profile_failed");
+    unchanged()?;
+    let canonical_receipt = result("canonical-json-operation", "canonical-json-receipt")?;
+    assert_eq!(canonical_receipt["envelope"]["summary"]["state"], "failed");
+    assert_eq!(canonical_receipt["envelope"]["summary"]["response"], failed);
+    assert_eq!(canonical_receipt["envelope"]["summary"]["response"]["id"], "canonical-json-first",
+        "normalized JSON must replay without overwriting the first receipt");
+    let mut different = canonical;
+    different["id"] = json!("canonical-json-structurally-different");
+    different["args"][0] = json!(r#"{"model_profile":null}"#);
+    let rejected = post(different)?;
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["code"], "idempotency_conflict");
+    unchanged()?;
     Ok(())
 }
 
