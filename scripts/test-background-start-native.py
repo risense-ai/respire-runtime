@@ -21,7 +21,6 @@ def main():
     assert os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
     source = Path('target/debug/rsrs-runtime').resolve()
     sdk = Path('.sdk') / os.environ['RUNTIME_TARGET']
-    manifest = json.loads((sdk / 'manifest.json').read_text())
     version = tomllib.loads(Path('runtime/Cargo.toml').read_text())['package']['version']
     root = Path(tempfile.mkdtemp(prefix='runtime background with spaces ', dir=os.environ['RUNNER_TEMP']))
     data = root / 'data'
@@ -30,11 +29,11 @@ def main():
     payload.mkdir(parents=True)
     executable = payload / 'rsrs-runtime'
     shutil.copy2(source, executable)
-    for entry in manifest['files']:
-        if entry['path'].startswith('runtime/'):
-            file = sdk / entry['path']
-            assert digest(file) == entry['sha256']
-            shutil.copy2(file, payload / file.name)
+    stage_env = {k: v for k, v in os.environ.items()
+                 if k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'CORE_SDK_READ_TOKEN')}
+    stage_env['RSRS_CORE_SDK_DIR'] = str(sdk.resolve())
+    subprocess.run(['node', 'scripts/stage-core-runtime.mjs', str(payload)],
+                   env=stage_env, check=True, timeout=60)
     with socket.socket() as reservation:
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
