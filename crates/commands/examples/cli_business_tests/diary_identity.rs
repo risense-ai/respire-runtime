@@ -181,8 +181,18 @@ impl Fixture {
             "fixture already has a runtime launcher"
         );
         *self.runtime_owner.borrow_mut() = None;
-        self.child = Some(
+        let mut command = if self.business_cli.is_some() {
+            // This is the existing legacy host startup boundary. A normal
+            // authorized `serve` listener intentionally requires modern scope.
+            self.command_for(&self.runtime, &[
+                "--runtime-internal", "--runtime-background-internal",
+                "--port", &self.port.to_string(),
+            ])
+        } else {
             self.command(&["runtime", "run"])
+        };
+        self.child = Some(
+            command
                 .stdout(std::fs::File::create(
                     self.home.path().join("runtime.stdout"),
                 )?)
@@ -201,11 +211,38 @@ impl Fixture {
                 anyhow::bail!("synthetic runtime exited: {status}");
             }
             if self.owns_runtime()? {
+                if self.business_cli.is_some() {
+                    self.verify_legacy_projection()?;
+                }
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         anyhow::bail!("synthetic runtime did not become ready")
+    }
+
+    /// Prove this listener projects the historical unscoped wire request.
+    /// The probe is issued by the harness; subsequent business calls use the old binary.
+    fn verify_legacy_projection(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.owns_runtime()?, "legacy probe requires the owned candidate");
+        let id = uuid::Uuid::new_v4().to_string();
+        let response: Value = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", self.port))
+            .timeout(Duration::from_secs(30))
+            .send_json(json!({"v": 1, "id": id, "method": "cli.exec",
+                "args": ["--json", "status"], "lifecycle": null}))?
+            .into_json()?;
+        let object = response.as_object().context("legacy probe response is not an object")?;
+        anyhow::ensure!(response["v"] == 1 && response["id"] == id
+            && response["ok"] == true && response["exit"] == 0
+            && ["scope", "operation_id", "idempotency_key"].iter()
+                .all(|key| !object.contains_key(*key)),
+            "legacy probe did not receive the original unscoped projection");
+        anyhow::ensure!(self.owns_runtime()?, "candidate actor changed after legacy probe");
+        eprintln!("stable-diary-legacy-probe {}", json!({
+            "probe_without_scope": true, "legacy_projection_verified": true,
+            "same_actor_before_after": true, "candidate_process_verified": true,
+        }));
+        Ok(())
     }
 
     /// Reject port collisions instead of submitting commands to another runtime.
@@ -233,7 +270,11 @@ impl Fixture {
         anyhow::ensure!(
             health["pid"]
                 .as_u64()
-                .is_some_and(|pid| pid > 0 && pid != u64::from(child.id()))
+                .is_some_and(|pid| pid > 0 && if self.business_cli.is_some() {
+                    pid == u64::from(child.id())
+                } else {
+                    pid != u64::from(child.id())
+                })
                 && path_matches("exe", &self.runtime)?
                 && path_matches("image_path", &self.runtime)?
                 && path_matches("data_dir", &profile)?
@@ -257,14 +298,6 @@ impl Fixture {
             nonce.get_version_num() == 4 && nonce.to_string() == instance,
             "runtime launch instance is invalid"
         );
-        let claim: Value = serde_json::from_slice(&std::fs::read(
-            profile
-                .join("runtime/autostart/launch")
-                .join(format!("launch-{instance}.claimed")),
-        )?)?;
-        let birth = claim["process_start_id"]
-            .as_str()
-            .context("launch claim birth missing")?;
         let prefix = if cfg!(windows) {
             "windows-filetime-"
         } else if cfg!(target_os = "linux") {
@@ -272,11 +305,20 @@ impl Fixture {
         } else {
             "darwin-lstart-"
         };
-        anyhow::ensure!(
-            claim["pid"] == health["pid"]
+        if self.business_cli.is_some() {
+            let process = respire_commands::net_rpc::runtime_process_identity(child.id())?;
+            anyhow::ensure!(Path::new(&process.executable).canonicalize()? == self.runtime
+                && health["process_start_id"] == format!("{prefix}{}", process.started_at),
+                "legacy runtime does not match the directly owned process and birth");
+        } else {
+            let claim: Value = serde_json::from_slice(&std::fs::read(
+                profile.join("runtime/autostart/launch").join(format!("launch-{instance}.claimed")),
+            )?)?;
+            let birth = claim["process_start_id"].as_str().context("launch claim birth missing")?;
+            anyhow::ensure!(claim["pid"] == health["pid"]
                 && health["process_start_id"] == format!("{prefix}{birth}"),
-            "runtime does not match the consumed launch grant"
-        );
+                "runtime does not match the consumed launch grant");
+        }
         let identity = json!({
             "pid": health["pid"], "instance_id": health["instance_id"],
             "process_start_id": health["process_start_id"], "image_sha256": health["image_sha256"],
