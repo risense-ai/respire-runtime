@@ -1698,13 +1698,24 @@ pub(crate) fn install_legacy_host() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("legacy host session snapshot was already installed"))?;
     verify_legacy_host()?;
     let instance_id = BACKGROUND_INSTANCE.get().context("legacy host instance is absent")?.clone();
-    respire_commands::legacy_host::install(respire_protocol::RuntimeRequestScope {
+    respire_commands::legacy_host::install_with_admission(respire_protocol::RuntimeRequestScope {
         account_id: startup.context.account_id.clone(), instance_id,
         generation: respire_commands::rpc_worker::generation_on_wire(startup.context.sync_generation),
-    }, hash(startup.context.root.display().to_string().as_bytes()), verify_legacy_host)
+    }, hash(startup.context.root.display().to_string().as_bytes()),
+        verify_legacy_host_binding, verify_legacy_host_admission)
 }
 
 fn verify_legacy_host() -> Result<()> {
+    verify_legacy_host_binding()?;
+    verify_legacy_host_admission()
+}
+
+fn verify_legacy_host_admission() -> Result<()> {
+    let startup = STARTUP.get().context("legacy host startup is absent")?;
+    verify_authority(None, &startup.context)
+}
+
+fn verify_legacy_host_binding() -> Result<()> {
     use std::sync::atomic::Ordering;
     if LEGACY_HOST_REVOKED.load(Ordering::Acquire) {
         anyhow::bail!("legacy host binding was revoked; a new host startup is required");
@@ -1717,7 +1728,6 @@ fn verify_legacy_host() -> Result<()> {
         let expected = LEGACY_HOST_SESSION.get().context("legacy host session snapshot is absent")?;
         anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
             "interrupted authentication requires recovery");
-        verify_authority(None, &startup.context)?;
         // The parent verified image bytes and OS process identity at launch.
         // Do not re-hash the entire executable on every old-client poll. The
         // running actor remains bound to its original root/profile/session/path.

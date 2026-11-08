@@ -1347,6 +1347,10 @@ struct HeldClassifyProvider {
 
 impl HeldClassifyProvider {
     fn new() -> anyhow::Result<Self> {
+        Self::with_response(None)
+    }
+
+    fn with_response(response: Option<Value>) -> anyhow::Result<Self> {
         use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc};
         let server = tiny_http::Server::http("127.0.0.1:0")
             .map_err(|error| anyhow::anyhow!("loopback provider bind: {error}"))?;
@@ -1361,9 +1365,16 @@ impl HeldClassifyProvider {
             loop {
                 if released.load(Ordering::Acquire) || stopped.load(Ordering::Acquire) {
                     for request in held.drain(..) {
-                        // A terminal HTTP failure avoids fabricated model output and provider retries.
-                        request.respond(tiny_http::Response::empty(401))
-                            .context("send terminal loopback HTTP 401")?;
+                        if let Some(response) = response.as_ref() {
+                            request.respond(tiny_http::Response::from_string(serde_json::to_string(response)?)
+                                .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json")
+                                    .map_err(|_| anyhow::anyhow!("provider content-type header"))?))
+                                .context("send held loopback HTTP 200")?;
+                        } else {
+                            // Keep the existing terminal failure cases unchanged.
+                            request.respond(tiny_http::Response::empty(401))
+                                .context("send terminal loopback HTTP 401")?;
+                        }
                     }
                 }
                 if stopped.load(Ordering::Acquire) { break; }
@@ -1547,9 +1558,144 @@ impl Fixture {
     }
 }
 
+fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    let mut fixture = Fixture::new()?;
+    let root_id = uuid::Uuid::new_v4().simple().to_string();
+    let child_id = uuid::Uuid::new_v4().simple().to_string();
+    let parent_id = uuid::Uuid::new_v4().simple().to_string();
+    assert_ne!(&root_id[..8], &child_id[..8]);
+    assert_ne!(&root_id[..8], &parent_id[..8]);
+    assert_ne!(&child_id[..8], &parent_id[..8]);
+    let mut root = entry(&root_id, "synthetic-diary", "Accepted write root", "Synthetic classification root");
+    root.parent_id.clear();
+    root.importance = "important".into();
+    let mut child = entry(&child_id, "synthetic-diary", "Accepted write child", "Synthetic encrypted child");
+    child.parent_id = root_id.clone();
+    child.importance = "important".into();
+    let mut parent = entry(&parent_id, "synthetic-diary", "Accepted write parent", "Synthetic encrypted parent");
+    parent.parent_id = root_id.clone();
+    parent.importance = "important".into();
+    let original_root = fixture.seed(&root, false)?;
+    let original_child = fixture.seed(&child, false)?;
+    let original_parent = fixture.seed(&parent, false)?;
+    let before_boundary = fixture.store()?.outgoing_boundary()?;
+    let before_outgoing: std::collections::HashSet<_> = fixture.store()?.outgoing()?.into_iter()
+        .map(|operation| operation.op_id).collect();
+    let health = fixture.start_standalone_for_stop()?;
+    assert!(health["managed_id"].is_null());
+    let mut provider = HeldClassifyProvider::with_response(Some(json!({
+        "choices":[{"message":{"content":format!("{} > {}", &child_id[..8], &parent_id[..8])}}]
+    })))?;
+    let rpc_url = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
+    let stop_url = format!("http://127.0.0.1:{}/api/runtime/stop", fixture.port);
+    let scope = json!({"account_id":health["account_id"],"instance_id":health["instance_id"],"generation":health["generation"]});
+    let business_operation = "native-stop-successful-encrypted-write";
+    let request = json!({"v":1,"id":"native-stop-held-write","method":"cli.exec",
+        "operation_id":business_operation,"idempotency_key":business_operation,"scope":scope,
+        "args":["--json","classify","--backend","jev","--api-base",provider.endpoint,
+            "--auto","--rounds","1","--min-kids","2","--segments","1","--limit","3","--samples","1"]});
+    let (url, original) = (rpc_url.clone(), request.clone());
+    let business = std::thread::spawn(move || stop_native_post(&url, &original));
+    provider.received.recv_timeout(Duration::from_secs(30))
+        .context("real Core causal classification did not reach the held provider")?;
+    let held_at = std::time::Instant::now();
+    let active = fixture.standalone_stop_health()?;
+    assert!(active["control"]["admitted"].as_array().context("admission list missing")?.iter()
+        .any(|item| item["operation_id"] == business_operation));
+    let worker_pid = u32::try_from(active["inference"]["worker_pid"].as_u64().context("Core PID missing")?)?;
+    let worker_identity = stop_native_worker_identity(worker_pid)?.context("Core worker not live")?;
+    assert_eq!(Path::new(worker_identity["image"].as_str().context("Core image missing")?).canonicalize()?, fixture.runtime);
+    if let Some(parent) = worker_identity.get("parent") { assert_eq!(*parent, health["pid"]); }
+    assert!(active["inference"]["worker_pending_calls"].as_u64().is_some_and(|count| count > 0));
+    assert!(active["inference"]["worker_host_callbacks_active"].as_u64().is_some_and(|count| count > 0));
+    std::thread::sleep(Duration::from_millis(4200));
+    assert!(!business.is_finished());
+    let business_before_stop_ms = held_at.elapsed().as_millis();
+    assert!(business_before_stop_ms > 4000);
+    fixture.assert_standalone_stop_lock_held()?;
+    let identity = json!({"installation_id":health["installation_id"],"instance_id":health["instance_id"],
+        "account_id":health["account_id"],"generation":health["generation"]});
+    let (status, accepted) = stop_native_post(&stop_url, &identity)?;
+    assert_eq!(status, 200);
+    assert_eq!(accepted["state"], "accepted");
+    assert!(accepted["deadline_ms"].is_null() && accepted["timeout_state"].is_null());
+    let accepted_at = std::time::Instant::now();
+    std::thread::sleep(Duration::from_millis(4200));
+    let held = fixture.standalone_stop_health()?;
+    assert_eq!(held["control"]["state"], "draining");
+    assert_eq!(held["inference"]["worker_retired"], false);
+    assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+    assert!(!business.is_finished());
+    fixture.assert_standalone_stop_lock_held()?;
+    let business_held_after_stop_ms = accepted_at.elapsed().as_millis();
+    assert!(business_held_after_stop_ms > 4000);
+    let mut replay = request.clone();
+    replay["id"] = json!("native-stop-held-write-same-key");
+    let (_, pending) = stop_native_post(&rpc_url, &replay)?;
+    assert_eq!(pending["code"], "request_in_progress");
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    provider.release.store(true, Ordering::Release);
+    let (_, result) = business.join().map_err(|_| anyhow::anyhow!("accepted write client panicked"))??;
+    assert_eq!(result["id"], request["id"]);
+    assert_eq!(result["operation_id"], business_operation);
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["exit"], 0);
+    assert_eq!(result["envelope"]["command"], "classify");
+    assert_eq!(result["envelope"]["status"], "ok");
+    assert_eq!(result["envelope"]["details"]["applied"], 1);
+    assert_eq!(result["envelope"]["details"]["ops"], json!([{"id":child_id,"parent":parent_id}]));
+    let receipt = fixture.finish_standalone_stop(&health, &accepted["operation_id"], false)?;
+    assert_eq!(receipt["unfinished"], json!([]));
+    assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+    let after = fixture.store()?.all(true)?;
+    assert_eq!(after.len(), 3);
+    let written = after.iter().find(|row| row.id == child_id).context("committed child missing")?;
+    assert_ne!(written.ciphertext, original_child.ciphertext);
+    assert_ne!(written.nonce, original_child.nonce);
+    assert_eq!(written.local_parent_id, parent_id);
+    let opened = MemoryEngine::open(&fixture.keys, written)?;
+    assert_eq!(opened.parent_id, parent_id);
+    assert_eq!(opened.content, child.content);
+    assert!(fixture.store()?.outgoing_boundary()? > before_boundary);
+    let outgoing = fixture.store()?.outgoing()?;
+    let added: Vec<_> = outgoing.iter().filter(|operation| !before_outgoing.contains(&operation.op_id)).collect();
+    assert!(added.iter().any(|operation| operation.blob.id == child_id
+        && operation.blob.ciphertext == written.ciphertext && operation.blob.nonce == written.nonce),
+        "committed encrypted child is missing from the actual outbox");
+    for operation in added {
+        let expected = if operation.blob.id == child_id { written }
+            else if operation.blob.id == root_id { &original_root }
+            else if operation.blob.id == parent_id { &original_parent }
+            else { anyhow::bail!("unexpected memory in the accepted-write outbox") };
+        assert_eq!(operation.blob.ciphertext, expected.ciphertext);
+        assert_eq!(operation.blob.nonce, expected.nonce);
+        if operation.blob.id == child_id {
+            assert_eq!(MemoryEngine::open(&fixture.keys, &operation.blob)?.parent_id, parent_id);
+        }
+    }
+    for original in [original_root, original_parent] {
+        let unchanged = after.iter().find(|row| row.id == original.id).context("unchanged row missing")?;
+        assert_eq!(unchanged.ciphertext, original.ciphertext);
+        assert_eq!(unchanged.nonce, original.nonce);
+        assert_eq!(unchanged.local_parent_id, original.local_parent_id);
+    }
+    provider.finish()?;
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    eprintln!("NATIVE_ACCEPTED_WRITE_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
+        "startup_mode":"standalone","runtime_identity":health,"worker_identity":worker_identity,
+        "active_health":active,"held_health":held,"business_before_stop_ms":business_before_stop_ms,
+        "business_held_after_stop_ms":business_held_after_stop_ms,"accepted":accepted,
+        "business_result":result,"final_receipt":receipt,"provider_http_status":200,
+        "provider_requests":provider.calls.load(Ordering::Acquire),"same_key_result":pending,
+        "encrypted_write_committed":true,"plaintext_parent_matches_encrypted_payload":true}));
+    Ok(())
+}
+
 #[test]
 fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
+    stop_native_commits_accepted_encrypted_write_after_drain()?;
     for forced in [false, true] {
         let checkpoint = |stage: &str| eprintln!("NATIVE_STOP_CHECKPOINT mode={} stage={stage}",
             if forced { "forced" } else { "normal" });

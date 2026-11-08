@@ -549,16 +549,17 @@ pub fn invalidate_sync_boundary(generation: usize) -> Result<()> {
 
 pub fn check_sync_context(generation: usize) -> Result<()> {
     respire_app::service::validate_client_config()?;
-    anyhow::ensure!(
-        !crate::host_hooks::background_paused(),
-        "runtime maintenance pauses background work"
-    );
     respire_app::service::ensure_runtime_profile()?;
-    if STOPPING.load(Ordering::Acquire) {
-        bail!("runtime is stopping");
-    }
     if GENERATION.load(Ordering::Acquire) != generation {
         bail!("sync context changed; pending work kept locally");
+    }
+    let retained = crate::rpc_serve::active_execution_retained(generation)?;
+    anyhow::ensure!(
+        retained || !crate::host_hooks::background_paused(),
+        "runtime maintenance pauses background work"
+    );
+    if !retained && STOPPING.load(Ordering::Acquire) {
+        bail!("runtime is stopping");
     }
     Ok(())
 }

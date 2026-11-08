@@ -328,7 +328,7 @@ fn business_paused() -> bool {
     STOPPING.load(Ordering::Acquire) || crate::host_hooks::background_paused()
 }
 
-fn maintenance_control_method(method: &str) -> bool {
+pub(crate) fn maintenance_control_method(method: &str) -> bool {
     matches!(method, "runtime.status" | "runtime.stop" | "runtime.result" | "model.control" | "cli.progress")
 }
 
@@ -3314,18 +3314,55 @@ fn readonly_sync_reset_rejection_locked(
     Some(Ok(crate::output_state::Captured { exit, envelope }))
 }
 
+std::thread_local! {
+    static ACTIVE_EXECUTION_SCOPE: std::cell::RefCell<Option<RuntimeRequestScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Only execution that passed the queue fence may finish under its original scope.
+struct ActiveExecutionContext {
+    previous_scope: Option<RuntimeRequestScope>,
+    previous_sync: Option<(usize, i64)>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ActiveExecutionContext {
+    fn enter(scope: &RuntimeRequestScope, generation: usize) -> Self {
+        let previous_scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.replace(Some(scope.clone())));
+        let previous_sync = SYNC_CONTEXT.with(|context| {
+            let previous = context.get();
+            let boundary = previous.filter(|(epoch, _)| *epoch == generation)
+                .map_or(-1, |(_, boundary)| boundary);
+            context.set(Some((generation, boundary)));
+            previous
+        });
+        Self { previous_scope, previous_sync, _thread: std::marker::PhantomData }
+    }
+}
+
+impl Drop for ActiveExecutionContext {
+    fn drop(&mut self) {
+        SYNC_CONTEXT.with(|context| context.set(self.previous_sync));
+        ACTIVE_EXECUTION_SCOPE.with(|slot| slot.replace(self.previous_scope.take()));
+    }
+}
+
+pub(crate) fn active_execution_retained(generation: usize) -> Result<bool> {
+    let scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone());
+    let Some(scope) = scope else { return Ok(false); };
+    validate_scope(Some(&scope), &current_scope())
+        .map_err(|(code, message)| anyhow::anyhow!("{code}: {message}"))?;
+    anyhow::ensure!(scope_generation(&scope).map_err(anyhow::Error::msg)? == generation,
+        "sync context changed; pending work kept locally");
+    crate::legacy_host::verify_active_execution(&scope)?;
+    Ok(!STOP_FORCE_TRIGGERED.load(Ordering::Acquire))
+}
+
 fn capture_scoped_locked(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResult {
     validate_job_scope(scope)?;
     let generation = scope_generation(scope)?;
-    SYNC_CONTEXT.with(|context| {
-        let previous = context.get();
-        let boundary = previous.filter(|(epoch, _)| *epoch == generation)
-            .map_or(-1, |(_, boundary)| boundary);
-        context.set(Some((generation, boundary)));
-        let captured = crate::host_hooks::capture_run(args);
-        context.set(previous);
-        Ok(captured)
-    })
+    let _active = ActiveExecutionContext::enter(scope, generation);
+    Ok(crate::host_hooks::capture_run(args))
 }
 
 fn scope_generation(scope: &RuntimeRequestScope) -> Result<usize, String> {
@@ -3555,6 +3592,34 @@ pub fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_execution_context_restores_nested_and_unwound_scope() {
+        let initial_scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone());
+        let initial_sync = SYNC_CONTEXT.with(|context| context.get());
+        let outer = RuntimeRequestScope {
+            account_id: "outer-account".into(), instance_id: "outer-instance".into(), generation: 8,
+        };
+        let inner = RuntimeRequestScope {
+            account_id: "inner-account".into(), instance_id: "inner-instance".into(), generation: 9,
+        };
+        {
+            let _outer = ActiveExecutionContext::enter(&outer, 7);
+            assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), Some(outer.clone()));
+            assert_eq!(SYNC_CONTEXT.with(|context| context.get()), Some((7, -1)));
+            let unwound = std::panic::catch_unwind(|| {
+                let _inner = ActiveExecutionContext::enter(&inner, 8);
+                assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), Some(inner.clone()));
+                assert_eq!(SYNC_CONTEXT.with(|context| context.get()), Some((8, -1)));
+                panic!("exercise execution context unwind");
+            });
+            assert!(unwound.is_err());
+            assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), Some(outer));
+            assert_eq!(SYNC_CONTEXT.with(|context| context.get()), Some((7, -1)));
+        }
+        assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), initial_scope);
+        assert_eq!(SYNC_CONTEXT.with(|context| context.get()), initial_sync);
+    }
+
     static DIRECT_GATE_BARRIER: std::sync::OnceLock<(String, Arc<std::sync::Barrier>)> = std::sync::OnceLock::new();
     pub(super) fn wait_before_direct_gate(id: &str) {
         if let Some((_, barrier)) = DIRECT_GATE_BARRIER.get().filter(|(expected, _)| expected == id) {
@@ -3601,6 +3666,38 @@ mod tests {
         }));
         let initial = current_scope();
         crate::legacy_host::install(initial.clone(), "synthetic-installation".into(), verify)?;
+        {
+            struct RestoreStopState(bool, bool);
+            impl Drop for RestoreStopState {
+                fn drop(&mut self) {
+                    STOPPING.store(self.0, Ordering::Release);
+                    STOP_FORCE_TRIGGERED.store(self.1, Ordering::Release);
+                }
+            }
+            let _restore = RestoreStopState(
+                STOPPING.swap(true, Ordering::AcqRel),
+                STOP_FORCE_TRIGGERED.swap(false, Ordering::AcqRel));
+            let generation = scope_generation(&initial).map_err(anyhow::Error::msg)?;
+            assert!(!active_execution_retained(generation)?);
+            assert!(check_sync_context(generation).is_err(), "background work must remain fenced");
+            {
+                let _active = ActiveExecutionContext::enter(&initial, generation);
+                assert!(active_execution_retained(generation)?);
+                check_sync_context(generation)?;
+                assert!(active_execution_retained(generation + 1).is_err());
+                {
+                    let mut changed = initial.clone();
+                    changed.account_id.push_str("-changed");
+                    let _changed = ActiveExecutionContext::enter(&changed, generation);
+                    assert!(active_execution_retained(generation).is_err());
+                }
+                assert!(active_execution_retained(generation)?);
+                STOP_FORCE_TRIGGERED.store(true, Ordering::Release);
+                assert!(!active_execution_retained(generation)?);
+                assert!(check_sync_context(generation).is_err(), "force must end retention");
+            }
+            assert!(!active_execution_retained(generation)?);
+        }
         let (jobs, queued) = std::sync::mpsc::channel();
         if std::env::var("RSRS_SYNTHETIC_LEGACY_TEST").as_deref() == Ok("restart") {
             let previous: Value = serde_json::from_slice(&std::fs::read(root.join("previous.json"))?)?;
