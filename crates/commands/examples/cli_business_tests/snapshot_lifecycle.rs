@@ -1079,6 +1079,10 @@ fn public_empty_recall_returns_its_query_log_identity() -> Result<()> {
 // maintenance. These substeps exercise the old supported contract, not the new
 // fault-injection or scoped-stop features in the first current31 pass.
 fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
+    // Fixed stage names only: no response bodies, paths, credentials or raw errors.
+    let checkpoint = |stage: &str| eprintln!("legacy-snapshot-stage {}",
+        json!({"case":case,"stage":stage}));
+    checkpoint("candidate_guard");
     let guard = Fixture::new()?;
     let sender=support::legacy_cli()?.context("old remote sender missing")?;
     let remote=|args:&[&str]| -> Result<Value> {
@@ -1111,8 +1115,10 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
             .iter().any(|row|row.request_id.as_deref()==Some(id)&&row.candidates.is_empty()));
         api_receipt("recall.empty");
     } else {
+        checkpoint("remote_create");
         let created=remote(&["--client-only","--json","snapshot","create"])?;
         let id=created["details"]["id"].as_str().context("old remote snapshot ID missing")?;
+        checkpoint("remote_list");
         let listed=remote(&["--client-only","--json","snapshot","list"])?;
         assert!(listed["details"]["snapshots"].as_array().context("old remote snapshots missing")?
             .iter().any(|snapshot|snapshot["id"]==id));
@@ -1128,6 +1134,7 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
         assert!(!refused.status.success(),"old client-only sender bypassed its host restore boundary");
         assert_eq!(guard.protected_state()?,before);
     }
+    checkpoint("old_install");
     let protected = guard.protected_state()?;
     let root = tempfile::tempdir()?;
     let cli = support::stage_legacy_cli(root.path())?;
@@ -1142,6 +1149,7 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
     let mut old = Fixture { cli:cli.clone(), runtime:None, runtime_bin:cli,
         root, port, secret:guard.secret.clone() };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+        checkpoint("old_start");
         old.start_runtime()?;
         let first = support::legacy_owner(old.root.path(), old.root.path(), old.port)?;
         let rows = serde_json::to_value(LocalStore::open(&old.root.path().join("rsrs.db"))?.all(true)?)?;
@@ -1160,6 +1168,7 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
 
         // Explicit direct requests retain their original local semantics. The old
         // owner is proven down; no --direct flag is stripped or rewritten.
+        checkpoint("old_create");
         let (ok, created) = old.run(&["--direct","--json","snapshot","create","--note","legacy contract"])?;
         assert!(ok, "old local snapshot creation failed");
         let id = created["details"]["id"].as_str().context("old snapshot identity missing")?.to_owned();
@@ -1201,12 +1210,15 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
             assert!(!ok);
             assert_eq!(serde_json::to_value(LocalStore::open(&old.root.path().join("rsrs.db"))?.all(true)?)?,before);
         } else {
+            checkpoint("old_update");
             let (ok, changed)=old.run(&["--direct","--json","update",
                 "12345678-1234-4234-8234-123456789abc","--title","old temporary title"])?;
             assert!(ok, "old local update failed: {}",changed["status"]);
+            checkpoint("old_restart");
             let (ok,_)=old.run(&["runtime","start"])?;
             assert!(ok);
             support::legacy_owner(old.root.path(),old.root.path(),old.port)?;
+            checkpoint("old_restore");
             let (ok, restored)=old.run(&["--json","snapshot","restore",&id,"--confirm"])?;
             assert!(ok, "old host restore failed: {}",restored["status"]);
             assert_eq!(restored["summary"]["runtime_verified"],true);
@@ -1219,6 +1231,7 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
                 assert!(ok, "old restored witness verification failed: {}",proof["status"]);
             }
             if feature == "recover" || feature == "concurrent_recover" {
+                checkpoint("old_recovery");
                 // The original binary has no public interruption hook. The
                 // harness stages its original schema using the real snapshot
                 // bytes, then the old binary alone executes recovery.
@@ -1272,6 +1285,7 @@ fn legacy_snapshot_contract(case: &str, feature: &str) -> Result<()> {
             "old maintenance changed the separate candidate owner or its records");
         Ok(())
     }));
+    checkpoint("old_cleanup");
     let cleanup=(|| -> Result<()> {
         if respire_commands::net_rpc::port_is_open_on(old.port) {
             let owner=support::legacy_owner(old.root.path(),old.root.path(),old.port)?;

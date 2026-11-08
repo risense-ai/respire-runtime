@@ -138,13 +138,27 @@ fn memory_revision_does_not_initialize_or_autostart() -> Result<(), Box<dyn std:
         vec!["memory-revision", "--json"],
     ] {
         let result = run(&root, &args)?;
-        assert_eq!(result.status.code(), Some(1));
-        let envelope: Value = serde_json::from_slice(&result.stdout)?;
-        assert_eq!(envelope["command"], "cli");
-        assert_eq!(envelope["status"], "fail");
-        assert!(envelope["errors"]
-            .to_string()
-            .contains("host control requires an installed managed Runtime"));
+        if support::legacy_cli()?.is_some() {
+            if args.contains(&"--direct") {
+                // Stable reads the existing revision before login recovery dispatch.
+                let revision = summary(result)?;
+                assert_eq!(revision["profile"], root.to_string_lossy().as_ref());
+            } else {
+                assert_eq!(result.status.code(), Some(1));
+                let envelope: Value = serde_json::from_slice(&result.stdout)?;
+                assert_eq!(envelope["status"], "fail");
+                assert!(envelope["errors"].to_string()
+                    .contains("runtime_unavailable: host HTTP runtime is not running"));
+            }
+        } else {
+            assert_eq!(result.status.code(), Some(1));
+            let envelope: Value = serde_json::from_slice(&result.stdout)?;
+            assert_eq!(envelope["command"], "cli");
+            assert_eq!(envelope["status"], "fail");
+            assert!(envelope["errors"]
+                .to_string()
+                .contains("host control requires an installed managed Runtime"));
+        }
         assert_eq!(std::fs::read(root.join("rsrs.db"))?, database);
         assert_eq!(std::fs::read(&journal)?, marker);
         assert!(!root.join("runtime").exists());

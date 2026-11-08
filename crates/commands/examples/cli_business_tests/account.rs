@@ -875,7 +875,8 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             assert!(saved.get("super").is_none()&&saved.get("pass").is_none());
             let owner=support::legacy_owner(&root,&target,runtime_port)?;
             assert!(respire_app::lock::LibraryLock::acquire(&target,Duration::from_millis(80)).is_err());
-            let written=execute(&["--json","remember","old authorized private body","--force"])?;
+            // The old default trivial write formats a diary; use its existing ordinary-memory contract.
+            let written=execute(&["--json","remember","old authorized private body","--force","--importance","important"])?;
             assert!(written.status.success());
             let written:Value=serde_json::from_slice(&written.stdout)?;
             let id=written["summary"]["id"].as_str().ok_or("old authorized memory ID missing")?;
@@ -2019,7 +2020,7 @@ fn legacy_space_contract(case: &str) -> Result<(), Box<dyn std::error::Error>> {
         if case=="account::spaces_coordinate_with_the_owned_runtime" {
             let before=std::fs::read(root.join("client.json"))?;
             for readonly in [false,true] {
-                // Same ordered self/vault mock protocol as the original case.
+                // Stable 1.0.20 proves the invite with one authenticated vault GET.
                 let server=tiny_http::Server::http("127.0.0.1:0").map_err(|error|error.to_string())?;
                 let name=if readonly {"legacy-joined-readonly"} else {"legacy-joined-writable"};
                 let user=format!("old-join-{}",uuid::Uuid::new_v4());
@@ -2033,10 +2034,9 @@ fn legacy_space_contract(case: &str) -> Result<(), Box<dyn std::error::Error>> {
                     "user":user,"token":token,"super":secret,"readonly":readonly});
                 let code=format!("1mem-invite:{}",serde_json::to_vec(&payload)?.iter()
                     .map(|byte|format!("{byte:02x}")).collect::<String>());
-                let expected_user=user.clone();
                 let authorization=format!("Bearer {token}");
                 let worker=std::thread::spawn(move || -> Result<(),String> {
-                    for (path,body) in [("/api/self",json!({"user":expected_user})),("/api/self/vault",vault)] {
+                    for (path,body) in [("/api/self/vault",vault)] {
                         let request=server.recv_timeout(Duration::from_secs(20)).map_err(|_|"old join receive failed")?
                             .ok_or("old join did not fetch the ordered vault fixture")?;
                         if request.method()!=&tiny_http::Method::Get || request.url()!=path

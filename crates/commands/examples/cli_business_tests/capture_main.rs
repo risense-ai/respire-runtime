@@ -113,6 +113,10 @@ fn residual_host_and_parser_errors_remain_user_errors() -> anyhow::Result<()> {
     with_isolated_session(|root| {
         for args in [vec!["--json".into(), "space".into(), "kick".into()],
             vec!["--json".into(), "agent-config".into(), "--set".into(), "workspace_mode=bogus".into()]] {
+            // The fixed old test ran inside its local worker. Its released CLI
+            // exposes that local validation with --direct; ordinary calls auto-start.
+            let mut args = args;
+            if support::legacy_cli()?.is_some() { args.insert(0, "--direct".into()); }
             let failed = capture_run(args)?;
             assert_eq!(failed.exit, 2, "{:?}", failed.envelope);
             assert_eq!(failed.envelope.summary["reason"], "invalid_input");
