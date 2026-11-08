@@ -106,7 +106,9 @@ export function verifyResults(business, launcher, bound) {
   assert.equal(business.selected_case_count, 2);
   for (const key of ['required_cases', 'passed_cases']) assert.deepEqual([...business[key]].sort(), selected);
   assert.deepEqual(business.missing_or_failed_cases, []);
-  assert.deepEqual(business.owned_process_cleanup, {passed: true, forced: 0});
+  assert.equal(business.owned_process_cleanup.passed, true);
+  assert.equal(business.owned_process_cleanup.forced, 0);
+  assert.deepEqual(business.owned_process_cleanup.forced_processes, []);
   assert.equal(business.keyring.passed, true);
   assert.equal(business.keyring.business_passed, true);
   assert.equal(launcher.client2_source, oldClient2);

@@ -73,6 +73,8 @@ jobs:
           node scripts/test-produce-runtime-g1-business.mjs
           python3 -B scripts/test-verify-business-archive-payloads.py
           node scripts/test-runtime-g1-mappings.mjs
+      - name: Reject mixed frozen combination input identities without products
+        run: node --test scripts/test-freeze-runtime-g1-candidate.mjs
       - name: Verify approved SDK version trains and download boundaries
         run: node --test scripts/test-sdk-version-trains.mjs
       - name: Check native release smoke response assertions

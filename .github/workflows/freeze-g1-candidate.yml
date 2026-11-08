@@ -1,0 +1,272 @@
+name: Freeze unpublished G1 combination inputs
+
+on:
+  workflow_dispatch:
+    inputs:
+      cli_source_sha:
+        description: Reviewed immutable CLI source SHA; SDK locks must match this Runtime
+        type: string
+        required: true
+
+# Same existing read scope as Runtime CI. No private SDK/release credential.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUNTIME_TARGET: x86_64-unknown-linux-gnu
+      FREEZE_CLI_SHA: ${{ inputs.cli_source_sha }}
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps: &package_steps
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate immutable source selection
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch('[a-f0-9]{40}', os.environ['FREEZE_CLI_SHA'])
+          assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-cli
+          ref: ${{ inputs.cli_source_sha }}
+          path: .cli-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify freeze identities and workflow boundaries without products
+        if: runner.os == 'Linux'
+        run: node --test scripts/test-freeze-runtime-g1-candidate.mjs
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Require matching locks and resolve exact existing SDK caches
+        id: sdk
+        run: |
+          set -euo pipefail
+          cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json .cli-source/sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json .cli-source/crates/core-sdk/core-sdk.lock.json
+          echo "payload=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "archive=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: payload
+        with:
+          path: .sdk/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.payload }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: archive
+        with:
+          path: .sdk-archives/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.archive }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Audit existing original SDK bytes without downloading or saving caches
+        env:
+          EXPECTED_PAYLOAD: ${{ steps.sdk.outputs.payload }}
+          MATCHED_PAYLOAD: ${{ steps.payload.outputs.cache-matched-key }}
+          EXPECTED_ARCHIVE: ${{ steps.sdk.outputs.archive }}
+          MATCHED_ARCHIVE: ${{ steps.archive.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_PAYLOAD" && test "$EXPECTED_PAYLOAD" = "$MATCHED_PAYLOAD"
+          test -n "$EXPECTED_ARCHIVE" && test "$EXPECTED_ARCHIVE" = "$MATCHED_ARCHIVE"
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          target = os.environ['RUNTIME_TARGET']
+          for directory in ['.sdk', '.sdk-archives']:
+              destination = pathlib.Path('.cli-source') / directory / target
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copytree(pathlib.Path(directory) / target, destination)
+          PY
+      - name: Build the exact two checked-out consumers without credentials
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          export RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET"
+          cargo build --locked -p respire_runtime --bin rsrs-runtime
+          cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target-dir .cli-source/target
+      - name: Authenticate the exact original Linux desktop artifact
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, os, pathlib, stat, subprocess, tarfile, zipfile
+          repository = 'repos/risense-ai/respire-client2'
+          source = '57bc070826949994c3f7ce9a64277160704bdfe5'
+          run_id, artifact_id = 42458504861, 13609150108
+          zip_sha256 = 'b2aaed0a79a4e9eab9fbe7c78ef14c8fd7664960265f66a4923b281213a617be'
+          archive_sha256 = 'd1b860fb7e8e0b1e152ff33e202f3e978174f554fc0a979556a9c4fea838d873'
+          binary_sha256 = '3cacf426d22974aaa53bb20d13b450fb67b56404366050f796cfd4fbad73933a'
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', repository + path], timeout=60))
+          run = api(f'/actions/runs/{run_id}')
+          assert run['id'] == run_id and run['head_sha'] == source
+          assert run['repository']['full_name'] == 'risense-ai/respire-client2'
+          assert run['path'] == '.github/workflows/desktop.yml' and run['event'] == 'workflow_dispatch'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['run_number'] == 164 and run['run_attempt'] == 1
+          artifact = api(f'/actions/artifacts/{artifact_id}')
+          assert artifact['id'] == artifact_id and artifact['name'] == 'respire-linux-amd64'
+          assert not artifact['expired'] and artifact['digest'] == 'sha256:' + zip_sha256
+          assert artifact['workflow_run']['id'] == run_id and artifact['workflow_run']['head_sha'] == source
+          assert artifact['size_in_bytes'] == 11516423
+          raw = subprocess.check_output(['gh', 'api', repository + f'/actions/artifacts/{artifact_id}/zip'], timeout=120)
+          assert len(raw) == artifact['size_in_bytes'] and hashlib.sha256(raw).hexdigest() == zip_sha256
+          def verified_binary(raw):
+              sizes = {'LICENSE.txt': 2827, 'SHA256SUMS': 93, 'THIRD_PARTY_NOTICES.txt': 25173,
+                       'respire-linux-amd64.tar.gz': 11516699}
+              with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                  members = archive.infolist()
+                  assert len(members) == len(sizes) and {item.filename for item in members} == set(sizes)
+                  for item in members:
+                      assert not item.is_dir() and item.file_size == sizes[item.filename]
+                      assert stat.S_IFMT(item.external_attr >> 16) in (0, stat.S_IFREG)
+                  sums = archive.read('SHA256SUMS').decode('ascii')
+                  assert sums == archive_sha256 + '  respire-linux-amd64.tar.gz\n'
+                  payload = archive.read('respire-linux-amd64.tar.gz')
+              assert hashlib.sha256(payload).hexdigest() == archive_sha256
+              with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+                  member, = archive.getmembers()
+                  assert member.name == 'respire' and member.type == tarfile.REGTYPE and member.size == 19002960
+                  with archive.extractfile(member) as stream:
+                      binary = stream.read(member.size + 1)
+              assert len(binary) == 19002960 and hashlib.sha256(binary).hexdigest() == binary_sha256
+              return binary, payload
+          binary, payload = verified_binary(raw)
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'legacy-desktop'
+          output.mkdir(mode=0o700)
+          executable = output / 'respire'
+          with executable.open('xb') as stream:
+              stream.write(binary)
+          executable.chmod(0o700)
+          (output / 'respire-linux-amd64.tar.gz').write_bytes(payload)
+          proof = dict(source_commit=source, run_id=run_id, run_number=164, artifact_id=artifact_id,
+                       artifact_sha256=zip_sha256, archive_sha256=archive_sha256, binary_sha256=binary_sha256)
+          (output / 'desktop-source.json').write_text(json.dumps(proof) + '\n')
+          PY
+      - name: Package original source-fixture bytes before freezing
+        run: node scripts/freeze-runtime-g1-candidate.mjs package
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: g1-freeze-part-${{ env.RUNTIME_TARGET }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: freeze-part/
+          if-no-files-found: error
+          retention-days: 1
+
+  package-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      RUNTIME_TARGET: aarch64-apple-darwin
+      FREEZE_CLI_SHA: ${{ inputs.cli_source_sha }}
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps: *package_steps
+
+  freeze:
+    needs: [package-linux, package-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      FREEZE_CLI_SHA: ${{ inputs.cli_source_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Authenticate both actual upload outputs in this exact run and attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINUX_ID: ${{ needs.package-linux.outputs.id }}
+          LINUX_DIGEST: ${{ needs.package-linux.outputs.digest }}
+          MACOS_ID: ${{ needs.package-macos.outputs.id }}
+          MACOS_DIGEST: ${{ needs.package-macos.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, os, pathlib, re, stat, subprocess, zipfile
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', 'repos/risense-ai/respire-runtime' + path]))
+          run = api('/actions/runs/' + os.environ['GITHUB_RUN_ID'])
+          assert run['head_sha'] == os.environ['GITHUB_SHA'] and run['event'] == 'workflow_dispatch'
+          assert run['path'] == '.github/workflows/freeze-g1-candidate.yml'
+          assert str(run['run_attempt']) == os.environ['GITHUB_RUN_ATTEMPT']
+          artifacts = []
+          for key, target in [('LINUX', 'x86_64-unknown-linux-gnu'), ('MACOS', 'aarch64-apple-darwin')]:
+              assert re.fullmatch('[1-9][0-9]*', os.environ[key + '_ID'])
+              expected_digest = os.environ[key + '_DIGEST']
+              assert re.fullmatch('[a-f0-9]{64}', expected_digest)
+              artifact = api('/actions/artifacts/' + os.environ[key + '_ID'])
+              assert str(artifact['id']) == os.environ[key + '_ID'] and not artifact['expired']
+              assert artifact['digest'] == 'sha256:' + expected_digest
+              assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == run['head_sha']
+              expected_artifact_name = f"g1-freeze-part-{target}-{run['id']}-{run['run_attempt']}"
+              assert artifact['name'] == expected_artifact_name
+              assert 0 < artifact['size_in_bytes'] <= 256 * 1024 * 1024
+              raw = subprocess.check_output(['gh', 'api', 'repos/risense-ai/respire-runtime/actions/artifacts/' + str(artifact['id']) + '/zip'])
+              assert len(raw) == artifact['size_in_bytes'] and hashlib.sha256(raw).hexdigest() == expected_digest
+              destination = pathlib.Path('freeze-parts') / target
+              destination.mkdir(parents=True)
+              with zipfile.ZipFile(io.BytesIO(raw)) as bundle:
+                  members = bundle.infolist()
+                  assert 0 < len(members) <= 512
+                  total = 0
+                  names = set()
+                  for member in members:
+                      member_name = member.filename
+                      assert member_name and not member.is_dir() and not member_name.startswith('/')
+                      assert not any(value in member_name for value in ['\\', ':', '\0'])
+                      assert all(part and part not in ('.', '..') for part in member_name.split('/'))
+                      assert member_name not in names
+                      names.add(member_name)
+                      assert stat.S_IFMT(member.external_attr >> 16) in (0, stat.S_IFREG)
+                      assert not member.flag_bits & 1
+                      assert 0 <= member.file_size <= 256 * 1024 * 1024
+                      total += member.file_size
+                      assert total <= 256 * 1024 * 1024
+                      output = destination / member_name
+                      output.parent.mkdir(parents=True, exist_ok=True)
+                      data = bundle.read(member)
+                      assert len(data) == member.file_size
+                      with output.open('xb') as stream:
+                          stream.write(data)
+              artifacts.append(dict(target=target, id=artifact['id'], name=expected_artifact_name, digest=artifact['digest']))
+          origin = dict(repository='risense-ai/respire-runtime', source_sha=run['head_sha'],
+                        workflow=run['path'], run_id=str(run['id']), run_attempt=str(run['run_attempt']), artifacts=artifacts)
+          pathlib.Path('freeze-origin.json').write_text(json.dumps(origin) + '\n')
+          PY
+      - name: Freeze exact bytes; this does not evaluate G1
+        id: candidate
+        run: node scripts/freeze-runtime-g1-candidate.mjs assemble
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: g1-frozen-input-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-input/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Record input identity without claiming acceptance
+        env:
+          INPUT_ID: ${{ steps.upload.outputs.artifact-id }}
+          INPUT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.candidate_sha256 }}
+        run: |
+          printf 'Runtime source: %s\nCLI source: %s\nFreeze run/attempt: %s/%s\nFrozen input artifact: %s\nArtifact SHA-256: %s\nCandidate SHA-256: %s\nG1: not evaluated\n' "$GITHUB_SHA" "$FREEZE_CLI_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$INPUT_ID" "$INPUT_DIGEST" "$CANDIDATE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

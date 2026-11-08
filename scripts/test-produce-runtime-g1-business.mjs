@@ -17,7 +17,7 @@ const business = {suite: 'g1-business', passed: true, test_executed: true, relea
   cli_binary_sha256: cliBinary, runtime_binary_sha256: binary, runtime_archive_sha256: archive,
   runtime_metadata_sha256: bound.metadata_sha256, sdk_lock_sha256: bound.sdk_lock_sha256,
   offline_installer_verified: true, selected_case_count: 2, required_cases: names, passed_cases: names,
-  missing_or_failed_cases: [], owned_process_cleanup: {passed: true, forced: 0}, keyring: {passed: true, business_passed: true}};
+  missing_or_failed_cases: [], owned_process_cleanup: {passed: true, forced: 0, forced_processes: []}, keyring: {passed: true, business_passed: true}};
 const launcher = {client2_source: '57bc070826949994c3f7ce9a64277160704bdfe5', g1_passed: false,
   inputs: {cli_sha256: cliBinary, runtime_archive_sha256: archive, runtime_version: 'synthetic', ordinary_cli_cold_start: true},
   desktop_headless: {enabled: true, binary_sha256: desktop},
@@ -29,6 +29,10 @@ for (const mutate of [
   (b) => {b.runtime_archive_sha256 = '0'.repeat(64);},
   (b) => {b.passed_cases = b.passed_cases.slice(1);},
   (b) => {b.owned_process_cleanup.forced = 1;},
+  (b) => {b.owned_process_cleanup.passed = false;},
+  (b) => {b.owned_process_cleanup.forced_processes = [{pid: 42, image_sha256: binary, image_role: 'candidate_runtime'}];},
+  (b) => {delete b.owned_process_cleanup.forced_processes;},
+  (b) => {b.owned_process_cleanup.forced_processes = {};},
   (b) => {b.keyring.business_passed = false;},
   (_b, l) => {l.desktop_headless.enabled = false;},
   (_b, l) => {l.inputs.cli_sha256 = '0'.repeat(64);},
@@ -39,4 +43,4 @@ for (const mutate of [
   mutate(b, l);
   assert.throws(() => verifyResults(b, l, bound));
 }
-console.log('10 synthetic business combination checks passed; no native acceptance executed');
+console.log('14 synthetic business combination checks passed; no native acceptance executed');
