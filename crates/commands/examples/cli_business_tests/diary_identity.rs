@@ -865,6 +865,69 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
             );
         }
     }
+    // Exercise the real admission ledger and encrypted business effects together.
+    let endpoint = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
+    let health: Value = ureq::get(&format!("http://127.0.0.1:{}/api/health", fixture.port))
+        .timeout(Duration::from_secs(5)).call()?.into_json()?;
+    let scope = json!({"account_id": health["account_id"], "instance_id": health["instance_id"],
+        "generation": health["generation"]});
+    let original = json!({"v":1, "id":"same-key-first", "method":"cli.exec",
+        "operation_id":"same-key-business-effect", "idempotency_key":"same-key-business-effect",
+        "scope":scope, "args":["--json", "remember", "idempotent-rpc-marker",
+            "--title", "Idempotent RPC effect", "--importance", "important", "--force"]});
+    let post = |request: Value| -> anyhow::Result<Value> {
+        let request_id = request["id"].clone();
+        let response = match ureq::post(&endpoint).timeout(Duration::from_secs(120)).send_json(request) {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+            Err(error) => return Err(error.into()),
+        };
+        let reply: Value = response.into_json()?;
+        assert_eq!(reply["v"], 1);
+        assert_eq!(reply["id"], request_id);
+        assert_eq!(reply["pid"], health["pid"]);
+        Ok(reply)
+    };
+    let before = fixture.store()?.all(true)?.len();
+    let barrier = std::sync::Barrier::new(2);
+    let replies = std::thread::scope(|threads| -> anyhow::Result<Vec<Value>> {
+        let mut workers = Vec::new();
+        for index in 0..2 {
+            let mut request = original.clone();
+            request["id"] = json!(format!("same-key-concurrent-{index}"));
+            let post = &post;
+            let barrier = &barrier;
+            workers.push(threads.spawn(move || {
+                barrier.wait();
+                post(request)
+            }));
+        }
+        workers.into_iter().map(|worker| worker.join()
+            .map_err(|_| anyhow::anyhow!("idempotent RPC worker panicked"))?)
+            .collect()
+    })?;
+    assert!(replies.iter().any(|reply| reply["ok"] == true));
+    for reply in &replies {
+        assert!(reply["ok"] == true || reply["code"] == "request_in_progress", "{reply}");
+    }
+    let mut replay = original.clone();
+    replay["id"] = json!("same-key-completed-replay");
+    let replay = post(replay)?;
+    assert_eq!(replay["ok"], true, "{replay}");
+    assert_eq!(replay["scope"], scope);
+    let stored_id = replay["envelope"]["summary"]["id"].as_str()
+        .context("idempotent business result ID missing")?;
+    assert_eq!(fixture.show(stored_id)?["content"], "idempotent-rpc-marker");
+    assert_eq!(fixture.store()?.all(true)?.len(), before + 1,
+        "concurrent same-fingerprint requests committed more than one record");
+    let mut conflict = original;
+    conflict["id"] = json!("same-key-changed-arguments");
+    conflict["args"][2] = json!("conflicting-rpc-marker");
+    let rejected = post(conflict)?;
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert_eq!(rejected["code"], "idempotency_conflict");
+    assert_eq!(fixture.store()?.all(true)?.len(), before + 1,
+        "conflicting or replayed requests committed another record");
+    assert_eq!(fixture.show(stored_id)?["content"], "idempotent-rpc-marker");
     Ok(())
 }
 
