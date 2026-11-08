@@ -227,6 +227,7 @@ impl Fixture {
             .env("HOME", self.root.path())
             .env("USERPROFILE", self.root.path())
             .env("RSRS_DATA_DIR", self.root.path())
+            .env("RSRS_BIN_DIR", self.root.path().join("bin"))
             .env("RSRS_RPC_PORT", self.port.to_string())
             .env("RSRS_SUPER", &self.secret)
             .env("RSRS_NO_AUTOSYNC", "1")

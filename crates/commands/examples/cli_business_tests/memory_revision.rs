@@ -16,6 +16,7 @@ fn run(root: &Path, args: &[&str]) -> std::io::Result<Output> {
         .args(args)
         .env("HOME", root.join("unused-home"))
         .env("RSRS_DATA_DIR", root)
+        .env("RSRS_BIN_DIR", root.join("bin"))
         .env("RSRS_MODEL_DIR", root.join("missing-model"))
         .env("RSRS_JSON", "1")
         .env("RSRS_RPC_PORT", port.to_string())
@@ -116,6 +117,7 @@ fn memory_revision_does_not_initialize_or_autostart() -> Result<(), Box<dyn std:
         .args(["memory-revision", "--json"])
         .env("HOME", dir.path().join("unused-home"))
         .env("RSRS_DATA_DIR", &root)
+        .env("RSRS_BIN_DIR", root.join("bin"))
         .env("RSRS_RPC_PORT", port.to_string())
         .env_remove("RSRS_RPC_TOKEN")
         .output()?;
@@ -219,6 +221,7 @@ fn memory_revision_preserves_legacy_environment_alias() -> Result<(), Box<dyn st
         .env_remove("RSRS_DATA_DIR")
         .env_remove("RESPIRE_DATA_DIR")
         .env("ONEMEMORY_DATA_DIR", dir.path())
+        .env("RSRS_BIN_DIR", dir.path().join("bin"))
         .env_remove("RSRS_CLIENT_ONLY")
         .env_remove("ONEMEMORY_CLIENT_ONLY")
         .env_remove("RESPIRE_CLIENT_ONLY")

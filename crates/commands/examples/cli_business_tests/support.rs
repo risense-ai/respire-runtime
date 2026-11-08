@@ -108,12 +108,18 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
     }
     anyhow::ensure!(std::fs::symlink_metadata(&receipt)?.is_file(), "Runtime fixture receipt missing");
     std::fs::copy(receipt, root.join("runtime.json"))?;
-    if std::env::var("RSRS_TEST_EXPECT_CLIENT2_HOST").as_deref() == Ok("1") {
-        let cli = cli_bin()?;
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin)?;
-        std::fs::copy(cli, bin.join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
-    }
+    stage_cli_fixture(&root.join("bin"))
+}
+
+// Completed maintenance hands the serving owner back to the default compatibility
+// host. Its stable CLI must contain the same bytes as the current test sender.
+pub(super) fn stage_cli_fixture(bin_directory: &Path) -> anyhow::Result<()> {
+    let source = cli_bin()?;
+    std::fs::create_dir_all(bin_directory)?;
+    let destination = bin_directory.join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" });
+    std::fs::copy(&source, &destination)?;
+    anyhow::ensure!(std::fs::read(&destination)? == std::fs::read(&source)?,
+        "stable CLI fixture differs from the tested binary");
     Ok(())
 }
 
