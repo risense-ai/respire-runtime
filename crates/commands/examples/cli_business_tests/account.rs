@@ -8,7 +8,7 @@ fn runtime_bin() -> std::io::Result<std::path::PathBuf> {
 }
 
 fn isolated_command(models: Option<&std::path::Path>) -> std::io::Result<Command> {
-    let mut command = Command::new(support::cli_bin()?);
+    let mut command = Command::new(match support::legacy_cli().map_err(std::io::Error::other)? { Some(binary)=>binary, None=>support::cli_bin()? });
     for (name, _) in std::env::vars_os() {
         if name.to_str().is_some_and(|name| {
             name.starts_with("RSRS_") || name.starts_with("ONEMEMORY_") || name.starts_with("RESPIRE_")
@@ -62,12 +62,19 @@ fn runtime_health(port: u16, stage: &str) -> Result<serde_json::Value, Box<dyn s
 
 #[test]
 fn space_create_list_use_remove() -> Result<(), Box<dyn std::error::Error>> {
+    if support::legacy_cli()?.is_some() {
+        return legacy_space_contract("account::space_create_list_use_remove");
+    }
     use serde_json::Value;
 
     let home = tempfile::tempdir()?;
     let root = home.path().join(".rsrs");
     std::fs::create_dir(&root)?;
-    support::install_runtime_fixture(&root)?;
+    if support::legacy_cli()?.is_some() {
+        support::stage_legacy_cli(&root)?;
+    } else {
+        support::install_runtime_fixture(&root)?;
+    }
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     drop(listener);
@@ -121,11 +128,18 @@ fn space_create_list_use_remove() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::Error>> {
+    if support::legacy_cli()?.is_some() {
+        return legacy_space_contract("account::spaces_coordinate_with_the_owned_runtime");
+    }
     use serde_json::{json, Value};
     let home = tempfile::tempdir()?;
     let library = home.path().join(".rsrs");
     std::fs::create_dir(&library)?;
-    support::install_runtime_fixture(&library)?;
+    if support::legacy_cli()?.is_some() {
+        support::stage_legacy_cli(&library)?;
+    } else {
+        support::install_runtime_fixture(&library)?;
+    }
     let source_runtime = runtime_bin()?;
     let version = source_runtime.parent().and_then(std::path::Path::file_name)
         .ok_or("Runtime fixture version directory missing")?;
@@ -547,7 +561,11 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     let root = home.path().join(".rsrs");
     let original = root.join("accounts/original");
     std::fs::create_dir_all(&original)?;
-    support::install_runtime_fixture(&root)?;
+    if support::legacy_cli()?.is_some() {
+        support::stage_legacy_cli(&root)?;
+    } else {
+        support::install_runtime_fixture(&root)?;
+    }
     let session_bytes = br#"{"user":"original","addr":"https://previous.invalid"}"#;
     std::fs::write(original.join("session.json"), session_bytes)?;
     let config_bytes = serde_json::to_vec(
@@ -818,6 +836,121 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Ok(())
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), Box<dyn std::error::Error>> {
+        if support::legacy_cli()?.is_some() {
+            let guard=super::snapshot_lifecycle::Fixture::new()?;
+            let protected=guard.protected_state()?;
+            *mode.lock().map_err(|error|error.to_string())?="access_denied".to_owned();
+            let denied=execute(&["--json","login","--oauth","--addr",&addr,
+                "--dashboard",&addr,"--no-open"])?;
+            assert!(!denied.status.success());
+            assert!(std::fs::read(root.join("client.json"))?==config_bytes);
+            assert!(std::fs::read(original.join("session.json"))?==session_bytes);
+            assert!(!requests.lock().map_err(|error|error.to_string())?.is_empty());
+            *mode.lock().map_err(|error|error.to_string())?="authorized".to_owned();
+            let wrong=crypto::generate_secret_key();
+            let rejected=execute(&["--json","login","--oauth","--addr",&addr,
+                "--dashboard",&addr,"--no-open","--super",&wrong])?;
+            assert!(!rejected.status.success());
+            assert!(std::fs::read(root.join("client.json"))?==config_bytes);
+            assert!(std::fs::read(original.join("session.json"))?==session_bytes);
+            *mode.lock().map_err(|error|error.to_string())?="totp".to_owned();
+            let totp=execute(&["--json","login","--interactive","--addr",&addr,
+                "--user","authorized","--pass=fixture-password","--super",&super_password])?;
+            assert!(!totp.status.success());
+            assert!(std::fs::read(root.join("client.json"))?==config_bytes);
+            assert!(std::fs::read(original.join("session.json"))?==session_bytes);
+            *mode.lock().map_err(|error|error.to_string())?="authorized".to_owned();
+            let login=execute(&["--json","login","--oauth","--addr",&addr,
+                "--dashboard",&addr,"--no-open","--super",&super_password])?;
+            assert!(login.status.success(),"old authorized login failed");
+            let selected:Value=serde_json::from_slice(&std::fs::read(root.join("client.json"))?)?;
+            let target=std::path::PathBuf::from(selected["data_dir"].as_str().ok_or("old committed profile missing")?);
+            assert!(target.starts_with(&root));
+            assert_eq!(selected["custom"],"preserve");
+            assert_eq!(selected["api_base"],"https://previous.invalid");
+            let saved:Value=serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
+            assert_eq!(saved["user"],"authorized");
+            assert!(saved.get("super").is_none()&&saved.get("pass").is_none());
+            let owner=support::legacy_owner(&root,&target,runtime_port)?;
+            assert!(respire_app::lock::LibraryLock::acquire(&target,Duration::from_millis(80)).is_err());
+            let written=execute(&["--json","remember","old authorized private body","--force"])?;
+            assert!(written.status.success());
+            let written:Value=serde_json::from_slice(&written.stdout)?;
+            let id=written["summary"]["id"].as_str().ok_or("old authorized memory ID missing")?;
+            let shown=execute(&["--json","show",id])?;
+            assert!(shown.status.success());
+            let shown:Value=serde_json::from_slice(&shown.stdout)?;
+            assert_eq!(shown["details"]["entry"]["content"],"old authorized private body");
+            let retained=serde_json::to_value(LocalStore::open(&target.join("rsrs.db"))?.all(true)?)?;
+            let retained_config=std::fs::read(root.join("client.json"))?;
+            assert!(!execute(&["--json","account","use","not-an-existing-account"])? .status.success());
+            assert!(std::fs::read(root.join("client.json"))?==retained_config);
+            assert_eq!(serde_json::to_value(LocalStore::open(&target.join("rsrs.db"))?.all(true)?)?,retained);
+            support::legacy_owner(&root,&target,runtime_port)?;
+            let pid=u32::try_from(owner["pid"].as_u64().ok_or("old auth PID missing")?)?;
+            // Failure recovery may legitimately replace this old owner. Reverify
+            // the current PID instead of sending any signal to the saved PID.
+            let current=support::legacy_owner(&root,&target,runtime_port)?;
+            let current_pid=u32::try_from(current["pid"].as_u64().ok_or("old auth current PID missing")?)?;
+            assert!(execute(&["--runtime-internal","--stop"])?.status.success());
+            support::legacy_drained(&target,runtime_port,current_pid)?;
+            assert!(!respire_commands::net_rpc::process_is_running(pid)?);
+            assert!(execute(&["--json","logout","--full"])?.status.success());
+            assert!(!target.join("session.json").exists());
+            let recovered=execute(&["--json","login","--oauth","--addr",&addr,
+                "--dashboard",&addr,"--no-open","--super",&super_password])?;
+            assert!(recovered.status.success());
+            let selected:Value=serde_json::from_slice(&std::fs::read(root.join("client.json"))?)?;
+            assert_eq!(selected["data_dir"].as_str(),target.to_str());
+            assert_eq!(serde_json::to_value(LocalStore::open(&target.join("rsrs.db"))?.all(true)?)?,retained);
+            support::legacy_owner(&root,&target,runtime_port)?;
+
+            // Reuse the original mock vault and real v2 namespace conversion.
+            // New account-result/rollback receipts are deliberately not invoked.
+            assert!(execute(&["--runtime-internal","--stop"])?.status.success());
+            assert!(execute(&["--json","logout","--full"])?.status.success());
+            let legacy_super="synthetic-legacy-passphrase";
+            migration_super.set(Some(legacy_super));
+            let salt=crypto::random_hex(16);
+            let (nonce,wrapped)=crypto::wrap_key(&urk,&crypto::derive_super_kek(legacy_super,&salt)?)?;
+            let mut legacy=json!({"user":"authorized","addr":addr,"vault_version":2,
+                "kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+            *cloud.lock().map_err(|error|error.to_string())?=json!({"version":2,
+                "kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+            std::fs::write(target.join("session.json"),serde_json::to_vec(&legacy)?)?;
+            let config=std::fs::read(root.join("client.json"))?;
+            let incomplete=execute(&["--json","migrate","--vault","--pass=fixture-password","--super",legacy_super])?;
+            assert!(!incomplete.status.success());
+            assert!(std::fs::read(target.join("session.json"))?==serde_json::to_vec(&legacy)?);
+            assert!(std::fs::read(root.join("client.json"))?==config);
+            legacy["crypto_namespace"]=json!(crypto::RSRS_PREFIX);
+            legacy["wrapped_urk"]=json!(format!("{}{wrapped}",crypto::RSRS_PREFIX));
+            std::fs::write(target.join("session.json"),serde_json::to_vec(&legacy)?)?;
+            let migrated=execute(&["--json","migrate","--vault","--pass=fixture-password",
+                "--super",legacy_super,"--new-super",legacy_super])?;
+            assert!(migrated.status.success());
+            let current=cloud.lock().map_err(|error|error.to_string())?.clone();
+            let keys=SessionKeys::unlock_super(legacy_super,current["kdf_salt"].as_str().ok_or("old migrated salt missing")?,
+                current["wrapped_urk"].as_str().ok_or("old migrated wrap missing")?,
+                current["urk_nonce"].as_str().ok_or("old migrated nonce missing")?)?;
+            assert!(keys.urk==urk);
+            assert_eq!(current["version"],2);
+            assert!(current["wrapped_urk"].as_str().is_some_and(|value|value.starts_with(crypto::RSRS_PREFIX)));
+            assert!(std::fs::read(original.join("session.json"))?==session_bytes);
+            assert_eq!(guard.protected_state()?,protected);
+            assert!(execute(&["--json","logout","--full"])?.status.success());
+            if respire_commands::net_rpc::port_is_open_on(runtime_port) {
+                let selected:Value=serde_json::from_slice(&std::fs::read(root.join("client.json"))?)?;
+                let profile=selected["data_dir"].as_str().map(std::path::PathBuf::from)
+                    .map_or_else(||root.clone(),|path|path);
+                let owner=support::legacy_owner(&root,&profile,runtime_port)?;
+                let pid=u32::try_from(owner["pid"].as_u64().ok_or("old final auth PID missing")?)?;
+                assert!(execute(&["--runtime-internal","--stop"])?.status.success());
+                support::legacy_drained(&profile,runtime_port,pid)?;
+            }
+            support::legacy_receipt("account::authorization_preserves_and_commits_profiles","old_embedded")?;
+            return Ok(());
+        }
         let stale_session = br#"{"user":"original","addr":"http://legacy.invalid"}"#;
         std::fs::write(original.join("session.json"), stale_session)?;
         for args in [
@@ -1819,4 +1952,146 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     }
     stopped?;
     served?.map_err(Into::into)
+}
+
+fn legacy_space_contract(case: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::{json,Value};
+    use respire_app::transport::MemoryTransport;
+    let guard=super::snapshot_lifecycle::Fixture::new()?;
+    let protected=guard.protected_state()?;
+    let home=tempfile::tempdir()?;
+    let root=home.path().join(".rsrs");
+    std::fs::create_dir(&root)?;
+    support::stage_legacy_cli(&root)?;
+    let port=std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let invoke=|args:&[&str]| -> Result<(Output,Value),Box<dyn std::error::Error>> {
+        let output=isolated_command(None)?.arg("--json").args(args)
+            .current_dir(home.path()).env("HOME",home.path()).env("USERPROFILE",home.path())
+            .env("RSRS_DATA_DIR",&root).env("RSRS_BIN_DIR",root.join("bin"))
+            .env("RSRS_RPC_PORT",port.to_string()).env("RSRS_NO_AUTOSYNC","1")
+            .env("RSRS_UPDATE_CHECK","0").env("RSRS_CORE_TEST_MODE","1")
+            .env("RSRS_MIRROR","http://127.0.0.1:9").output()?;
+        let value=serde_json::from_slice(&output.stdout)?;
+        Ok((output,value))
+    };
+    let outcome=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(),Box<dyn std::error::Error>> {
+        assert!(!invoke(&["space","create","main"])?.0.status.success());
+        let (created,value)=invoke(&["space","create","legacy-team"])?;
+        assert!(created.status.success());
+        assert_eq!(value["summary"]["name"],"legacy-team");
+        let selected:Value=serde_json::from_slice(&std::fs::read(root.join("client.json"))?)?;
+        let team=std::path::PathBuf::from(selected["data_dir"].as_str().ok_or("old team profile missing")?);
+        assert!(team.starts_with(&root));
+        let owner=support::legacy_owner(&root,&team,port)?;
+        let pid=u32::try_from(owner["pid"].as_u64().ok_or("old team PID missing")?)?;
+        assert!(invoke(&["--runtime-internal","--stop"])?.0.status.success());
+        support::legacy_drained(&team,port,pid)?;
+        guard.copy_test_rows(&team)?;
+        assert!(invoke(&["runtime","start"])?.0.status.success());
+        support::legacy_owner(&root,&team,port)?;
+        assert!(respire_app::lock::LibraryLock::acquire(&team,Duration::from_millis(80)).is_err());
+        let (listed,spaces)=invoke(&["space","list"])?;
+        assert!(listed.status.success());
+        assert!(spaces["details"]["spaces"].as_array().ok_or("old space list missing")?
+            .iter().any(|space|space["name"]=="legacy-team"));
+        let config=std::fs::read(root.join("client.json"))?;
+        std::fs::write(team.join("keep.txt"),b"old team data must survive refused operations")?;
+        let saved=serde_json::to_value(respire_app::transport::local::LocalStore::open(&team.join("rsrs.db"))?.all(true)?)?;
+        for args in [&["space","use","missing"][..],&["space","remove","legacy-team","--yes"][..]] {
+            assert!(!invoke(args)?.0.status.success());
+            assert!(std::fs::read(root.join("client.json"))?==config);
+            assert_eq!(std::fs::read(team.join("keep.txt"))?,b"old team data must survive refused operations");
+            assert_eq!(serde_json::to_value(respire_app::transport::local::LocalStore::open(&team.join("rsrs.db"))?.all(true)?)?,saved);
+            support::legacy_owner(&root,&team,port)?;
+        }
+        assert!(invoke(&["space","use","main"])?.0.status.success());
+        support::legacy_owner(&root,&root,port)?;
+        assert!(invoke(&["space","use","legacy-team"])?.0.status.success());
+        support::legacy_owner(&root,&team,port)?;
+        assert!(std::fs::read(team.join("keep.txt"))?==b"old team data must survive refused operations");
+        assert!(invoke(&["space","use","main"])?.0.status.success());
+        assert!(invoke(&["space","remove","legacy-team","--yes"])?.0.status.success());
+        let (_,listed)=invoke(&["space","list"])?;
+        assert!(!listed["details"]["spaces"].as_array().ok_or("old final space list missing")?
+            .iter().any(|space|space["name"]=="legacy-team"));
+        if case=="account::spaces_coordinate_with_the_owned_runtime" {
+            let before=std::fs::read(root.join("client.json"))?;
+            for readonly in [false,true] {
+                // Same ordered self/vault mock protocol as the original case.
+                let server=tiny_http::Server::http("127.0.0.1:0").map_err(|error|error.to_string())?;
+                let name=if readonly {"legacy-joined-readonly"} else {"legacy-joined-writable"};
+                let user=format!("old-join-{}",uuid::Uuid::new_v4());
+                let secret=respire_app::memory::crypto::generate_secret_key();
+                let salt=respire_app::memory::crypto::random_hex(16);
+                let kek=respire_app::memory::crypto::derive_kek_v4(&secret,&salt)?;
+                let (nonce,wrapped)=respire_app::memory::crypto::wrap_key(&[42_u8;32],&kek)?;
+                let vault=json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+                let token=uuid::Uuid::new_v4().to_string();
+                let payload=json!({"space":name,"addr":format!("http://{}",server.server_addr()),
+                    "user":user,"token":token,"super":secret,"readonly":readonly});
+                let code=format!("1mem-invite:{}",serde_json::to_vec(&payload)?.iter()
+                    .map(|byte|format!("{byte:02x}")).collect::<String>());
+                let expected_user=user.clone();
+                let authorization=format!("Bearer {token}");
+                let worker=std::thread::spawn(move || -> Result<(),String> {
+                    for (path,body) in [("/api/self",json!({"user":expected_user})),("/api/self/vault",vault)] {
+                        let request=server.recv_timeout(Duration::from_secs(20)).map_err(|_|"old join receive failed")?
+                            .ok_or("old join did not fetch the ordered vault fixture")?;
+                        if request.method()!=&tiny_http::Method::Get || request.url()!=path
+                            || !request.headers().iter().any(|header|header.field.equiv("Authorization")
+                                &&header.value.as_str()==authorization) {
+                            return Err("old join did not authenticate its ordered GET".into());
+                        }
+                        request.respond(tiny_http::Response::from_string(body.to_string()))
+                            .map_err(|_|"old join response failed")?;
+                    }
+                    Ok(())
+                });
+                let joined=invoke(&["space","join",&code]);
+                let served=worker.join().map_err(|_|"old join fixture panicked");
+                respire_app::keystore::delete_super(&user);
+                // Join the worker even when the client failed; retain both errors.
+                let (output,joined)=match(joined,served) {
+                    (Ok(joined),Ok(Ok(())))=>joined,
+                    (Err(error),Ok(Ok(())))=>return Err(error),
+                    (Ok(_),Ok(Err(error)))=>return Err(error.into()),
+                    (Err(error),Ok(Err(server)))=>return Err(format!("{error}; {server}").into()),
+                    (Ok(_),Err(error))=>return Err(error.into()),
+                    (Err(error),Err(server))=>return Err(format!("{error}; {server}").into()),
+                };
+                assert!(output.status.success() || (output.status.code()==Some(2)&&joined["status"]=="warn"));
+                assert_eq!(joined["details"]["readonly"],readonly);
+                assert!(std::fs::read(root.join("client.json"))?==before);
+                let target=root.join("accounts").join(name);
+                let session:Value=serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
+                assert_eq!(session["user"],user);
+                if readonly {
+                    let agent:Value=serde_json::from_slice(&std::fs::read(target.join("agent.json"))?)?;
+                    assert_eq!(agent["readonly_team"],true);
+                }
+                let owner=support::legacy_owner(&root,&root,port)?;
+                assert!(!invoke(&["space","join","--code",&code])?.0.status.success());
+                assert_eq!(support::legacy_owner(&root,&root,port)?["pid"],owner["pid"]);
+            }
+        }
+        assert_eq!(guard.protected_state()?,protected);
+        Ok(())
+    }));
+    let cleanup=(|| -> Result<(),Box<dyn std::error::Error>> {
+        if respire_commands::net_rpc::port_is_open_on(port) {
+            let config:Value=serde_json::from_slice(&std::fs::read(root.join("client.json"))?)?;
+            let profile=config["data_dir"].as_str().map(std::path::PathBuf::from).map_or_else(||root.clone(),|path|path);
+            let owner=support::legacy_owner(&root,&profile,port)?;
+            let pid=u32::try_from(owner["pid"].as_u64().ok_or("old space cleanup PID missing")?)?;
+            assert!(invoke(&["--runtime-internal","--stop"])?.0.status.success());
+            support::legacy_drained(&profile,port,pid)?;
+        }
+        assert_eq!(guard.protected_state()?,protected);
+        Ok(())
+    })();
+    let result=match outcome {Ok(result)=>result,Err(panic)=>std::panic::resume_unwind(panic)};
+    result?;
+    cleanup?;
+    support::legacy_receipt(case,"old_embedded")?;
+    Ok(())
 }

@@ -584,6 +584,7 @@ fn explicit_titles_preserve_entries_and_leave_the_daily_track_unchanged() -> any
             }
         }
     }
+    support::legacy_receipt("diary_identity::explicit_titles_preserve_entries_and_leave_the_daily_track_unchanged", "candidate_runtime")?;
     Ok(())
 }
 
@@ -651,6 +652,7 @@ fn remember_public_payload_covers_created_appended_and_merged() -> anyhow::Resul
         }
         assert_eq!(result["details"]["id"], result["summary"]["id"]);
     }
+    support::legacy_receipt("diary_identity::remember_public_payload_covers_created_appended_and_merged", "candidate_runtime")?;
     Ok(())
 }
 
@@ -669,7 +671,7 @@ fn missing_entry_and_usage_failures_have_machine_diagnostics() -> anyhow::Result
             "--unknown-option",
         ],
     ] {
-        let output = fixture.command(&args).output()?;
+        let output = fixture.business_output(&args)?;
         assert!(!output.status.success());
         let result: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(result["status"], "fail");
@@ -696,6 +698,21 @@ fn missing_entry_and_usage_failures_have_machine_diagnostics() -> anyhow::Result
                 .contains("not found"));
         }
     }
+    if let Some(binary) = support::legacy_cli()? {
+        let before = serde_json::to_value(fixture.store()?.all(true)?)?;
+        let owner = fixture.runtime_owner.borrow().clone();
+        let rejected = fixture.command_for(&binary, &["--direct", "--json", "show", "no-such-id"])
+            .output()?;
+        assert!(!rejected.status.success());
+        let failure: Value = serde_json::from_slice(&rejected.stdout)?;
+        assert_eq!(failure["status"], "fail");
+        assert!(failure["errors"].as_array().context("old direct diagnostic missing")?
+            .iter().any(|error| error.as_str().is_some_and(|error|
+                error.contains("the local runtime is running"))));
+        assert_eq!(serde_json::to_value(fixture.store()?.all(true)?)?, before);
+        assert!(fixture.owns_runtime()?);
+        assert_eq!(*fixture.runtime_owner.borrow(), owner);
+    }
     // --direct forwards through RPC; keep the verified standalone owner alive.
     let output = fixture
         .command(&["--direct", "--json", "show", "no-such-id"])
@@ -707,6 +724,7 @@ fn missing_entry_and_usage_failures_have_machine_diagnostics() -> anyhow::Result
         .as_str()
         .context("missing direct diagnostic")?
         .contains("not found"));
+    support::legacy_receipt("diary_identity::missing_entry_and_usage_failures_have_machine_diagnostics", "candidate_runtime")?;
     Ok(())
 }
 
@@ -758,6 +776,7 @@ fn public_title_edit_and_blank_title_still_append_without_changing_metadata() ->
         .as_str()
         .context("synthetic response string missing")?
         .contains("event-after-blank-title"));
+    support::legacy_receipt("diary_identity::public_title_edit_and_blank_title_still_append_without_changing_metadata", "candidate_runtime")?;
     Ok(())
 }
 
@@ -843,6 +862,7 @@ fn canonical_identity_merges_legacy_tracks_without_touching_other_users_or_days(
         assert_eq!(after.ciphertext, original.ciphertext);
         assert!(!after.deleted);
     }
+    support::legacy_receipt("diary_identity::canonical_identity_merges_legacy_tracks_without_touching_other_users_or_days", "candidate_runtime")?;
     Ok(())
 }
 
@@ -893,6 +913,7 @@ fn deleted_stable_track_uses_legacy_fallback_and_deleted_history_is_not_resurrec
         .context("synthetic response string missing")?;
     assert!(content.contains("only-new-event"));
     assert!(!content.contains("deleted-event") && !content.contains("legacy-live-event"));
+    support::legacy_receipt("diary_identity::deleted_stable_track_uses_legacy_fallback_and_deleted_history_is_not_resurrected", "candidate_runtime")?;
     Ok(())
 }
 
@@ -1124,6 +1145,7 @@ fn concurrent_same_day_client_commands_preserve_each_successful_addition_once() 
     assert_eq!(rejected["ok"], false);
     assert_eq!(rejected["code"], "idempotency_conflict");
     unchanged()?;
+    support::legacy_receipt("diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once", "candidate_runtime")?;
     Ok(())
 }
 
@@ -1175,6 +1197,7 @@ fn old_owner_normalized_diary_keeps_its_author_after_public_title_edit() -> anyh
     ] {
         assert_eq!(content.matches(marker).count(), 1);
     }
+    support::legacy_receipt("diary_identity::old_owner_normalized_diary_keeps_its_author_after_public_title_edit", "candidate_runtime")?;
     Ok(())
 }
 
@@ -1203,7 +1226,9 @@ fn unrelated_canonical_author_fails_without_writes_or_private_output() -> anyhow
         false,
     )?;
     fixture.start()?;
-    fixture.assert_author_rejection()
+    fixture.assert_author_rejection()?;
+    support::legacy_receipt("diary_identity::unrelated_canonical_author_fails_without_writes_or_private_output", "candidate_runtime")?;
+    Ok(())
 }
 
 /// Environment fallback keys must not inherit the failed local session's owner alias.
@@ -1245,7 +1270,9 @@ fn environment_key_fallback_does_not_adopt_unlocked_profile_alias() -> anyhow::R
     fixture.start()?;
     // A successful full read proves the environment keys can actually decrypt this vault.
     assert_eq!(fixture.show(&id)?["user"], "foreign-private-author");
-    fixture.assert_author_rejection()
+    fixture.assert_author_rejection()?;
+    support::legacy_receipt("diary_identity::environment_key_fallback_does_not_adopt_unlocked_profile_alias", "candidate_runtime")?;
+    Ok(())
 }
 
 /// Important remember retains full bodies, synchronized fields, and outbox bytes.
@@ -1303,6 +1330,7 @@ fn important_remember_pending_candidates_preserve_ciphertext_and_outbox() -> any
         outgoing == serde_json::to_value(fixture.store()?.outgoing()?)?,
         "candidate lookup mutated outbox"
     );
+    support::legacy_receipt("diary_identity::important_remember_pending_candidates_preserve_ciphertext_and_outbox", "candidate_runtime")?;
     Ok(())
 }
 

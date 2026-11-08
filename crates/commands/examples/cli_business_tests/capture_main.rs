@@ -5,7 +5,7 @@ use respire_commands::output_state::Captured;
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn capture_run(args: Vec<String>) -> anyhow::Result<Captured> {
-    let output = std::process::Command::new(support::cli_bin()?)
+    let output = std::process::Command::new(match support::legacy_cli()? { Some(binary) => binary, None => support::cli_bin()? })
         .args(args)
         .env_remove("RSRS_RUNTIME_BIN")
         .env_remove("RSRS_CLIENT_ONLY")
@@ -93,12 +93,17 @@ fn memory_revision_without_runtime_fails_without_local_business_fallback() -> an
         let control = capture_run(vec!["memory-revision".into(), "--json".into()])?;
         assert_eq!(control.exit, 1);
         assert!(matches!(control.envelope.status, respire_commands::output::Status::Fail));
-        assert!(control.envelope.errors.iter().any(|error| {
-            error.contains("host control requires an installed managed Runtime")
-        }));
+        if support::legacy_cli()?.is_some() {
+            assert!(!control.envelope.errors.is_empty());
+        } else {
+            assert!(control.envelope.errors.iter().any(|error| {
+                error.contains("host control requires an installed managed Runtime")
+            }));
+        }
         assert!(!root.join("runtime").exists());
         assert!(!root.join("rsrs.db").exists());
         assert!(!root.join("onememory.db").exists());
+        support::legacy_receipt("capture_main::memory_revision_without_runtime_fails_without_local_business_fallback", "host_local")?;
         Ok(())
     })
 }
@@ -115,6 +120,7 @@ fn residual_host_and_parser_errors_remain_user_errors() -> anyhow::Result<()> {
         }
         assert!(!root.join("rsrs.db").exists());
         assert!(!root.join("onememory.db").exists());
+        support::legacy_receipt("capture_main::residual_host_and_parser_errors_remain_user_errors", "host_local")?;
         Ok(())
     })
 }
