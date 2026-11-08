@@ -46,9 +46,11 @@ const report = {
   run_id: "17", run_attempt: "2", source_sha: sha, repository: "fixture/runtime",
   candidate_sha256: createHash("sha256").update(candidateText).digest("hex"),
   job_name: "fixture", artifact_id: 31, artifact_name: "required-tests-fixture-evidence",
+  artifact_sha256: "d".repeat(64),
 };
 const goodArtifact = {
   id: 31, name: report.artifact_name, expired: false,
+  digest: `sha256:${report.artifact_sha256}`,
   workflow_run: { id: 17, head_sha: sha }, created_at: "2026-11-04T01:00:30Z",
 };
 const ready = {
@@ -103,6 +105,9 @@ const cases = [
   { name: "unit is not real artifact", tests: [{ ...ready, coverage: "real-artifact" }], error: "required coverage was not executed" },
   { name: "missing artifact", artifacts: [], error: "artifact is missing, stale" },
   { name: "wrong artifact id", report: { ...report, artifact_id: 32 }, error: "artifact is missing, stale" },
+  { name: "missing artifact hash", report: { ...report, artifact_sha256: undefined }, error: "artifact is missing, stale" },
+  { name: "API digest missing", artifacts: [{ ...goodArtifact, digest: undefined }], error: "artifact is missing, stale" },
+  { name: "API digest different", artifacts: [{ ...goodArtifact, digest: "sha256:" + "e".repeat(64) }], error: "artifact is missing, stale" },
   { name: "duplicate artifact id", artifacts: [goodArtifact, goodArtifact], error: "artifact is missing, stale" },
   { name: "old attempt artifact", artifacts: [{ ...goodArtifact, created_at: "2026-11-03T00:00:00Z" }], error: "artifact is missing, stale" },
   { name: "expired artifact", artifacts: [{ ...goodArtifact, expired: true }], error: "artifact is missing, stale" },
@@ -174,8 +179,17 @@ for (const owner of ["runtime", "cli", "client2"]) {
       }]));
     v.tests = [{...ready, required_targets: nativeTargets}];
   });
-  scenario.reports = nativeTargets.map(target => ({...scenario.report, target, actual_native_sdk: nativeSdk(owner, target)}));
+  scenario.reports = nativeTargets.map((target, index) => ({...scenario.report, target,
+    artifact_id: 31 + index, artifact_name: `${report.artifact_name}-${target}`,
+    artifact_sha256: createHash("sha256").update(`${owner}/${target}/raw`).digest("hex"),
+    actual_native_sdk: nativeSdk(owner, target)}));
+  scenario.artifacts = scenario.reports.map(item => ({...goodArtifact, id: item.artifact_id,
+    name: item.artifact_name, digest: `sha256:${item.artifact_sha256}`}));
   cases.push(scenario, {...scenario, name: `${owner} eight-target reports cannot shrink`, reports: scenario.reports.slice(0, 1), error: "target set is missing or different"});
+  cases.push({...scenario, name: `${owner} cross-target raw cannot be reused`,
+    reports: scenario.reports.map((item, index) => index !== 1 ? item : {...item,
+      artifact_id: scenario.reports[0].artifact_id, artifact_name: scenario.reports[0].artifact_name,
+      artifact_sha256: scenario.reports[0].artifact_sha256}), error: "raw artifact reused across targets"});
 }
 
 

@@ -12,10 +12,11 @@ fn run(root: &Path, args: &[&str]) -> std::io::Result<Output> {
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
-    Command::new(support::cli_bin()?)
+    Command::new(match support::legacy_cli().map_err(std::io::Error::other)? { Some(binary) => binary, None => support::cli_bin()? })
         .args(args)
         .env("HOME", root.join("unused-home"))
         .env("RSRS_DATA_DIR", root)
+        .env("RSRS_BIN_DIR", root.join("bin"))
         .env("RSRS_MODEL_DIR", root.join("missing-model"))
         .env("RSRS_JSON", "1")
         .env("RSRS_RPC_PORT", port.to_string())
@@ -57,10 +58,20 @@ fn memory_revision_direct_is_model_free_and_follows_resolved_profile(
         summary(run(root, &["--direct", "memory-revision"])?)?,
         initial
     );
+    if support::legacy_cli()?.is_some() {
+        // In 1.0.20 only explicit direct reads are local. Ordinary reads require
+        // an existing owner; this is its original contract, not a new fallback.
+        let ordinary = run(root, &["memory-revision", "--json"])?;
+        assert!(!ordinary.status.success());
+        let failure: Value = serde_json::from_slice(&ordinary.stdout)?;
+        assert_eq!(failure["status"], "fail");
+        assert_eq!(summary(run(root, &["--direct", "memory-revision"])?)?, initial);
+    } else {
     assert_eq!(
         summary(run(root, &["memory-revision", "--json"])?)?,
         initial
     );
+    }
     let profile = root.join("accounts").join("work");
     drop(LocalStore::open(&profile.join("rsrs.db"))?);
     std::fs::write(
@@ -86,6 +97,7 @@ fn memory_revision_direct_is_model_free_and_follows_resolved_profile(
     assert!(!root.join("lock.db").exists());
     assert!(!root.join("missing-model").exists());
     assert!(!root.join("unused-home").exists());
+    support::legacy_receipt("memory_revision::memory_revision_direct_is_model_free_and_follows_resolved_profile", "old_embedded")?;
     Ok(())
 }
 
@@ -101,10 +113,11 @@ fn memory_revision_does_not_initialize_or_autostart() -> Result<(), Box<dyn std:
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
-    let ordinary = Command::new(support::cli_bin()?)
+    let ordinary = Command::new(match support::legacy_cli()? { Some(binary) => binary, None => support::cli_bin()? })
         .args(["memory-revision", "--json"])
         .env("HOME", dir.path().join("unused-home"))
         .env("RSRS_DATA_DIR", &root)
+        .env("RSRS_BIN_DIR", root.join("bin"))
         .env("RSRS_RPC_PORT", port.to_string())
         .env_remove("RSRS_RPC_TOKEN")
         .output()?;
@@ -125,19 +138,34 @@ fn memory_revision_does_not_initialize_or_autostart() -> Result<(), Box<dyn std:
         vec!["memory-revision", "--json"],
     ] {
         let result = run(&root, &args)?;
-        assert_eq!(result.status.code(), Some(1));
-        let envelope: Value = serde_json::from_slice(&result.stdout)?;
-        assert_eq!(envelope["command"], "cli");
-        assert_eq!(envelope["status"], "fail");
-        assert!(envelope["errors"]
-            .to_string()
-            .contains("host control requires an installed managed Runtime"));
+        if support::legacy_cli()?.is_some() {
+            if args.contains(&"--direct") {
+                // Stable reads the existing revision before login recovery dispatch.
+                let revision = summary(result)?;
+                assert_eq!(revision["profile"], root.to_string_lossy().as_ref());
+            } else {
+                assert_eq!(result.status.code(), Some(1));
+                let envelope: Value = serde_json::from_slice(&result.stdout)?;
+                assert_eq!(envelope["status"], "fail");
+                assert!(envelope["errors"].to_string()
+                    .contains("runtime_unavailable: host HTTP runtime is not running"));
+            }
+        } else {
+            assert_eq!(result.status.code(), Some(1));
+            let envelope: Value = serde_json::from_slice(&result.stdout)?;
+            assert_eq!(envelope["command"], "cli");
+            assert_eq!(envelope["status"], "fail");
+            assert!(envelope["errors"]
+                .to_string()
+                .contains("host control requires an installed managed Runtime"));
+        }
         assert_eq!(std::fs::read(root.join("rsrs.db"))?, database);
         assert_eq!(std::fs::read(&journal)?, marker);
         assert!(!root.join("runtime").exists());
         assert!(!root.join("lock.db").exists());
         assert!(!root.join("session.json").exists());
     }
+    support::legacy_receipt("memory_revision::memory_revision_does_not_initialize_or_autostart", "old_embedded")?;
     Ok(())
 }
 
@@ -159,6 +187,7 @@ fn memory_revision_direct_respects_client_only_policy() -> Result<(), Box<dyn st
     assert!(!errors.contains("client_only:"));
     assert!(!errors.contains("host control requires an installed managed Runtime"));
     assert!(!dir.path().join("runtime").exists());
+    support::legacy_receipt("memory_revision::memory_revision_direct_respects_client_only_policy", "old_embedded")?;
     Ok(())
 }
 
@@ -174,6 +203,7 @@ fn memory_revision_legacy_database_and_ambiguous_names() -> Result<(), Box<dyn s
     let result = run(dir.path(), &["--direct", "memory-revision"])?;
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stdout).contains("both rsrs.db"));
+    support::legacy_receipt("memory_revision::memory_revision_legacy_database_and_ambiguous_names", "old_embedded")?;
     Ok(())
 }
 
@@ -190,6 +220,7 @@ fn memory_revision_does_not_recover_interrupted_login() -> Result<(), Box<dyn st
     assert!(!dir.path().join("session.json").exists());
     assert!(!dir.path().join("runtime/endpoint.json").exists());
     assert!(!dir.path().join("runtime/autostart").exists());
+    support::legacy_receipt("memory_revision::memory_revision_does_not_recover_interrupted_login", "old_embedded")?;
     Ok(())
 }
 
@@ -198,12 +229,13 @@ fn memory_revision_preserves_legacy_environment_alias() -> Result<(), Box<dyn st
     let dir = tempfile::tempdir()?;
     drop(LocalStore::open(&dir.path().join("onememory.db"))?);
     install_runtime_fixture(dir.path())?;
-    let output = Command::new(support::cli_bin()?)
+    let output = Command::new(match support::legacy_cli()? { Some(binary) => binary, None => support::cli_bin()? })
         .args(["--direct", "memory-revision", "--json"])
         .env("HOME", dir.path().join("unused-home"))
         .env_remove("RSRS_DATA_DIR")
         .env_remove("RESPIRE_DATA_DIR")
         .env("ONEMEMORY_DATA_DIR", dir.path())
+        .env("RSRS_BIN_DIR", dir.path().join("bin"))
         .env_remove("RSRS_CLIENT_ONLY")
         .env_remove("ONEMEMORY_CLIENT_ONLY")
         .env_remove("RESPIRE_CLIENT_ONLY")
@@ -214,5 +246,6 @@ fn memory_revision_preserves_legacy_environment_alias() -> Result<(), Box<dyn st
     let value = summary(output)?;
     assert_eq!(value["profile"], dir.path().to_string_lossy().as_ref());
     assert!(!dir.path().join("rsrs.db").exists());
+    support::legacy_receipt("memory_revision::memory_revision_preserves_legacy_environment_alias", "old_embedded")?;
     Ok(())
 }

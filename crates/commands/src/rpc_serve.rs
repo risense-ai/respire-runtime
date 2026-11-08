@@ -284,6 +284,9 @@ static CONTROL_STATE: Mutex<&'static str> = Mutex::new("running");
 static STARTUP_COMPLETE: AtomicBool = AtomicBool::new(false);
 static STOP_OPERATION: OnceLock<String> = OnceLock::new();
 static STOP_UNFINISHED: Mutex<Vec<Admitted>> = Mutex::new(Vec::new());
+const FORCE_DRAIN_GRACE: Duration = Duration::from_secs(4);
+static STOP_FORCE_REQUESTED: Mutex<Option<Instant>> = Mutex::new(None);
+static STOP_FORCE_TRIGGERED: AtomicBool = AtomicBool::new(false);
 // Order: scope lock, write gate (except short control), ADMISSIONS, then ledger.
 // Stop takes scope + ADMISSIONS; generation advances take ADMISSIONS without upgrading scope.
 static SCOPE_EXECUTION: std::sync::RwLock<()> = std::sync::RwLock::new(());
@@ -325,7 +328,7 @@ fn business_paused() -> bool {
     STOPPING.load(Ordering::Acquire) || crate::host_hooks::background_paused()
 }
 
-fn maintenance_control_method(method: &str) -> bool {
+pub(crate) fn maintenance_control_method(method: &str) -> bool {
     matches!(method, "runtime.status" | "runtime.stop" | "runtime.result" | "model.control" | "cli.progress")
 }
 
@@ -1147,7 +1150,7 @@ fn dispatch_inner(request: RpcRequest, tx: &Sender<Job>, legacy: bool) -> RpcRes
     #[cfg(test)]
     tests::wait_before_direct_gate(&request.id);
     let gate = shared_exclusive();
-    let _held = if operation.is_some() && !matches!(request.method.as_str(), "cli.exec" | "model.control") {
+    let _held = if operation.is_some() && !matches!(request.method.as_str(), "cli.exec" | "model.control" | "cli.progress") {
         Some(gate.acquire(true))
     } else {
         None
@@ -1984,14 +1987,18 @@ pub fn control_state() -> &'static str {
 fn health_state() -> &'static str {
     match control_state() {
         "maintenance_requested" | "draining" => "draining",
-        "resources_closing" | "compatibility_timeout" => "stopping",
+        "resources_closing" | "forced_timeout" | "compatibility_timeout" => "stopping",
         "drained" => "stopped",
         "running" => "ready",
         other => other,
     }
 }
 
-fn mark_stop_unfinished(items: Vec<Admitted>) {
+fn mark_stop_unfinished(mut items: Vec<Admitted>) {
+    // RPC retention and queue execution each hold an admission guard for the
+    // same wire operation. The durable receipt records that operation once.
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.operation_id.clone()));
     *STOP_UNFINISHED
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = items;
@@ -2026,15 +2033,66 @@ fn stop_operation_status(request_id: &str, operation_id: &str) -> Value {
 }
 
 fn drain_busy() -> bool {
+    drain_background_busy()
+        || ADMISSIONS
+            .lock()
+            .map_or(true, |items| items.iter().any(|item| item.kind != "stop"))
+}
+
+fn drain_background_busy() -> bool {
     RUNNING.load(Ordering::Acquire) != 0
         || WRITE_RUNNING.load(Ordering::Acquire)
         || CLASSIFY_RUNNING.load(Ordering::Acquire)
         || sync_running()
         || index_has_work()
         || PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
-        || ADMISSIONS
-            .lock()
-            .map_or(true, |items| items.iter().any(|item| item.kind != "stop"))
+}
+
+fn validate_stop_force(expected: &Value, accepted: Option<&str>) -> Result<bool> {
+    match expected.get("force") {
+        None | Some(Value::Bool(false)) => Ok(false),
+        Some(Value::Bool(true)) => {
+            anyhow::ensure!(
+                accepted.is_some_and(|id| expected["operation_id"].as_str() == Some(id)),
+                "stop_operation_mismatch"
+            );
+            Ok(true)
+        }
+        Some(_) => bail!("invalid_stop_force"),
+    }
+}
+
+fn force_stop_after_grace() {
+    std::thread::sleep(FORCE_DRAIN_GRACE);
+    let background_busy = drain_background_busy();
+    {
+        let admitted = ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner());
+        if control_state() != "draining"
+            || (!background_busy && !admitted.iter().any(|item| item.kind != "stop"))
+        {
+            return;
+        }
+        // An admitted operation may already have committed. Retirement never proves abortion.
+        mark_stop_unfinished(
+            admitted.iter().filter(|item| item.kind != "stop").cloned().collect(),
+        );
+        STOP_FORCE_TRIGGERED.store(true, Ordering::Release);
+        set_control_state("forced_timeout");
+    }
+    // Reap the owned native child to unblock callers, then retain the ordinary host joins/flush.
+    if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+        eprintln!("explicit forced stop could not confirm Core worker cleanup: {error:#}");
+    }
+    wake_dispatcher();
+    SYNC_CV.notify_all();
+    INDEX_CV.notify_all();
+}
+
+pub fn stop_force_deadline_ms() -> Option<u64> {
+    STOP_FORCE_REQUESTED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .map(|started| FORCE_DRAIN_GRACE.saturating_sub(started.elapsed()).as_millis() as u64)
 }
 
 pub(crate) fn advance_generation(generation: usize) -> Result<()> {
@@ -2071,6 +2129,19 @@ pub fn request_drain_exit(expected: &Value) -> Result<&'static str> {
             &account_identity(),
             crate::rpc_worker::wire_generation(),
         )?;
+        let force = validate_stop_force(expected, STOP_OPERATION.get().map(String::as_str))?;
+        if force {
+            let mut requested = STOP_FORCE_REQUESTED
+                .lock()
+                .map_err(|_| anyhow::anyhow!("force stop state poisoned"))?;
+            if requested.is_none() {
+                let _controller = std::thread::Builder::new()
+                    .name("runtime-force-stop".to_owned())
+                    .spawn(force_stop_after_grace)
+                    .context("start explicit force stop controller")?;
+                *requested = Some(Instant::now());
+            }
+        }
         operation_id = STOP_OPERATION.get_or_init(|| uuid::Uuid::new_v4().to_string());
         if STOPPING.swap(true, Ordering::AcqRel) {
             return Ok(operation_id.as_str());
@@ -2312,12 +2383,24 @@ fn final_stop_receipt(operation_id: &str, success: bool) -> RuntimeStopReceipt {
         runtime_version: runtime_identity().runtime_version,
         account_id: account_identity(),
         generation: crate::rpc_worker::wire_generation(),
-        state: if success && unfinished.is_empty() {
-            RuntimeStopOutcome::Drained
-        } else {
-            RuntimeStopOutcome::Failed
-        },
+        state: stop_outcome(
+            success,
+            STOP_FORCE_TRIGGERED.load(Ordering::Acquire),
+            unfinished.is_empty(),
+        ),
         unfinished,
+    }
+}
+
+fn stop_outcome(clean: bool, forced: bool, unfinished_empty: bool) -> RuntimeStopOutcome {
+    if !clean {
+        RuntimeStopOutcome::Failed
+    } else if forced {
+        RuntimeStopOutcome::ForcedTimeout
+    } else if unfinished_empty {
+        RuntimeStopOutcome::Drained
+    } else {
+        RuntimeStopOutcome::Failed
     }
 }
 
@@ -2347,6 +2430,9 @@ fn stop_process(code: i32) -> ! {
             let written = std::fs::create_dir_all(&directory)
                 .map_err(anyhow::Error::from)
                 .and_then(|_| write_stop_receipt(&directory, &receipt));
+            if receipt.state == RuntimeStopOutcome::ForcedTimeout {
+                exit_code = 1;
+            }
             if let Err(error) = written {
                 eprintln!("runtime failed to persist its final stop receipt: {error:#}");
                 exit_code = 1;
@@ -3016,7 +3102,10 @@ fn dispatch_loop_inner(
         }
         drain_busy()
     });
-    set_control_state("resources_closing");
+    {
+        let _admitted = ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner());
+        set_control_state("resources_closing");
+    }
     STORE_READY.store(false, Ordering::Release);
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
         eprintln!("Core worker shutdown failed: {error:#}");
@@ -3026,8 +3115,16 @@ fn dispatch_loop_inner(
     }
     drop(_store);
     drop(_lock);
-    mark_stop_unfinished(Vec::new());
-    set_control_state(if clean { "drained" } else { "failed" });
+    if !STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
+        mark_stop_unfinished(Vec::new());
+    }
+    set_control_state(if !clean {
+        "failed"
+    } else if STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
+        "forced_timeout"
+    } else {
+        "drained"
+    });
     stop_process(if clean { 0 } else { 1 });
 }
 
@@ -3217,18 +3314,55 @@ fn readonly_sync_reset_rejection_locked(
     Some(Ok(crate::output_state::Captured { exit, envelope }))
 }
 
+std::thread_local! {
+    static ACTIVE_EXECUTION_SCOPE: std::cell::RefCell<Option<RuntimeRequestScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Only execution that passed the queue fence may finish under its original scope.
+struct ActiveExecutionContext {
+    previous_scope: Option<RuntimeRequestScope>,
+    previous_sync: Option<(usize, i64)>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ActiveExecutionContext {
+    fn enter(scope: &RuntimeRequestScope, generation: usize) -> Self {
+        let previous_scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.replace(Some(scope.clone())));
+        let previous_sync = SYNC_CONTEXT.with(|context| {
+            let previous = context.get();
+            let boundary = previous.filter(|(epoch, _)| *epoch == generation)
+                .map_or(-1, |(_, boundary)| boundary);
+            context.set(Some((generation, boundary)));
+            previous
+        });
+        Self { previous_scope, previous_sync, _thread: std::marker::PhantomData }
+    }
+}
+
+impl Drop for ActiveExecutionContext {
+    fn drop(&mut self) {
+        SYNC_CONTEXT.with(|context| context.set(self.previous_sync));
+        ACTIVE_EXECUTION_SCOPE.with(|slot| slot.replace(self.previous_scope.take()));
+    }
+}
+
+pub(crate) fn active_execution_retained(generation: usize) -> Result<bool> {
+    let scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone());
+    let Some(scope) = scope else { return Ok(false); };
+    validate_scope(Some(&scope), &current_scope())
+        .map_err(|(code, message)| anyhow::anyhow!("{code}: {message}"))?;
+    anyhow::ensure!(scope_generation(&scope).map_err(anyhow::Error::msg)? == generation,
+        "sync context changed; pending work kept locally");
+    crate::legacy_host::verify_active_execution(&scope)?;
+    Ok(!STOP_FORCE_TRIGGERED.load(Ordering::Acquire))
+}
+
 fn capture_scoped_locked(scope: &RuntimeRequestScope, args: Vec<String>) -> CommandResult {
     validate_job_scope(scope)?;
     let generation = scope_generation(scope)?;
-    SYNC_CONTEXT.with(|context| {
-        let previous = context.get();
-        let boundary = previous.filter(|(epoch, _)| *epoch == generation)
-            .map_or(-1, |(_, boundary)| boundary);
-        context.set(Some((generation, boundary)));
-        let captured = crate::host_hooks::capture_run(args);
-        context.set(previous);
-        Ok(captured)
-    })
+    let _active = ActiveExecutionContext::enter(scope, generation);
+    Ok(crate::host_hooks::capture_run(args))
 }
 
 fn scope_generation(scope: &RuntimeRequestScope) -> Result<usize, String> {
@@ -3317,7 +3451,8 @@ fn admit_with_retention(request: &RpcRequest, operation: &OperationIdentity,
         "scope_mismatch".to_owned(), "identity fence poisoned".to_owned(),
     ))?;
     let gate = shared_exclusive();
-    let _held = if request.method == "model.control" { None } else { Some(gate.acquire(true)) };
+    // Legacy progress must observe the command while it holds the execution gate.
+    let _held = if matches!(request.method.as_str(), "model.control" | "cli.progress") { None } else { Some(gate.acquire(true)) };
     let mut admitted = ADMISSIONS.lock().map_err(|_| (
         "admission_lock_poisoned".to_owned(), "runtime admission lock is poisoned".to_owned(),
     ))?;
@@ -3457,6 +3592,34 @@ pub fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_execution_context_restores_nested_and_unwound_scope() {
+        let initial_scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone());
+        let initial_sync = SYNC_CONTEXT.with(|context| context.get());
+        let outer = RuntimeRequestScope {
+            account_id: "outer-account".into(), instance_id: "outer-instance".into(), generation: 8,
+        };
+        let inner = RuntimeRequestScope {
+            account_id: "inner-account".into(), instance_id: "inner-instance".into(), generation: 9,
+        };
+        {
+            let _outer = ActiveExecutionContext::enter(&outer, 7);
+            assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), Some(outer.clone()));
+            assert_eq!(SYNC_CONTEXT.with(|context| context.get()), Some((7, -1)));
+            let unwound = std::panic::catch_unwind(|| {
+                let _inner = ActiveExecutionContext::enter(&inner, 8);
+                assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), Some(inner.clone()));
+                assert_eq!(SYNC_CONTEXT.with(|context| context.get()), Some((8, -1)));
+                panic!("exercise execution context unwind");
+            });
+            assert!(unwound.is_err());
+            assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), Some(outer));
+            assert_eq!(SYNC_CONTEXT.with(|context| context.get()), Some((7, -1)));
+        }
+        assert_eq!(ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone()), initial_scope);
+        assert_eq!(SYNC_CONTEXT.with(|context| context.get()), initial_sync);
+    }
+
     static DIRECT_GATE_BARRIER: std::sync::OnceLock<(String, Arc<std::sync::Barrier>)> = std::sync::OnceLock::new();
     pub(super) fn wait_before_direct_gate(id: &str) {
         if let Some((_, barrier)) = DIRECT_GATE_BARRIER.get().filter(|(expected, _)| expected == id) {
@@ -3503,6 +3666,38 @@ mod tests {
         }));
         let initial = current_scope();
         crate::legacy_host::install(initial.clone(), "synthetic-installation".into(), verify)?;
+        {
+            struct RestoreStopState(bool, bool);
+            impl Drop for RestoreStopState {
+                fn drop(&mut self) {
+                    STOPPING.store(self.0, Ordering::Release);
+                    STOP_FORCE_TRIGGERED.store(self.1, Ordering::Release);
+                }
+            }
+            let _restore = RestoreStopState(
+                STOPPING.swap(true, Ordering::AcqRel),
+                STOP_FORCE_TRIGGERED.swap(false, Ordering::AcqRel));
+            let generation = scope_generation(&initial).map_err(anyhow::Error::msg)?;
+            assert!(!active_execution_retained(generation)?);
+            assert!(check_sync_context(generation).is_err(), "background work must remain fenced");
+            {
+                let _active = ActiveExecutionContext::enter(&initial, generation);
+                assert!(active_execution_retained(generation)?);
+                check_sync_context(generation)?;
+                assert!(active_execution_retained(generation + 1).is_err());
+                {
+                    let mut changed = initial.clone();
+                    changed.account_id.push_str("-changed");
+                    let _changed = ActiveExecutionContext::enter(&changed, generation);
+                    assert!(active_execution_retained(generation).is_err());
+                }
+                assert!(active_execution_retained(generation)?);
+                STOP_FORCE_TRIGGERED.store(true, Ordering::Release);
+                assert!(!active_execution_retained(generation)?);
+                assert!(check_sync_context(generation).is_err(), "force must end retention");
+            }
+            assert!(!active_execution_retained(generation)?);
+        }
         let (jobs, queued) = std::sync::mpsc::channel();
         if std::env::var("RSRS_SYNTHETIC_LEGACY_TEST").as_deref() == Ok("restart") {
             let previous: Value = serde_json::from_slice(&std::fs::read(root.join("previous.json"))?)?;
@@ -3514,6 +3709,30 @@ mod tests {
             assert_eq!(EFFECTS.load(Ordering::Acquire), 0);
             return Ok(());
         }
+        let progress_scope = crate::progress::Scope::start(Some("busy-parent".into()), false, false)
+            .context("missing progress scope")?;
+        crate::progress::phase("Waiting for synthetic server", "Waiting for synthetic server");
+        let (progress, _) = prepare("progress-during-exclusive", "cli.progress", &["busy-parent"])?;
+        let mut stale_progress = progress.clone();
+        stale_progress.id = "stale-progress".into();
+        let gate = shared_exclusive();
+        let held = gate.acquire(true);
+        let (progress_reply, progress_result) = std::sync::mpsc::channel();
+        let progress_jobs = jobs.clone();
+        let progress_worker = std::thread::spawn(move || {
+            let _ = progress_reply.send(dispatch_inner(progress, &progress_jobs, true));
+        });
+        let observed = progress_result.recv_timeout(Duration::from_secs(5));
+        // Release the gate even when the old blocking behavior regresses.
+        drop(held);
+        progress_worker.join().map_err(|_| anyhow::anyhow!("progress handler panicked"))?;
+        let observed = observed.context("legacy progress blocked behind the business execution gate")?;
+        assert!(observed.ok);
+        assert_eq!(observed.envelope.context("missing progress response")?.summary["phase"],
+            "Waiting for synthetic server");
+        assert_eq!(EFFECTS.load(Ordering::Acquire), 0, "progress must not execute business");
+        assert!(queued.try_recv().is_err(), "progress must not queue business");
+        drop(progress_scope);
         let old_wire = serde_json::to_vec(&json!({"v":1,"id":"optional-fields","method":"cli.exec",
             "args":["--json","status"],"queue_wait_ms":1200,"lifecycle":null}))?;
         let (optional, _) = crate::legacy_host::prepare(&old_wire)?.context("missing old request")?;
@@ -3545,6 +3764,7 @@ mod tests {
         assert_eq!(original.exit, 7); assert!(!original.ok);
         assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
         assert_eq!(current_scope().generation, initial.generation + 1);
+        assert_eq!(dispatch_inner(stale_progress, &jobs, true).code.as_deref(), Some("scope_mismatch"));
         assert!(capture_scoped(&initial, vec!["status".into()]).is_err(),
             "old queued generation must not execute after the transition");
         assert!(crate::legacy_host::health().is_ok(), "legal generation change must not revoke the actor");
@@ -3598,6 +3818,7 @@ mod tests {
         // real model handlers without configuring or loading any model.
         let (configure, _) = prepare("waiting-configure", "model.configure", &["{}"])?;
         let (control, _) = prepare("waiting-control", "model.control", &["not-an-action"])?;
+        let (revoked_progress, _) = prepare("revoked-progress", "cli.progress", &["busy-parent"])?;
         let barrier = Arc::new(std::sync::Barrier::new(2));
         DIRECT_GATE_BARRIER.set((configure.id.clone(), barrier.clone()))
             .map_err(|_| anyhow::anyhow!("direct gate barrier already installed"))?;
@@ -3613,6 +3834,7 @@ mod tests {
         let refused = worker.join().map_err(|_| anyhow::anyhow!("direct handler panicked"))?;
         assert_eq!(refused.code.as_deref(), Some("legacy_host_binding_changed"));
         assert_eq!(dispatch_inner(control, &jobs, true).code.as_deref(), Some("legacy_host_binding_changed"));
+        assert_eq!(dispatch_inner(revoked_progress, &jobs, true).code.as_deref(), Some("legacy_host_binding_changed"));
         assert!(capture_scoped(&current_scope(), vec!["status".into()]).is_err());
         assert_eq!(EFFECTS.load(Ordering::Acquire), 1);
         Ok(())
@@ -4061,6 +4283,25 @@ mod tests {
         };
         let expected = json!({"installation_id":"installation-1", "instance_id":"instance-1", "account_id":"account-1", "generation":7});
         validate_stop_target(&expected, &process, "account-1", 7)?;
+        assert!(!validate_stop_force(&expected, None)?);
+        let mut force = expected.clone();
+        force["force"] = json!(false);
+        force["operation_id"] = json!("unrelated-old-field");
+        assert!(!validate_stop_force(&force, None)?);
+        force["force"] = json!(true);
+        assert!(validate_stop_force(&force, None).is_err());
+        assert!(validate_stop_force(&force, Some("accepted-stop")).is_err());
+        force["operation_id"] = json!("accepted-stop");
+        assert!(validate_stop_force(&force, Some("accepted-stop"))?);
+        for invalid in [Value::Null, json!(1), json!("true"), json!({})] {
+            force["force"] = invalid;
+            assert!(validate_stop_force(&force, Some("accepted-stop")).is_err());
+        }
+        assert_eq!(stop_outcome(true, false, true), RuntimeStopOutcome::Drained);
+        assert_eq!(stop_outcome(true, false, false), RuntimeStopOutcome::Failed);
+        assert_eq!(stop_outcome(true, true, false), RuntimeStopOutcome::ForcedTimeout);
+        assert_eq!(stop_outcome(false, true, false), RuntimeStopOutcome::Failed);
+        assert_eq!(FORCE_DRAIN_GRACE, Duration::from_secs(4));
         for key in ["installation_id", "instance_id", "account_id", "generation"] {
             let mut missing = expected.clone();
             missing

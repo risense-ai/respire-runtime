@@ -1,0 +1,231 @@
+name: Native candidate background startup
+on:
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - 'crates/commands/src/net_rpc.rs'
+      - 'spawn/**'
+      - 'scripts/test-background-start-native.py'
+      - 'scripts/fixtures/client2-background/**'
+      - '.github/workflows/background-start-native.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      RUNTIME_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-client2
+          ref: 57bc070826949994c3f7ce9a64277160704bdfe5
+          path: .client2-source
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-magpie
+          ref: a3ae9b3035d02b181ba7a8ddae251495d092dd63
+          path: .magpie-source
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Resolve exact existing SDK cache
+        id: sdk
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: restore
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify SDK without private download credentials
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        run: |
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+      - name: Build actual candidate
+        run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Verify native diagnostics stay outside worker IPC
+        run: cargo test --locked -p respire_core_sdk --lib core_wire_tests::worker_stdout_keeps_protocol_private -- --exact
+      - name: Download and authenticate the published old CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/legacy-cli"
+          gh api repos/risense-ai/respire-cli/releases/tags/v1.0.21-dev.6 > "$RUNNER_TEMP/legacy-cli/release.json"
+          gh release download v1.0.21-dev.6 --repo risense-ai/respire-cli \
+            --pattern "rsrs-$RUNTIME_TARGET" --dir "$RUNNER_TEMP/legacy-cli"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'legacy-cli'
+          release = json.loads((root / 'release.json').read_text())
+          assert release['tag_name'] == 'v1.0.21-dev.6' and release['prerelease'] and not release['draft']
+          binary = root / ('rsrs-' + os.environ['RUNTIME_TARGET'])
+          asset, = [entry for entry in release['assets'] if entry['name'] == binary.name]
+          data = binary.read_bytes()
+          assert len(data) == asset['size']
+          assert 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest']
+          binary.chmod(0o700)
+          PY
+      - name: Exercise background startup, reuse and verified drain
+        env:
+          LEGACY_CLI_PATH: ${{ runner.temp }}/legacy-cli/rsrs-${{ matrix.target }}
+        run: python3 scripts/test-background-start-native.py
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-cli
+          ref: 9189bbce93b9e0759d36e3083a77dce0d8c8db0e
+          path: .cli-source
+          persist-credentials: false
+      - name: Build the fixed CLI compatibility consumer
+        run: cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
+      - name: Package the actual candidate for the existing CLI installer
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/joint-candidate-payload"
+          mkdir "$payload"
+          cp target/debug/rsrs-runtime "$payload/rsrs-runtime-$RUNTIME_TARGET"
+          node scripts/stage-core-runtime.mjs "$payload"
+          tar --format=ustar -czf "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" -C "$payload" .
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, tomllib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          payload = root / 'joint-candidate-payload'
+          target = os.environ['RUNTIME_TARGET']
+          binary = f'rsrs-runtime-{target}'
+          archive = root / f'rsrs-runtime-{target}.tar.gz'
+          version = tomllib.loads(pathlib.Path('runtime/Cargo.toml').read_text())['package']['version']
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          files = []
+          for path in sorted(payload.rglob('*')):
+              assert not path.is_symlink(), path
+              if path.is_file():
+                  files.append({'path': path.relative_to(payload).as_posix(),
+                                'size': path.stat().st_size, 'sha256': digest(path)})
+          metadata = dict(schema_version=2, runtime_version=version, tag=f'v{version}',
+              channel='dev', target_triple=target, archive_file=archive.name,
+              archive_sha256=digest(archive), binary_file=binary, binary_sha256=digest(payload / binary),
+              source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              compat={'min_cli': '1.0.21-dev.5', 'max_cli': '*'},
+              protocol_range={'minimum': 1, 'maximum': 1},
+              capabilities={'business_executor': '1', 'mcp_server': '1'}, files=files)
+          (root / f'runtime-build-{target}.json').write_text(json.dumps(metadata) + '\n')
+          PY
+      - name: Install original Linux desktop shared libraries
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update -qq && sudo apt-get install -y libgtk-3-0t64 libwebkit2gtk-4.1-0 libx11-6
+      - name: Authenticate the exact original Linux desktop artifact
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, os, pathlib, stat, subprocess, tarfile, zipfile
+          repository = 'repos/risense-ai/respire-client2'
+          source = '57bc070826949994c3f7ce9a64277160704bdfe5'
+          run_id, artifact_id = 42458504861, 13609150108
+          zip_sha256 = 'b2aaed0a79a4e9eab9fbe7c78ef14c8fd7664960265f66a4923b281213a617be'
+          archive_sha256 = 'd1b860fb7e8e0b1e152ff33e202f3e978174f554fc0a979556a9c4fea838d873'
+          binary_sha256 = '3cacf426d22974aaa53bb20d13b450fb67b56404366050f796cfd4fbad73933a'
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', repository + path], timeout=60))
+          run = api(f'/actions/runs/{run_id}')
+          assert run['id'] == run_id and run['head_sha'] == source
+          assert run['repository']['full_name'] == 'risense-ai/respire-client2'
+          assert run['path'] == '.github/workflows/desktop.yml' and run['event'] == 'workflow_dispatch'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['run_number'] == 164 and run['run_attempt'] == 1
+          artifact = api(f'/actions/artifacts/{artifact_id}')
+          assert artifact['id'] == artifact_id and artifact['name'] == 'respire-linux-amd64'
+          assert not artifact['expired'] and artifact['digest'] == 'sha256:' + zip_sha256
+          assert artifact['workflow_run']['id'] == run_id and artifact['workflow_run']['head_sha'] == source
+          assert artifact['size_in_bytes'] == 11516423
+          raw = subprocess.check_output(['gh', 'api', repository + f'/actions/artifacts/{artifact_id}/zip'], timeout=120)
+          assert len(raw) == artifact['size_in_bytes'] and hashlib.sha256(raw).hexdigest() == zip_sha256
+          def verified_binary(raw):
+              sizes = {'LICENSE.txt': 2827, 'SHA256SUMS': 93, 'THIRD_PARTY_NOTICES.txt': 25173,
+                       'respire-linux-amd64.tar.gz': 11516699}
+              with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                  members = archive.infolist()
+                  assert len(members) == len(sizes) and {item.filename for item in members} == set(sizes)
+                  for item in members:
+                      assert not item.is_dir() and item.file_size == sizes[item.filename]
+                      assert stat.S_IFMT(item.external_attr >> 16) in (0, stat.S_IFREG)
+                  sums = archive.read('SHA256SUMS').decode('ascii')
+                  assert sums == archive_sha256 + '  respire-linux-amd64.tar.gz\n'
+                  payload = archive.read('respire-linux-amd64.tar.gz')
+              assert hashlib.sha256(payload).hexdigest() == archive_sha256
+              with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+                  member, = archive.getmembers()
+                  assert member.name == 'respire' and member.type == tarfile.REGTYPE and member.size == 19002960
+                  with archive.extractfile(member) as stream:
+                      binary = stream.read(member.size + 1)
+              assert len(binary) == 19002960 and hashlib.sha256(binary).hexdigest() == binary_sha256
+              return binary
+          binary = verified_binary(raw)
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'legacy-desktop'
+          output.mkdir(mode=0o700)
+          executable = output / 'respire'
+          with executable.open('xb') as stream:
+              stream.write(binary)
+          executable.chmod(0o700)
+          proof = dict(source_commit=source, run_id=run_id, run_number=164, artifact_id=artifact_id,
+                       artifact_sha256=zip_sha256, archive_sha256=archive_sha256, binary_sha256=binary_sha256)
+          (output / 'desktop-source.json').write_text(json.dumps(proof) + '\n')
+          PY
+      - name: Exercise unchanged Client2 and CLI against this Runtime candidate
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("runtime/Cargo.toml", "rb"))["package"]["version"])')"
+          set --
+          if [[ "$RUNTIME_TARGET" == x86_64-unknown-linux-gnu ]]; then
+            set -- --desktop-executable "$RUNNER_TEMP/legacy-desktop/respire"
+          fi
+          python3 .cli-source/scripts/test-client2-launcher-compat.py \
+            --cli .cli-source/target/debug/rsrs \
+            --runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
+            --runtime-version "$version" --client2-source .client2-source \
+            --go "$(command -v go)" \
+            --magpie-source .magpie-source --node "$(command -v node)" --ordinary-cli-cold-start \
+            "$@" --report "$RUNNER_TEMP/joint-candidate-regression.json"
+      - name: Preserve joint candidate results (not G1 evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: joint-candidate-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/background-candidate-regression.json
+            ${{ runner.temp }}/joint-candidate-regression.json
+            ${{ runner.temp }}/runtime-build-${{ matrix.target }}.json
+            ${{ runner.temp }}/legacy-desktop/desktop-source.json
+          if-no-files-found: warn
+          retention-days: 1

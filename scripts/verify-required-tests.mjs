@@ -335,6 +335,8 @@ if (checkRun) {
       fail(`required matrix is empty, skipped, or incomplete for ${testIds.join(", ")}: ${missingTargets.join(", ")}`);
     }
   }
+  const rawTargetsById = new Map();
+  const rawTargetsByHash = new Map();
   for (const test of ready) {
     const selected = reports.filter((report) => report.test_id === test.id);
     if (selected.length !== test.required_targets.length ||
@@ -364,7 +366,9 @@ if (checkRun) {
       const matchingArtifacts = artifacts.filter((item) => String(item.id) === String(report.artifact_id));
       const artifact = matchingArtifacts[0];
       if (!job || !Number.isSafeInteger(report.artifact_id) || report.artifact_id <= 0 ||
+          !/^[a-f0-9]{64}$/.test(report.artifact_sha256 ?? '') ||
           matchingArtifacts.length !== 1 || artifact.expired !== false || artifact.name !== report.artifact_name ||
+          artifact.digest !== `sha256:${report.artifact_sha256}` ||
           !artifact.name.startsWith("required-tests-") ||
           String(artifact.workflow_run?.id) !== process.env.GITHUB_RUN_ID ||
           artifact.workflow_run?.head_sha?.toLowerCase() !== process.env.GITHUB_SHA.toLowerCase() ||
@@ -372,6 +376,12 @@ if (checkRun) {
             Date.parse(artifact.created_at) <= Date.parse(job.completed_at))) {
         fail(`${test.id}/${target}: artifact is missing, stale, or not from the successful producer in this attempt`);
       }
+      if ((rawTargetsById.has(report.artifact_id) && rawTargetsById.get(report.artifact_id) !== target) ||
+          (rawTargetsByHash.has(report.artifact_sha256) && rawTargetsByHash.get(report.artifact_sha256) !== target)) {
+        fail(`${test.id}/${target}: raw artifact reused across targets`);
+      }
+      rawTargetsById.set(report.artifact_id, target);
+      rawTargetsByHash.set(report.artifact_sha256, target);
     }
   }
 }

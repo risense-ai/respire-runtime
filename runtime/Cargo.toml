@@ -1,6 +1,6 @@
 [package]
 name = "respire_runtime"
-version = "1.0.21-dev.17"
+version = "2.0.0-dev.1"
 edition = "2021"
 rust-version = "1.88"
 description = "standalone respire runtime binary (rsrs-runtime): loopback RPC host for the CLI and client2"

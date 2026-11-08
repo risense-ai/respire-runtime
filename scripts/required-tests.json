@@ -11,19 +11,55 @@
       "id": "runtime.business-memory-write-read",
       "area": "runtime-business-mcp",
       "status": "missing",
-      "reason": "A1 independent Runtime business write/read test has no complete real-process/asset implementation and execution report",
+      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
+      "partial_source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "remember_public_payload_covers_created_appended_and_merged",
+          "command": "cargo test -p respire_commands --example cli_business_tests diary_identity::remember_public_payload_covers_created_appended_and_merged --locked -- --exact",
+          "coverage": "source-test",
+          "scope": "Real CLI/Runtime public write/read with seeded fixture state; cross-repository harness execution is distinct from workspace --no-run compilation and is not frozen G1."
+        }
+      ],
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "diary_identity::remember_public_payload_covers_created_appended_and_merged"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "remember_public_payload_covers_created_appended_and_merged",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::remember_public_payload_covers_created_appended_and_merged -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-business",
+        "job_name": "g1-native-business"
+      }
     },
     {
       "id": "runtime.mcp-initialize-tools-list",
       "area": "runtime-business-mcp",
       "status": "missing",
-      "reason": "Handler-only initialize/error assertions; independent Runtime process and real tools/list/business context remain uncovered.",
+      "reason": "Real-process MCP initialization, tools/list and scoped status assertions are wired into native release smoke; frozen-candidate native execution reports remain absent. A reviewed producer draft now maps the existing exact assertions to fresh same-run native execution, but trusted original SDK archive input, candidate native execution and all remaining required suites are still prerequisites; status is intentionally missing.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -41,13 +77,78 @@
           "command_fragment": "cargo test --workspace --locked",
           "scope": "Handler-only initialize/error assertions; independent Runtime process and real tools/list/business context remain uncovered."
         }
-      ]
+      ],
+      "partial_asset_suite": [
+        {
+          "file": "scripts/runtime-mcp-probe.mjs",
+          "test": "runRuntimeMcpProbe",
+          "command": "node scripts/smoke-runtime-release.mjs",
+          "coverage": "real-artifact",
+          "workflow": ".github/workflows/release.yml",
+          "job": "native-regression",
+          "scope": "Initialize, catalog, real status envelope and unchanged process identity. No full G1 or memory write/read acceptance."
+        }
+      ],
+      "required_cases": [
+        "initialize",
+        "tools/list",
+        "tools/call:memory_status",
+        "same-process-after-call"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "scripts/produce-runtime-g1-smoke.mjs",
+          "test": "scripts/smoke-runtime-release.mjs",
+          "command": "node scripts/smoke-runtime-release.mjs"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-smoke.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-smoke",
+        "job_name": "g1-native-smoke",
+        "matrix": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ]
+      }
     },
     {
       "id": "runtime.stop-clean-drained",
       "area": "stop-drain-modes",
       "status": "missing",
-      "reason": "Synthetic busy callback only; real three-mode process identity, admission and drain result remain uncovered.",
+      "reason": "Release smoke and native background exercise identity-bound normal drain in standalone and Client2-owned modes. CLI-supervised mode, accepted writes lasting over four seconds, and complete frozen native reports remain missing.",
+      "partial_asset_suite": [
+        {
+          "file": "scripts/smoke-runtime-release.mjs",
+          "test": "assertDrained",
+          "command": "node scripts/smoke-runtime-release.mjs",
+          "coverage": "real-artifact",
+          "workflow": ".github/workflows/release.yml",
+          "job": "native-regression",
+          "scope": "Standalone serve: exact final receipt, normal process exit, and refused connections after exit. No long in-flight business or timeout acceptance."
+        },
+        {
+          "file": "scripts/test-background-start-native.py",
+          "test": "main",
+          "command": "python3 scripts/test-background-start-native.py",
+          "coverage": "real-artifact",
+          "workflow": ".github/workflows/background-start-native.yml",
+          "job": "native",
+          "scope": "Unchanged Client2-owned candidate: verified image/root/digest, repeat-start reuse, exact drained receipt, undiscoverable stopped Runtime and refused listener. No CLI-supervised or busy drain acceptance."
+        }
+      ],
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -95,7 +196,7 @@
       "id": "runtime.idempotency-same-fingerprint-once",
       "area": "idempotency-bad-config",
       "status": "missing",
-      "reason": "Ledger admission/replay unit coverage; concurrent real business effects executing at most once remain uncovered.",
+      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -111,15 +212,49 @@
           "workflow": ".github/workflows/ci.yml",
           "job": "workspace-tests",
           "command_fragment": "cargo test --workspace --locked",
-          "scope": "Ledger admission/replay unit coverage; concurrent real business effects executing at most once remain uncovered."
+          "scope": "Ledger admission/replay unit coverage; concurrent real business effects executing at most once remain uncovered by this unit test."
+        },
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+          "command": "cargo test -p respire_commands --example cli_business_tests diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once --locked -- --exact",
+          "coverage": "source-test",
+          "scope": "Independent Runtime RPC with two concurrent same-key requests, completed replay, exact record-count increment and public content check. Executed by the separate full business harness, not workspace --no-run compilation."
         }
-      ]
+      ],
+      "required_cases": [
+        "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-business",
+        "job_name": "g1-native-business"
+      }
     },
     {
       "id": "runtime.idempotency-conflict",
       "area": "idempotency-bad-config",
       "status": "missing",
-      "reason": "Changed arguments/scopes have unit coverage; actual Runtime process and full fingerprint matrix remain uncovered.",
+      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -135,21 +270,100 @@
           "workflow": ".github/workflows/ci.yml",
           "job": "workspace-tests",
           "command_fragment": "cargo test --workspace --locked",
-          "scope": "Changed arguments/scopes have unit coverage; actual Runtime process and full fingerprint matrix remain uncovered."
+          "scope": "Changed arguments/scopes have unit coverage; actual Runtime process and full fingerprint matrix remain uncovered by this unit test."
+        },
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+          "command": "cargo test -p respire_commands --example cli_business_tests diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once --locked -- --exact",
+          "coverage": "source-test",
+          "scope": "Real RPC changed-arguments idempotency_conflict; stored record count and publicly decrypted original content remain unchanged. Other fingerprint dimensions and final frozen reports are not covered."
         }
-      ]
+      ],
+      "required_cases": [
+        "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-business",
+        "job_name": "g1-native-business"
+      }
     },
     {
       "id": "runtime.client-json-bad-config",
       "area": "idempotency-bad-config",
       "status": "missing",
-      "reason": "A5 malformed client.json structured-error test has no complete real-process/asset implementation and execution report",
+      "reason": "Native release smoke asserts a scoped structured invalid_config reply, preserved malformed client.json and inference bytes, and successful scoped recovery; frozen-candidate native reports remain absent. A reviewed producer draft now maps the existing exact assertions to fresh same-run native execution, but trusted original SDK archive input, candidate native execution and all remaining required suites are still prerequisites; status is intentionally missing.",
+      "partial_asset_suite": [
+        {
+          "file": "scripts/smoke-runtime-release.mjs",
+          "test": "assertBadConfigResponse",
+          "command": "node scripts/smoke-runtime-release.mjs",
+          "coverage": "real-artifact",
+          "workflow": ".github/workflows/release.yml",
+          "job": "native-regression",
+          "scope": "Actual packaged Runtime rejects malformed JSON without replacing it; prior inference settings survive rejection and recovery. These are raw native cases, not a complete G1 certificate."
+        }
+      ],
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "scoped-structured-invalid-config-envelope",
+        "invalid-client-config-bytes-preserved",
+        "inference-settings-preserved-on-rejection",
+        "scoped-recovery-preserves-inference-settings"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "scripts/produce-runtime-g1-smoke.mjs",
+          "test": "scripts/smoke-runtime-release.mjs",
+          "command": "node scripts/smoke-runtime-release.mjs"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-smoke.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-smoke",
+        "job_name": "g1-native-smoke",
+        "matrix": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ]
+      }
     }
   ]
 }

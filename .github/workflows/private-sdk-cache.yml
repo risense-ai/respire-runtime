@@ -49,7 +49,7 @@ jobs:
           import {readFileSync,appendFileSync} from 'node:fs';
           const matrix=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/sdk-locks/plan.json'));
           const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-apple-darwin':'macos-15','x86_64-pc-windows-msvc':'windows-latest'};
-          const native={include:matrix.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
+          const native={include:matrix.include.filter(x=>os[x.target]).map(({target,key,archive_key})=>({target,key,archive_key,os:os[target]}))};
           if(native.include.length!==matrix.include.length-1)throw Error('Expected every selected SDK source check except Windows ARM64');
           appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\nnative=${JSON.stringify(native)}\n`);
           JS
@@ -82,6 +82,11 @@ jobs:
           path: .sdk/${{ matrix.target }}
           key: ${{ matrix.key }}
           enableCrossOsArchive: true
+      - uses: actions/cache/save@v4
+        with:
+          path: .sdk-archives/${{ matrix.target }}
+          key: ${{ matrix.archive_key }}
+          enableCrossOsArchive: true
   native:
     cache-mode: read
     needs: [plan, download]
@@ -94,4 +99,5 @@ jobs:
       source_sha: ${{ inputs.reviewed_source_sha }}
       target: ${{ matrix.target }}
       cache_key: ${{ matrix.key }}
+      archive_cache_key: ${{ matrix.archive_key }}
       runner_os: ${{ matrix.os }}

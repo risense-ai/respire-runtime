@@ -9,6 +9,15 @@ on:
         description: Compatibility input; mandatory source tests always run
         type: boolean
         default: true
+      required_candidate_run_id:
+        description: Existing same-source Runtime run containing the reviewed frozen native input artifact
+        type: string
+      required_candidate_artifact_id:
+        description: Exact same-repository artifact containing candidate.json and release-assets for both native targets
+        type: string
+      required_candidate_sha256:
+        description: SHA-256 of the exact frozen candidate.json bytes; never enables a source-check exemption
+        type: string
   push:
     branches: [main, 'release/**']
   pull_request:
@@ -29,10 +38,34 @@ jobs:
       contents: read
     outputs:
       workspace_present: ${{ steps.detect.outputs.workspace_present }}
+      candidate_requested: ${{ steps.candidate-mode.outputs.candidate_requested }}
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - id: candidate-mode
+        name: Validate explicit candidate inputs without changing source checks
+        env:
+          REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+          REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+          REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync} from 'node:fs';
+          const values = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].map(key => process.env[key] ?? '');
+          const requested = values.some(value => value !== '');
+          if (requested) {
+            assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'Candidate inputs require a manual run');
+            assert.ok(values.every(value => value !== ''), 'Supply all three candidate inputs together');
+            for (const id of values.slice(0, 2)) {
+              assert.match(id, /^[1-9][0-9]*$/, 'Candidate IDs must be positive integers');
+              assert.ok(BigInt(id) <= BigInt(Number.MAX_SAFE_INTEGER), 'Candidate ID exceeds exact JSON integer range');
+            }
+            assert.match(values[2], /^[a-f0-9]{64}$/, 'Candidate digest must be lowercase SHA-256');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `candidate_requested=${requested}\n`);
+          NODE
       - id: detect
         run: |
           set -euo pipefail
@@ -57,6 +90,21 @@ jobs:
         run: node scripts/verify-runtime-control-contract.mjs
       - name: Reject invalid required-gate evidence
         run: node scripts/test-required-tests.mjs
+      - name: Reject mixed native producer assembly inputs without running products
+        run: node scripts/test-produce-runtime-g1-smoke.mjs
+      - name: Reject mixed business execution inputs and original archive payloads
+        run: |
+          node scripts/test-produce-runtime-g1-business.mjs
+          python3 -B scripts/test-verify-business-archive-payloads.py
+          node scripts/test-runtime-g1-mappings.mjs
+      - name: Reject mixed frozen combination input identities without products
+        run: node --test scripts/test-freeze-runtime-g1-candidate.mjs
+      - name: Verify approved SDK version trains and download boundaries
+        run: node --test scripts/test-sdk-version-trains.mjs
+      - name: Check native release smoke response assertions
+        run: node scripts/smoke-runtime-release.mjs --self-check
+      - name: Reject invalid MCP execution evidence
+        run: node --test scripts/test-runtime-mcp-probe.mjs
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Run the Rust contract consumer tests
         run: cargo test -p respire_protocol --locked
@@ -220,15 +268,319 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  g1-native-smoke:
+    # Explicit candidates retain the strict required-tests gate below.
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
+    name: g1-native-smoke (${{ matrix.target }})
+    needs: [control-contract, detect]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      RUNTIME_TARGET: ${{ matrix.target }}
+      G1_NATIVE_PLATFORM: ${{ matrix.platform }}
+      G1_NATIVE_ARCH: ${{ matrix.arch }}
+      G1_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Authenticate the exact frozen input artifact without private SDK credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN: ${{ inputs.required_candidate_run_id }}
+          INPUT_ARTIFACT: ${{ inputs.required_candidate_artifact_id }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          for (const key of ['INPUT_RUN', 'INPUT_ARTIFACT']) assert.match(process.env[key] ?? '', /^[1-9][0-9]*$/);
+          assert.match(process.env.G1_CANDIDATE_SHA256 ?? '', /^[a-f0-9]{64}$/);
+          const base = `repos/${process.env.GITHUB_REPOSITORY}/actions`;
+          const api = path => JSON.parse(execFileSync('gh', ['api', `${base}/${path}`], {encoding: 'utf8'}));
+          const run = api(`runs/${process.env.INPUT_RUN}`);
+          const artifact = api(`artifacts/${process.env.INPUT_ARTIFACT}`);
+          assert.equal(run.repository.full_name, process.env.GITHUB_REPOSITORY);
+          assert.equal(run.head_sha, process.env.GITHUB_SHA);
+          assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
+          assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
+          assert.equal(artifact.expired, false);
+          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 256 * 1024 * 1024);
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.required_candidate_artifact_id }}
+          run-id: ${{ inputs.required_candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: g1-input
+      - name: Resolve the independent exact compressed SDK cache key
+        id: sdk
+        run: |
+          echo "archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: payload
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: archive
+        with:
+          path: .sdk-archives/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Execute the original native smoke against frozen bytes
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.archive_key }}
+          MATCHED_KEY: ${{ steps.archive.outputs.cache-matched-key }}
+          EXPECTED_PAYLOAD_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_PAYLOAD_KEY: ${{ steps.payload.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -n "$EXPECTED_PAYLOAD_KEY" && test "$EXPECTED_PAYLOAD_KEY" = "$MATCHED_PAYLOAD_KEY"
+          test ! -e release-assets
+          mv g1-input/release-assets release-assets
+          node scripts/produce-runtime-g1-smoke.mjs run
+      - name: Upload this attempt's original native execution evidence
+        id: raw
+        uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-raw-runtime-native-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-raw
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build reports only after the raw artifact has an actual ID
+        env:
+          G1_RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}
+          G1_RAW_ARTIFACT_SHA256: ${{ steps.raw.outputs.artifact-digest }}
+          G1_RAW_ARTIFACT_NAME: required-tests-raw-runtime-native-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node scripts/produce-runtime-g1-smoke.mjs report
+      - uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-report-part-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-report
+          if-no-files-found: error
+          retention-days: 7
+
+  g1-native-business:
+    # Explicit candidates retain the strict required-tests gate.
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
+    needs: [control-contract, detect]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUNTIME_TARGET: x86_64-unknown-linux-gnu
+      G1_NATIVE_PLATFORM: linux
+      G1_NATIVE_ARCH: x64
+      G1_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+      RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Authenticate the exact frozen business input without private SDK credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN: ${{ inputs.required_candidate_run_id }}
+          INPUT_ARTIFACT: ${{ inputs.required_candidate_artifact_id }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          for (const key of ['INPUT_RUN', 'INPUT_ARTIFACT']) assert.match(process.env[key] ?? '', /^[1-9][0-9]*$/);
+          assert.match(process.env.G1_CANDIDATE_SHA256 ?? '', /^[a-f0-9]{64}$/);
+          const base = `repos/${process.env.GITHUB_REPOSITORY}/actions`;
+          const api = path => JSON.parse(execFileSync('gh', ['api', `${base}/${path}`], {encoding: 'utf8'}));
+          const run = api(`runs/${process.env.INPUT_RUN}`);
+          const artifact = api(`artifacts/${process.env.INPUT_ARTIFACT}`);
+          assert.equal(run.repository.full_name, process.env.GITHUB_REPOSITORY);
+          assert.equal(run.head_sha, process.env.GITHUB_SHA);
+          assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
+          assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
+          assert.equal(artifact.expired, false);
+          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 256 * 1024 * 1024);
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.required_candidate_artifact_id }}
+          run-id: ${{ inputs.required_candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: g1-input
+      - name: Resolve only the CLI source sealed in the exact candidate bytes
+        id: combination
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {appendFileSync, readFileSync} from 'node:fs';
+          const bytes = readFileSync('g1-input/candidate.json');
+          assert.equal(createHash('sha256').update(bytes).digest('hex'), process.env.G1_CANDIDATE_SHA256);
+          const candidate = JSON.parse(bytes);
+          assert.equal(candidate.schema, 2);
+          assert.equal(candidate.frozen, true);
+          assert.equal(candidate.gate, 'G1');
+          assert.equal(candidate.components.runtime.source_sha, process.env.GITHUB_SHA);
+          const sha = candidate.components.cli.source_sha;
+          assert.match(sha, /^[a-f0-9]{40}$/);
+          appendFileSync(process.env.GITHUB_OUTPUT, `cli_sha=${sha}\n`);
+          NODE
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-cli
+          ref: ${{ steps.combination.outputs.cli_sha }}
+          path: .cli-source
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-client2
+          ref: 57bc070826949994c3f7ce9a64277160704bdfe5
+          path: .client2-source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare the existing private credential and original desktop dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y dbus gnome-keyring libgtk-3-0t64 libwebkit2gtk-4.1-0 libx11-6
+          python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          python3 -B .cli-source/scripts/dev-secret-service-keyring-selftest.py --self-test
+          python3 -B .cli-source/scripts/test-native-account-candidate.py
+      - name: Resolve the exact SDK payload and original archive cache keys
+        id: sdk
+        run: |
+          cmp sdk/core-sdk.lock.json .cli-source/sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: payload
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: archive
+        with:
+          path: .sdk-archives/x86_64-unknown-linux-gnu
+          key: ${{ steps.sdk.outputs.archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Build only the actual current-source Runtime business harness
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.payload.outputs.cache-matched-key }}
+          EXPECTED_ARCHIVE_KEY: ${{ steps.sdk.outputs.archive_key }}
+          MATCHED_ARCHIVE_KEY: ${{ steps.archive.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -n "$EXPECTED_ARCHIVE_KEY" && test "$EXPECTED_ARCHIVE_KEY" = "$MATCHED_ARCHIVE_KEY"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+          test ! -e .cli-source/.sdk && cp -a .sdk .cli-source/.sdk
+          test ! -e .cli-source/.sdk-archives && cp -a .sdk-archives .cli-source/.sdk-archives
+          cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-business-harness-build.jsonl"
+          node scripts/stage-core-runtime.mjs target/debug/examples
+      - name: Execute the existing exact business cases and original Client2 on frozen product bytes
+        run: |
+          set -euo pipefail
+          test ! -e release-assets
+          mv g1-input/release-assets release-assets
+          chmod 700 "release-assets/rsrs-runtime-$RUNTIME_TARGET" "g1-input/cli-assets/rsrs-$RUNTIME_TARGET" g1-input/client2-assets/respire
+          node scripts/produce-runtime-g1-business.mjs run
+      - name: Upload only this attempt's safe original business evidence
+        id: raw
+        uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-raw-runtime-business-x86_64-unknown-linux-gnu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-business-raw
+          if-no-files-found: error
+          retention-days: 7
+      - name: Bind business reports to the actual upload result
+        env:
+          G1_RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}
+          G1_RAW_ARTIFACT_SHA256: ${{ steps.raw.outputs.artifact-digest }}
+          G1_RAW_ARTIFACT_NAME: required-tests-raw-runtime-business-x86_64-unknown-linux-gnu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node scripts/produce-runtime-g1-business.mjs report
+      - uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-report-business-x86_64-unknown-linux-gnu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-business-report
+          if-no-files-found: error
+          retention-days: 7
+
+  g1-report:
+    if: ${{ !cancelled() && needs.g1-native-smoke.result == 'success' && needs.g1-native-business.result == 'success' }}
+    needs: [g1-native-smoke, g1-native-business]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: required-tests-report-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-parts
+      - name: Require identical frozen bytes and all selected native legs
+        env:
+          G1_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+          G1_TARGETS: '["x86_64-unknown-linux-gnu","aarch64-apple-darwin"]'
+        run: node scripts/produce-runtime-g1-smoke.mjs bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-final
+          if-no-files-found: error
+          retention-days: 7
+
   required-tests:
-    if: always()
-    needs: [control-contract, detect, workspace-tests]
+    if: ${{ always() && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
+    needs: [control-contract, detect, workspace-tests, g1-report]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read
     steps:
+      - name: Require a successfully validated candidate mode
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          CANDIDATE_REQUESTED: ${{ needs.detect.outputs.candidate_requested }}
+        run: test "$DETECT_RESULT" = success && test "$CANDIDATE_REQUESTED" = true
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -256,12 +608,26 @@ jobs:
     steps:
       - name: Require all source gates
         env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          CANDIDATE_REQUESTED: ${{ needs.detect.outputs.candidate_requested }}
+          REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+          REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+          REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
           WORKSPACE_PRESENT: ${{ needs.detect.outputs.workspace_present }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
           CONTRACT_RESULT: ${{ needs.control-contract.result }}
           REQUIRED_RESULT: ${{ needs.required-tests.result }}
         run: |
-          test "$CONTRACT_RESULT" = success || { echo "::error::Runtime control contract did not pass"; exit 1; }
-          test "$REQUIRED_RESULT" = success || { echo "::error::Required Stage 1 tests did not pass"; exit 1; }
-          test "$WORKSPACE_PRESENT" = true || { echo "::error::Required workspace is missing"; exit 1; }
-          test "$TESTS_RESULT" = success || { echo "::error::Source tests did not pass"; exit 1; }
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync} from 'node:fs';
+          const env = process.env;
+          for (const key of ['DETECT_RESULT', 'CONTRACT_RESULT', 'TESTS_RESULT']) {
+            assert.equal(env[key], 'success', `${key} did not pass`);
+          }
+          assert.equal(env.WORKSPACE_PRESENT, 'true', 'Required workspace is missing');
+          const requested = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].some(key => (env[key] ?? '') !== '');
+          assert.equal(env.CANDIDATE_REQUESTED, String(requested), 'Candidate mode changed between jobs');
+          assert.equal(env.REQUIRED_RESULT, requested ? 'success' : 'skipped', requested ? 'Required G1 verification did not pass' : 'Non-candidate run must skip G1 verification');
+          appendFileSync(env.GITHUB_STEP_SUMMARY, requested ? 'Source checks and frozen candidate G1 verification passed.\n' : 'Source checks passed. G1 not evaluated; this run is not release acceptance.\n');
+          NODE
