@@ -1111,3 +1111,370 @@ fn important_remember_pending_candidates_preserve_ciphertext_and_outbox() -> any
     );
     Ok(())
 }
+
+
+// Hold a real provider request until the native stop assertions release it.
+struct HeldClassifyProvider {
+    endpoint: String,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    received: std::sync::mpsc::Receiver<()>,
+    worker: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+}
+
+impl HeldClassifyProvider {
+    fn new() -> anyhow::Result<Self> {
+        use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc};
+        let server = tiny_http::Server::http("127.0.0.1:0")
+            .map_err(|error| anyhow::anyhow!("loopback provider bind: {error}"))?;
+        let endpoint = format!("http://{}/classify", server.server_addr());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (send, received) = std::sync::mpsc::channel();
+        let (count, released, stopped) = (calls.clone(), release.clone(), stop.clone());
+        let worker = std::thread::spawn(move || -> anyhow::Result<()> {
+            let mut held = Vec::<tiny_http::Request>::new();
+            loop {
+                if released.load(Ordering::Acquire) || stopped.load(Ordering::Acquire) {
+                    for request in held.drain(..) {
+                        // A terminal HTTP failure avoids fabricated model output and provider retries.
+                        request.respond(tiny_http::Response::empty(401))
+                            .context("send terminal loopback HTTP 401")?;
+                    }
+                }
+                if stopped.load(Ordering::Acquire) { break; }
+                let Some(request) = server.recv_timeout(Duration::from_millis(100))? else { continue };
+                count.fetch_add(1, Ordering::AcqRel);
+                anyhow::ensure!(request.method() == &tiny_http::Method::Post
+                    && request.url() == "/classify", "unexpected provider request");
+                anyhow::ensure!(request.headers().iter().any(|header|
+                    header.field.equiv("Authorization")
+                        && header.value.as_str() == "Bearer synthetic-native-stop-key"),
+                    "synthetic provider authentication missing");
+                held.push(request);
+                let _ = send.send(());
+            }
+            Ok(())
+        });
+        Ok(Self { endpoint, calls, release, stop, received, worker: Some(worker) })
+    }
+
+    fn finish(&mut self) -> anyhow::Result<()> {
+        self.release.store(true, std::sync::atomic::Ordering::Release);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| anyhow::anyhow!("loopback provider panicked"))??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for HeldClassifyProvider {
+    fn drop(&mut self) {
+        self.release.store(true, std::sync::atomic::Ordering::Release);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            match worker.join() {
+                Ok(Ok(())) => {},
+                other => eprintln!("loopback provider cleanup failed: {other:?}"),
+            }
+        }
+    }
+}
+
+fn stop_native_post(url: &str, request: &Value) -> anyhow::Result<(u16, Value)> {
+    let response = match ureq::AgentBuilder::new().try_proxy_from_env(false).build()
+        .post(url).timeout(Duration::from_secs(90))
+        .set("X-Respire-Lifecycle", "coordinator-v1").send_json(request.clone()) {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => return Err(error.into()),
+    };
+    Ok((response.status(), response.into_json()?))
+}
+
+fn stop_native_worker_identity(pid: u32) -> anyhow::Result<Option<Value>> {
+    #[cfg(windows)]
+    {
+        return Ok(respire_spawn::process_identity(pid)?.map(|identity|
+            json!({"birth":identity.birth,"image":identity.executable})));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let fields: Vec<_> = stat[stat.rfind(')').context("worker stat name missing")? + 1..]
+            .split_whitespace().collect();
+        if fields.first() == Some(&"Z") { return Ok(None); }
+        let image = match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(image) => image,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        return Ok(Some(json!({"birth":fields.get(19).context("worker birth missing")?,
+            "parent":fields.get(1).context("worker parent missing")?.parse::<u32>()?,"image":image})));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let read = |field: &str| -> anyhow::Result<Option<String>> {
+            let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", field]).output()?;
+            if !output.status.success() { return Ok(None); }
+            let value = String::from_utf8(output.stdout)?.trim().to_owned();
+            Ok((!value.is_empty()).then_some(value))
+        };
+        let Some(birth) = read("lstart=")? else { return Ok(None) };
+        let Some(image) = read("comm=")? else { return Ok(None) };
+        let Some(parent) = read("ppid=")? else { return Ok(None) };
+        return Ok(Some(json!({"birth":birth,"parent":parent.parse::<u32>()?,"image":image})));
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    anyhow::bail!("native worker identity is unsupported on this target")
+}
+
+impl Fixture {
+    fn start_standalone_for_stop(&mut self) -> anyhow::Result<Value> {
+        anyhow::ensure!(self.child.is_none(), "standalone fixture already running");
+        let template = self.command(&[]);
+        let mut command = Command::new(&self.runtime);
+        for (name, value) in template.get_envs() {
+            match value { Some(value) => { command.env(name, value); }, None => { command.env_remove(name); } }
+        }
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+            command.env_remove(name);
+        }
+        let root = self.home.path().join("data");
+        self.child = Some(command.args(["serve", "--host", "127.0.0.1", "--port", &self.port.to_string(),
+            "--data-dir", root.to_str().context("fixture root is not UTF-8")?])
+            .current_dir(self.home.path())
+            .env("TYPESAFE_API_KEY", "synthetic-native-stop-key")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .stdout(std::fs::File::create(self.home.path().join("stop-runtime.stdout"))?)
+            .stderr(std::fs::File::create(self.home.path().join("stop-runtime.stderr"))?).spawn()?);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            anyhow::ensure!(self.child.as_mut().context("runtime child missing")?.try_wait()?.is_none(),
+                "standalone Runtime exited before readiness");
+            if let Ok(health) = self.standalone_stop_health() {
+                if health["store_ready"] == true { return Ok(health); }
+            }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "standalone Runtime readiness timed out");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn standalone_stop_health(&self) -> anyhow::Result<Value> {
+        let health: Value = ureq::AgentBuilder::new().try_proxy_from_env(false).build()
+            .get(&format!("http://127.0.0.1:{}/api/health", self.port))
+            .timeout(Duration::from_secs(3)).call()?.into_json()?;
+        let pid = self.child.as_ref().context("runtime child missing")?.id();
+        anyhow::ensure!(pid != std::process::id() && health["pid"] == pid, "unexpected Runtime process");
+        for field in ["image_path", "exe"] {
+            anyhow::ensure!(Path::new(health[field].as_str().context("Runtime image missing")?)
+                .canonicalize()? == self.runtime, "standalone Runtime image mismatch");
+        }
+        let root = self.home.path().join("data").canonicalize()?;
+        for field in ["installation_root", "data_dir"] {
+            anyhow::ensure!(Path::new(health[field].as_str().context("Runtime root missing")?)
+                .canonicalize()? == root, "standalone Runtime root mismatch");
+        }
+        Ok(health)
+    }
+
+    fn assert_standalone_stop_lock_held(&self) -> anyhow::Result<()> {
+        let owner = self.child.as_ref().context("Runtime owner missing")?.id();
+        anyhow::ensure!(owner != std::process::id(), "lock check must run outside the Runtime process");
+        match respire::lock::LibraryLock::acquire(&self.home.path().join("data"), Duration::from_millis(100)) {
+            Ok(_) => anyhow::bail!("Runtime released its library lock before business cleanup"),
+            Err(error) => anyhow::ensure!(error.to_string().starts_with("memory library still locked after "),
+                "library lock check failed without proving contention: {error:#}"),
+        }
+        Ok(())
+    }
+
+    fn finish_standalone_stop(&mut self, health: &Value, operation: &Value, forced: bool) -> anyhow::Result<Value> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = self.child.as_mut().context("runtime child missing")?.try_wait()? { break status; }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "Runtime did not finish native stop");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        self.child.take();
+        assert_eq!(status.code(), Some(if forced { 1 } else { 0 }));
+        let receipt: Value = serde_json::from_slice(&std::fs::read(self.home.path().join("data/runtime")
+            .join(format!("stop-{}.json", health["instance_id"].as_str().context("instance missing")?)))?)?;
+        assert_eq!(receipt["schema_version"], 1);
+        assert_eq!(receipt["protocol_version"], 1);
+        assert_eq!(receipt["operation_id"], *operation);
+        for key in ["installation_id", "instance_id", "pid", "process_start_id", "image_path", "image_sha256", "runtime_version", "account_id", "generation"] {
+            assert_eq!(receipt[key], health[key], "final stop identity changed: {key}");
+        }
+        assert_eq!(receipt["state"], if forced { "forced_timeout" } else { "drained" });
+        match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", self.port).parse()?, Duration::from_secs(2)) {
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
+            other => anyhow::bail!("stopped listener did not refuse a fresh connection: {other:?}"),
+        }
+        // This harness process is distinct from the Runtime owner; use the actual file-lock API.
+        let ownership = respire::lock::LibraryLock::acquire(&self.home.path().join("data"), Duration::from_secs(1))?;
+        drop(ownership);
+        Ok(receipt)
+    }
+}
+
+#[test]
+fn native_stop_waits_and_explicit_force_reaps_real_core_without_replay() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    for forced in [false, true] {
+        let mut fixture = Fixture::new()?;
+        let mut memory = entry("native-stop-source", "synthetic-diary", "Native classification source", "Synthetic native stop evidence");
+        memory.parent_id.clear();
+        memory.importance = "important".into();
+        fixture.seed(&memory, false)?;
+        let before = serde_json::to_value(fixture.store()?.all(true)?)?;
+        let health = fixture.start_standalone_for_stop()?;
+        assert!(health["managed_id"].is_null(), "standalone case must not bypass a lifecycle coordinator");
+        let mut provider = HeldClassifyProvider::new()?;
+        let rpc_url = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
+        let stop_url = format!("http://127.0.0.1:{}/api/runtime/stop", fixture.port);
+        let scope = json!({"account_id":health["account_id"],"instance_id":health["instance_id"],"generation":health["generation"]});
+        let business_operation = format!("native-stop-classify-{forced}");
+        let request = json!({"v":1,"id":"native-stop-original","method":"cli.exec",
+            "operation_id":business_operation,"idempotency_key":business_operation,"scope":scope,
+            "args":["--json","classify","--backend","jev","--api-base",provider.endpoint,"--limit","1","--samples","1"]});
+        let (url, original) = (rpc_url.clone(), request.clone());
+        let business = std::thread::spawn(move || stop_native_post(&url, &original));
+        provider.received.recv_timeout(Duration::from_secs(30))
+            .context("actual SDK classification did not reach the loopback provider")?;
+        let io_started = std::time::Instant::now();
+        let active = fixture.standalone_stop_health()?;
+        assert!(active["control"]["admitted"].as_array().context("admission list missing")?.iter()
+            .any(|item| item["operation_id"] == business_operation));
+        let worker = &active["inference"];
+        assert!(worker["worker_pending_calls"].as_u64().is_some_and(|count| count > 0));
+        assert!(worker["worker_call_deadline_secs"].as_u64().is_some_and(|seconds| seconds >= 30),
+            "a short Core fault-test deadline must not substitute for explicit stop force");
+        assert!(worker["worker_host_callbacks_active"].as_u64().is_some_and(|count| count > 0));
+        assert_eq!(worker["worker_retired"], false);
+        assert_eq!(worker["worker_reaped"], false);
+        let worker_pid = u32::try_from(worker["worker_pid"].as_u64().context("actual Core worker PID missing")?)?;
+        let worker_identity = stop_native_worker_identity(worker_pid)?.context("actual Core worker was not live")?;
+        assert_eq!(Path::new(worker_identity["image"].as_str().context("worker OS image missing")?).canonicalize()?, fixture.runtime);
+        if let Some(parent) = worker_identity.get("parent") { assert_eq!(*parent, health["pid"]); }
+        fixture.assert_standalone_stop_lock_held()?;
+        std::thread::sleep(Duration::from_millis(4200));
+        assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+        assert!(!business.is_finished(), "real business completed before stop");
+        let business_before_stop_ms = io_started.elapsed().as_millis();
+        assert!(business_before_stop_ms > 4000);
+        let identity = json!({"installation_id":health["installation_id"],"instance_id":health["instance_id"],
+            "account_id":health["account_id"],"generation":health["generation"]});
+        let (status, accepted) = stop_native_post(&stop_url, &identity)?;
+        assert_eq!(status, 200);
+        assert_eq!(accepted["state"], "accepted");
+        assert!(accepted["deadline_ms"].is_null() && accepted["timeout_state"].is_null());
+        let operation = accepted["operation_id"].clone();
+        anyhow::ensure!(operation.as_str().is_some_and(|id| !id.is_empty()), "stop operation missing");
+        let accepted_at = std::time::Instant::now();
+        let mut force_requests = Vec::new();
+        let held_health;
+        if forced {
+            let mut force = identity.clone();
+            force["force"] = json!(true);
+            force["operation_id"] = operation.clone();
+            for key in ["installation_id", "instance_id", "account_id", "generation", "operation_id"] {
+                let mut stale = force.clone();
+                stale[key] = if key == "generation" { json!(0) } else { json!("stale-stop-target") };
+                assert_eq!(stop_native_post(&stop_url, &stale)?.0, 409);
+                assert!(fixture.standalone_stop_health()?["inference"]["worker_retired"] == false);
+                assert!(stop_native_post(&stop_url, &identity)?.1["deadline_ms"].is_null());
+            }
+            let mut missing = force.clone();
+            missing.as_object_mut().context("force body missing")?.remove("operation_id");
+            assert_eq!(stop_native_post(&stop_url, &missing)?.0, 409);
+            assert!(stop_native_post(&stop_url, &identity)?.1["deadline_ms"].is_null());
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let mut previous_ms = 4000;
+            let mut request_ids = std::collections::HashSet::new();
+            loop {
+                let (status, response) = stop_native_post(&stop_url, &force)?;
+                assert_eq!(status, 200);
+                assert_eq!(response["operation_id"], operation);
+                assert_eq!(response["state"], "accepted");
+                assert_eq!(response["timeout_state"], "forced_timeout");
+                assert_ne!(response["request_id"], accepted["request_id"]);
+                let remaining = response["deadline_ms"].as_u64().context("force deadline missing")?;
+                assert!(remaining <= previous_ms, "repeated force extended the grace period");
+                previous_ms = remaining;
+                assert!(request_ids.insert(response["request_id"].as_str().context("force request ID missing")?.to_owned()));
+                force_requests.push(response);
+                let observed = fixture.standalone_stop_health()?;
+                let retired = &observed["inference"]["retired_worker"];
+                if retired["worker_reaped"] == true {
+                    assert_eq!(retired["worker_pid"], worker_pid);
+                    assert_eq!(retired["worker_retired"], true);
+                    assert!(observed["inference"]["host_transport_callbacks_active"].as_u64().is_some_and(|count| count > 0));
+                    assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+                    held_health = observed;
+                    break;
+                }
+                anyhow::ensure!(std::time::Instant::now() < deadline, "repeated force prevented actual worker retirement");
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(4200));
+            let pending = fixture.standalone_stop_health()?;
+            assert_eq!(pending["control"]["state"], "draining");
+            assert_eq!(pending["inference"]["worker_pid"], worker_pid);
+            assert_eq!(pending["inference"]["worker_retired"], false);
+            assert_eq!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
+            assert!(accepted_at.elapsed() > Duration::from_secs(4));
+            held_health = pending;
+        }
+        let business_held_after_stop_ms = accepted_at.elapsed().as_millis();
+        assert!(!business.is_finished(), "host callback was silently cancelled");
+        fixture.assert_standalone_stop_lock_held()?;
+        let mut replay = request.clone();
+        replay["id"] = json!("native-stop-same-key-retry");
+        let (_, replayed) = stop_native_post(&rpc_url, &replay)?;
+        assert_eq!(replayed["code"], "request_in_progress");
+        assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        provider.release.store(true, Ordering::Release);
+        let (_, result) = business.join().map_err(|_| anyhow::anyhow!("native business client panicked"))??;
+        assert_eq!(result["id"], request["id"]);
+        assert_eq!(result["operation_id"], business_operation);
+        if forced { assert_eq!(result["ok"], false); }
+        let receipt = fixture.finish_standalone_stop(&health, &operation, forced)?;
+        if forced {
+            let unfinished = receipt["unfinished"].as_array().context("forced unfinished list missing")?;
+            assert_eq!(unfinished.iter().filter(|item| item["operation_id"] == business_operation).count(), 1);
+            assert!(unfinished.iter().any(|item| item["operation_id"] == business_operation && item["result"] == "unknown"));
+            assert!(unfinished.iter().all(|item| item["result"] == "unknown" || item["result"] == "aborted"));
+        } else { assert_eq!(receipt["unfinished"], json!([])); }
+        assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        assert_eq!(serde_json::to_value(fixture.store()?.all(true)?)?, before, "classification changed stored memory");
+        let restarted = fixture.start_standalone_for_stop()?;
+        assert_ne!(restarted["instance_id"], health["instance_id"]);
+        replay["id"] = json!("native-stop-original-scope-after-restart");
+        let (_, stale) = stop_native_post(&rpc_url, &replay)?;
+        assert_eq!(stale["code"], "scope_mismatch");
+        assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        let restart_identity = json!({"installation_id":restarted["installation_id"],"instance_id":restarted["instance_id"],
+            "account_id":restarted["account_id"],"generation":restarted["generation"]});
+        let (_, stopped) = stop_native_post(&stop_url, &restart_identity)?;
+        let restarted_receipt = fixture.finish_standalone_stop(&restarted, &stopped["operation_id"], false)?;
+        provider.finish()?;
+        assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        eprintln!("NATIVE_STOP_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
+            "startup_mode":"standalone","forced":forced,"passed":true,"runtime_identity":health,
+            "worker_identity":worker_identity,"active_health":active,"held_health":held_health,
+            "business_before_stop_ms":business_before_stop_ms,"business_held_after_stop_ms":business_held_after_stop_ms,
+            "accepted":accepted,"force_requests":force_requests,"business_result":result,
+            "final_receipt":receipt,"provider_http_status":401,"provider_requests":provider.calls.load(Ordering::Acquire),
+            "same_key_result":replayed,"stale_scope_result":stale,"restarted_receipt":restarted_receipt}));
+    }
+    Ok(())
+}
