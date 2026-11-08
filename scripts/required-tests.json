@@ -23,7 +23,7 @@
       "id": "runtime.mcp-initialize-tools-list",
       "area": "runtime-business-mcp",
       "status": "missing",
-      "reason": "Handler-only initialize/error assertions; independent Runtime process and real tools/list/business context remain uncovered.",
+      "reason": "Real-process MCP initialization, tools/list and scoped status assertions are wired into native release smoke; frozen-candidate native execution reports remain absent.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -40,6 +40,17 @@
           "job": "workspace-tests",
           "command_fragment": "cargo test --workspace --locked",
           "scope": "Handler-only initialize/error assertions; independent Runtime process and real tools/list/business context remain uncovered."
+        }
+      ],
+      "partial_asset_suite": [
+        {
+          "file": "scripts/runtime-mcp-probe.mjs",
+          "test": "runRuntimeMcpProbe",
+          "command": "node scripts/smoke-runtime-release.mjs",
+          "coverage": "real-artifact",
+          "workflow": ".github/workflows/release.yml",
+          "job": "native-regression",
+          "scope": "Initialize, catalog, real status envelope and unchanged process identity. No full G1 or memory write/read acceptance."
         }
       ]
     },

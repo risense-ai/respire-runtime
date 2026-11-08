@@ -4,6 +4,7 @@ import {spawn, execFileSync} from 'node:child_process';
 import {chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {isAbsolute, join, relative, resolve, sep, win32} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {runRuntimeMcpProbe} from './runtime-mcp-probe.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function normalizedPath(value, platform = process.platform) {
@@ -216,7 +217,7 @@ const reportPath = resolve('smoke-report', `runtime-smoke-${target}.json`);
 const report = {target, version, source_commit: metadata.source_commit,
   run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
   archive_sha256: metadata.archive_sha256, binary_sha256: metadata.binary_sha256,
-  coverage: ['complete-release-payload', 'os-bound-startup-health', 'scoped-model-settings-no-assets', 'bad-client-config-rejection-and-recovery', 'normal-stop-final-receipt'],
+  coverage: ['complete-release-payload', 'os-bound-startup-health', 'real-mcp-initialize-tools-status', 'scoped-model-settings-no-assets', 'bad-client-config-rejection-and-recovery', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
 try {
   const tar = archiveTool(process.platform, process.env.SystemRoot);
@@ -311,6 +312,7 @@ try {
   assert.match(health.instance_id ?? '', /^[A-Za-z0-9_-]{1,128}$/);
   assert.ok(health.installation_id && health.account_id && health.process_start_id);
   assert.ok(Number.isSafeInteger(health.generation) && health.generation > 0);
+  report.mcp = await runRuntimeMcpProbe(endpoint, version, health);
   // Settings must commit without model assets; a self-waiting config lock must time out, not pass health-only smoke.
   assert.deepEqual(readdirSync(modelDir), []);
   report.model_settings = {};

@@ -59,6 +59,8 @@ jobs:
         run: node scripts/test-required-tests.mjs
       - name: Check native release smoke response assertions
         run: node scripts/smoke-runtime-release.mjs --self-check
+      - name: Reject invalid MCP execution evidence
+        run: node --test scripts/test-runtime-mcp-probe.mjs
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Run the Rust contract consumer tests
         run: cargo test -p respire_protocol --locked
