@@ -3,6 +3,7 @@ import {createHash} from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 // This producer implements two suites only. Other registry entries remain missing.
@@ -12,6 +13,11 @@ export const REQUIRED_CASES = {
     'invalid-client-config-bytes-preserved', 'inference-settings-preserved-on-rejection',
     'scoped-recovery-preserves-inference-settings'],
 };
+export const BUSINESS_CASES = {
+  'runtime.business-memory-write-read': ['diary_identity::remember_public_payload_covers_created_appended_and_merged'],
+  'runtime.idempotency-same-fingerprint-once': ['diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once'],
+  'runtime.idempotency-conflict': ['diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once'],
+};
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const read = path => {
   const stat = lstatSync(path);
@@ -20,7 +26,7 @@ const read = path => {
 };
 const json = path => JSON.parse(read(path));
 const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n', {flag: 'wx'});
-function context() {
+export function context() {
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
   assert.ok(['linux', 'darwin'].includes(process.env.G1_NATIVE_PLATFORM));
@@ -181,9 +187,16 @@ function bundle() {
   let original;
   const rawIds = new Set();
   const rawHashes = new Set();
-  for (const target of targets) {
+  const parts = targets.map(target => ({target, cases: REQUIRED_CASES,
+    part: `required-tests-report-part-${target}`, job: `g1-native-smoke (${target})`, raw: `required-tests-raw-runtime-native-${target}`}));
+  assert.ok(targets.includes('x86_64-unknown-linux-gnu'), 'Business evidence requires the actual native Linux leg');
+  parts.push({target: 'x86_64-unknown-linux-gnu', cases: BUSINESS_CASES,
+    part: 'required-tests-report-business-x86_64-unknown-linux-gnu', job: 'g1-native-business',
+    raw: 'required-tests-raw-runtime-business-x86_64-unknown-linux-gnu'});
+  for (const part of parts) {
+    const {target} = part;
     assert.match(target, /^[a-z0-9_-]+$/);
-    const directory = join('g1-parts', `required-tests-report-part-${target}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
+    const directory = join('g1-parts', `${part.part}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
     const bytes = read(join(directory, 'candidate.json'));
     assert.equal(hash(bytes), expectedHash);
     if (original) assert.ok(bytes.equals(original), 'Every part must contain identical frozen candidate bytes');
@@ -191,10 +204,10 @@ function bundle() {
     const candidate = JSON.parse(bytes);
     assert.equal(candidate.components.runtime.source_sha, process.env.GITHUB_SHA);
     const files = readdirSync(join(directory, 'reports'));
-    assert.equal(files.length, Object.keys(REQUIRED_CASES).length);
+    assert.equal(files.length, Object.keys(part.cases).length);
     let rawId;
     let rawHash;
-    for (const [id, names] of Object.entries(REQUIRED_CASES)) {
+    for (const [id, names] of Object.entries(part.cases)) {
       const name = `${id}-${target}.json`;
       assert.ok(files.includes(name));
       const reportBytes = read(join(directory, 'reports', name));
@@ -202,11 +215,14 @@ function bundle() {
       for (const [key, expected] of Object.entries({schema: 2, test_id: id, target, status: 'passed',
         coverage: 'real-artifact', source_sha: process.env.GITHUB_SHA, repository: process.env.GITHUB_REPOSITORY,
         run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, candidate_sha256: expectedHash,
-        job_name: `g1-native-smoke (${target})`,
-        artifact_name: `required-tests-raw-runtime-native-${target}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`})) {
+        job_name: part.job,
+        artifact_name: `${part.raw}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`})) {
         assert.equal(String(report[key]), String(expected));
       }
       assert.deepEqual(report.actual_native_sdk, candidate.components.runtime.artifacts[target].native_sdk);
+      if (part.cases === BUSINESS_CASES) {
+        assert.deepEqual(report.actual_cli_native_sdk, candidate.components.cli.artifacts[target].native_sdk);
+      }
       assert.deepEqual(report.cases.map(item => item.name).sort(), [...names].sort());
       assert.ok(report.cases.every(item => item.status === 'passed'));
       assert.ok(Number.isSafeInteger(report.artifact_id) && report.artifact_id > 0);
@@ -224,8 +240,10 @@ function bundle() {
   }
   writeFileSync(join(output, 'candidate.json'), original, {flag: 'wx'});
 }
-const command = process.argv[2];
-if (command === 'run') run();
-else if (command === 'report') report();
-else if (command === 'bundle') bundle();
-else throw new Error('usage: produce-runtime-g1-smoke.mjs run|report|bundle');
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const command = process.argv[2];
+  if (command === 'run') run();
+  else if (command === 'report') report();
+  else if (command === 'bundle') bundle();
+  else throw new Error('usage: produce-runtime-g1-smoke.mjs run|report|bundle');
+}

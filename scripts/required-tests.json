@@ -11,7 +11,7 @@
       "id": "runtime.business-memory-write-read",
       "area": "runtime-business-mcp",
       "status": "missing",
-      "reason": "The cross-repository full business fixture executes public remember/show against an independent Runtime with seeded account/model fixtures; complete frozen-candidate native execution reports remain absent.",
+      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
       "partial_source_suite": [
         {
           "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
@@ -26,7 +26,34 @@
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "diary_identity::remember_public_payload_covers_created_appended_and_merged"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "remember_public_payload_covers_created_appended_and_merged",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::remember_public_payload_covers_created_appended_and_merged -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-business",
+        "job_name": "g1-native-business"
+      }
     },
     {
       "id": "runtime.mcp-initialize-tools-list",
@@ -79,11 +106,13 @@
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl"
       ],
-      "source_suite": {
-        "test": "runRuntimeMcpProbe",
-        "command": "node scripts/smoke-runtime-release.mjs",
-        "file": "scripts/runtime-mcp-probe.mjs"
-      },
+      "source_suite": [
+        {
+          "file": "scripts/produce-runtime-g1-smoke.mjs",
+          "test": "scripts/smoke-runtime-release.mjs",
+          "command": "node scripts/smoke-runtime-release.mjs"
+        }
+      ],
       "evidence": {
         "command_fragment": "node scripts/produce-runtime-g1-smoke.mjs run",
         "workflow": ".github/workflows/ci.yml",
@@ -167,7 +196,7 @@
       "id": "runtime.idempotency-same-fingerprint-once",
       "area": "idempotency-bad-config",
       "status": "missing",
-      "reason": "The full business fixture asserts real concurrent same-key RPCs, completed replay, one additional encrypted record and public decrypted content; complete frozen-candidate native reports remain missing.",
+      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -192,13 +221,40 @@
           "coverage": "source-test",
           "scope": "Independent Runtime RPC with two concurrent same-key requests, completed replay, exact record-count increment and public content check. Executed by the separate full business harness, not workspace --no-run compilation."
         }
-      ]
+      ],
+      "required_cases": [
+        "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-business",
+        "job_name": "g1-native-business"
+      }
     },
     {
       "id": "runtime.idempotency-conflict",
       "area": "idempotency-bad-config",
       "status": "missing",
-      "reason": "The full business fixture rejects changed arguments on the same key without another write or changed decrypted content. Full method/parent-operation/lifecycle/protocol/scope and canonical model-JSON fingerprint variants, plus frozen native reports, remain missing.",
+      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -223,7 +279,34 @@
           "coverage": "source-test",
           "scope": "Real RPC changed-arguments idempotency_conflict; stored record count and publicly decrypted original content remain unchanged. Other fingerprint dimensions and final frozen reports are not covered."
         }
-      ]
+      ],
+      "required_cases": [
+        "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-business",
+        "job_name": "g1-native-business"
+      }
     },
     {
       "id": "runtime.client-json-bad-config",
@@ -264,11 +347,13 @@
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl"
       ],
-      "source_suite": {
-        "test": "assertBadConfigResponse",
-        "command": "node scripts/smoke-runtime-release.mjs",
-        "file": "scripts/smoke-runtime-release.mjs"
-      },
+      "source_suite": [
+        {
+          "file": "scripts/produce-runtime-g1-smoke.mjs",
+          "test": "scripts/smoke-runtime-release.mjs",
+          "command": "node scripts/smoke-runtime-release.mjs"
+        }
+      ],
       "evidence": {
         "command_fragment": "node scripts/produce-runtime-g1-smoke.mjs run",
         "workflow": ".github/workflows/ci.yml",
