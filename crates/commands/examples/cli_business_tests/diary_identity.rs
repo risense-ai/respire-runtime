@@ -2443,19 +2443,52 @@ impl Client2OwnedStopFixture {
             anyhow::ensure!(Path::new(health[field].as_str().context("Client2-owned root missing")?).canonicalize()? == root,
                 "Client2-owned scope root mismatch");
         }
-        let expected = if backend { &fixture.runtime } else {
-            Path::new(fixture.cli.as_path())
-        };
-        // Legacy host uses the original Client2-selected Runtime image even
-        // though its process implements only the compatibility coordinator.
-        let expected = if backend { expected.to_path_buf() } else {
-            let selected: Value = serde_json::from_slice(&std::fs::read(root.join("client2/runtime.json"))?)?;
-            root.join("client2/runtime").join(selected["version"].as_str().context("Client2 version missing")?)
-                .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?
-        };
-        anyhow::ensure!(Path::new(health["exe"].as_str().context("Client2-owned image missing")?).canonicalize()? == expected,
-            "Client2-owned image mismatch");
+        // Original Go Manager starts its selected Runtime directly. Both health
+        // representations identify that same Runtime, not a separate CLI host.
+        let expected = self.runtime_image()?;
+        for field in ["exe", "image_path"] {
+            anyhow::ensure!(Path::new(health[field].as_str().context("Client2-owned image missing")?).canonicalize()? == expected,
+                "Client2-owned image mismatch");
+        }
         Ok(health)
+    }
+
+    fn runtime_image(&self) -> anyhow::Result<PathBuf> {
+        let root = self.owned()?.fixture()?.home.path().join("data");
+        let selected: Value = serde_json::from_slice(&std::fs::read(root.join("client2/runtime.json"))?)?;
+        Ok(root.join("client2/runtime").join(selected["version"].as_str().context("Client2 version missing")?)
+            .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?)
+    }
+
+    fn observe_actor(&self, legacy: &Value, modern: &Value) -> anyhow::Result<(u32, Value)> {
+        use sha2::{Digest, Sha256};
+        // The selected Runtime itself implements both legacy and modern health.
+        // A CLI coordinator is a different lane and must not satisfy this one.
+        anyhow::ensure!(legacy.get("compatibility_host").is_none()
+            && modern.get("compatibility_host").is_none(), "Client2-owned fixture observed a CLI coordinator");
+        for key in ["pid", "instance_id", "process_start_id", "image_path", "image_sha256",
+            "runtime_version", "installation_id", "account_id", "generation", "installation_root", "data_dir"] {
+            anyhow::ensure!(!legacy[key].is_null() && legacy[key] == modern[key],
+                "Client2-owned health representations identify different actors");
+        }
+        let pid = u32::try_from(modern["pid"].as_u64().context("Client2-owned Runtime PID missing")?)?;
+        anyhow::ensure!(pid > 0 && pid != std::process::id(), "Client2-owned Runtime collapsed into harness");
+        let identity = stop_native_worker_identity(pid)?.context("actual Client2-owned Runtime missing")?;
+        let image = self.runtime_image()?;
+        anyhow::ensure!(Path::new(identity["image"].as_str().context("Client2-owned OS image missing")?).canonicalize()? == image,
+            "Client2-owned Runtime OS image mismatch");
+        let prefix = if cfg!(windows) { "windows-filetime-" } else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
+        assert_eq!(modern["process_start_id"], format!("{prefix}{}", identity["birth"].as_str().context("Client2-owned OS birth missing")?));
+        let root = self.owned()?.fixture()?.home.path().join("data");
+        let selected: Value = serde_json::from_slice(&std::fs::read(root.join("client2/runtime.json"))?)?;
+        let installed: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
+        assert_eq!(selected["version"], installed["version"]);
+        assert_eq!(modern["runtime_version"], selected["version"]);
+        let actual_hash = format!("{:x}", Sha256::digest(std::fs::read(&image)?));
+        assert_eq!(modern["image_sha256"], actual_hash);
+        assert_eq!(selected["sha256"], actual_hash);
+        assert_eq!(installed["sha256"], actual_hash);
+        Ok((pid, identity))
     }
 
     fn cleanup(&mut self) -> anyhow::Result<()> {
@@ -2558,24 +2591,11 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
         client2.observed_host = Some(host.clone());
         let backend = client2.health(true)?;
         checkpoint("health_bound");
-        let host_pid = u32::try_from(host["pid"].as_u64().context("legacy host PID missing")?)?;
-        let backend_pid = u32::try_from(backend["pid"].as_u64().context("backend PID missing")?)?;
-        assert_ne!(host_pid, backend_pid);
-        let host_os = stop_native_worker_identity(host_pid)?.context("actual legacy host missing")?;
-        let backend_os = stop_native_worker_identity(backend_pid)?.context("actual backend missing")?;
-        client2.observed_actors.extend([(host_pid, host_os.clone()), (backend_pid, backend_os.clone())]);
-        assert_eq!(host["compatibility_host"], "client2-v0256");
-        assert_eq!(host["backend_pid"], backend["pid"]);
-        assert_eq!(host["backend_instance_id"], backend["instance_id"]);
-        assert_eq!(host["backend_process_start_id"], backend["process_start_id"]);
-        assert_eq!(host_os["birth"], host["host_birth"]);
-        assert_eq!(Path::new(host_os["image"].as_str().context("host OS image missing")?).canonicalize()?,
-            Path::new(host["exe"].as_str().context("host image missing")?).canonicalize()?);
-        assert_eq!(host["host_image_sha256"], format!("{:x}", Sha256::digest(std::fs::read(host["exe"].as_str().context("host image missing")?)?)));
-        assert_eq!(Path::new(backend_os["image"].as_str().context("backend OS image missing")?).canonicalize()?, client2.owned()?.fixture()?.runtime);
-        let prefix = if cfg!(windows) { "windows-filetime-" } else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
-        assert_eq!(backend["process_start_id"], format!("{prefix}{}", backend_os["birth"].as_str().context("backend OS birth missing")?));
-        assert_eq!(backend["image_sha256"], format!("{:x}", Sha256::digest(std::fs::read(&client2.owned()?.fixture()?.runtime)?)));
+        let (backend_pid, backend_os) = client2.observe_actor(&host, &backend)?;
+        // Keep both representation labels in raw evidence, with one actual actor.
+        let host_pid = backend_pid;
+        let host_os = backend_os.clone();
+        client2.observed_actors.push((backend_pid, backend_os.clone()));
         checkpoint("actors_bound");
         let mut provider = write.provider()?;
         let request = json!({"v":1,"id":uuid::Uuid::new_v4().to_string(),"method":"cli.exec",
@@ -2593,7 +2613,8 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
         let worker_pid = u32::try_from(active["inference"]["worker_pid"].as_u64().context("Core worker missing")?)?;
         let worker_os = stop_native_worker_identity(worker_pid)?.context("actual Core worker missing")?;
         client2.observed_actors.push((worker_pid, worker_os.clone()));
-        assert_eq!(Path::new(worker_os["image"].as_str().context("Core OS image missing")?).canonicalize()?, client2.owned()?.fixture()?.runtime);
+        assert_ne!(worker_pid, backend_pid, "Core worker must be separate from its Runtime owner");
+        assert_eq!(Path::new(worker_os["image"].as_str().context("Core OS image missing")?).canonicalize()?, client2.runtime_image()?);
         if let Some(parent) = worker_os.get("parent") { assert_eq!(*parent, json!(backend_pid)); }
         assert!(active["control"]["admitted"].as_array().context("admission missing")?.iter()
             .any(|item| item["operation_id"] == request["operation_id"]));
@@ -2734,19 +2755,19 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
         let recovered_host = client2.health(false)?;
         let recovered = client2.health(true)?;
         assert_ne!(recovered["instance_id"], backend["instance_id"]);
-        let recovered_host_pid = u32::try_from(recovered_host["pid"].as_u64().context("recovered host PID missing")?)?;
-        let recovered_pid = u32::try_from(recovered["pid"].as_u64().context("recovered backend PID missing")?)?;
-        let recovered_host_os = stop_native_worker_identity(recovered_host_pid)?.context("recovered host missing")?;
-        let recovered_os = stop_native_worker_identity(recovered_pid)?.context("recovered backend missing")?;
-        client2.observed_actors.extend([(recovered_host_pid, recovered_host_os.clone()), (recovered_pid, recovered_os.clone())]);
+        let (recovered_pid, recovered_os) = client2.observe_actor(&recovered_host, &recovered)?;
+        let recovered_host_pid = recovered_pid;
+        let recovered_host_os = recovered_os.clone();
+        client2.observed_actors.push((recovered_pid, recovered_os.clone()));
         assert_ne!(recovered_host_os, host_os); assert_ne!(recovered_os, backend_os);
         let recovered_worker = match recovered["inference"].get("worker_pid").context("recovered Core observation missing")? {
             Value::Null => None,
             value => {
                 let pid = u32::try_from(value.as_u64().context("recovered Core PID is invalid")?)?;
                 let identity = stop_native_worker_identity(pid)?.context("recovered Core worker not live")?;
+                assert_ne!(pid, recovered_pid, "recovered Core worker must be separate from its Runtime owner");
                 anyhow::ensure!(Path::new(identity["image"].as_str().context("recovered Core OS image missing")?).canonicalize()?
-                    == client2.owned()?.fixture()?.runtime, "recovered Core OS image mismatch");
+                    == client2.runtime_image()?, "recovered Core OS image mismatch");
                 if let Some(parent) = identity.get("parent") { assert_eq!(*parent, json!(recovered_pid)); }
                 client2.observed_actors.push((pid, identity.clone()));
                 Some((pid, identity))
@@ -2783,7 +2804,7 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
         checkpoint("cleanup_complete");
         checkpoint("complete");
         eprintln!("NATIVE_CLIENT2_STOP_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
-            "startup_mode":"client2-owned","case":mode,"business_sender":"modern-harness","stop_sender":"original-go-client2",
+            "startup_mode":"client2-owned","actor_lane":"same-image-runtime","case":mode,"business_sender":"modern-harness","stop_sender":"original-go-client2",
             "probe_sha256":probe_digest,"runtime_identity":backend,"legacy_host":host,
             "host_os_identity":host_os,"backend_os_identity":backend_os,"worker_os_identity":worker_os,
             "caller_timeout_ms":caller_timeout_ms,"runtime_compatibility_timeout_claimed":false,"after_caller_health":after_caller,
