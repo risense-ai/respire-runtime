@@ -1,5 +1,34 @@
 # G1 execution evidence v2
 
+## Source CI and explicit candidate acceptance
+
+Ordinary pull requests, pushes and manual runs without candidate inputs execute
+all existing source checks. A green source run reports **G1 not evaluated**.
+This applies to all ordinary PRs, including product changes; it is a change to
+merge acceptance, not a tool-path exemption. Source green does not certify a
+frozen candidate, backward compatibility, native acceptance or a release.
+
+Any nonempty candidate input selects candidate mode. All three existing inputs
+must be valid and supplied together on a manual run. Whitespace is invalid.
+`source_checks_only` cannot bypass source checks or candidate verification.
+The existing native smoke/business producers, frozen input artifact contract,
+SDK payload and original archive checks, exact current-run/attempt reports,
+strict verifier and full registry (including all eight targets) remain intact.
+Missing reports or failed/skipped candidate verification fail the aggregate.
+The currently implemented producer legs alone do not satisfy the full registry.
+
+Source-only mode requires every existing source check to succeed and the
+candidate verifier to be skipped. Explicit candidate mode continues to enforce
+the existing G1 contract described below; source green is not candidate evidence.
+
+The current 2.x DEV acceptance scope is defined by the workspace plan
+`Respire-2.x-dev-验收发布.md`: migrate existing databases safely, verify the
+current Core/Runtime/CLI/Client2 features, then recheck the actual DEV release
+assets. Historical mixed-client compatibility matrices and placeholder G1
+reports are not conditions for this release. Existing permissions, process
+identity, data integrity and resource cleanup checks remain required. This
+change does not alter release workflow permissions or private SDK credentials.
+
 This format is a contract, not a frozen candidate or an execution result.
 Candidate schema 1 and required-execution/v1 reports are rejected. The registry
 itself stays schema 1; every entry uses `report_schema: required-execution/v2`.
