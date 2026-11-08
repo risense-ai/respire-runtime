@@ -206,9 +206,9 @@ jobs:
         run: |
           set -euo pipefail
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("runtime/Cargo.toml", "rb"))["package"]["version"])')"
-          desktop_args=()
+          set --
           if [[ "$RUNTIME_TARGET" == x86_64-unknown-linux-gnu ]]; then
-            desktop_args=(--desktop-executable "$RUNNER_TEMP/legacy-desktop/respire")
+            set -- --desktop-executable "$RUNNER_TEMP/legacy-desktop/respire"
           fi
           python3 .cli-source/scripts/test-client2-launcher-compat.py \
             --cli .cli-source/target/debug/rsrs \
@@ -216,7 +216,7 @@ jobs:
             --runtime-version "$version" --client2-source .client2-source \
             --go "$(command -v go)" \
             --magpie-source .magpie-source --node "$(command -v node)" \
-            "${desktop_args[@]}" --report "$RUNNER_TEMP/joint-candidate-regression.json"
+            "$@" --report "$RUNNER_TEMP/joint-candidate-regression.json"
       - name: Preserve joint candidate results (not G1 evidence)
         if: always()
         uses: actions/upload-artifact@v4
