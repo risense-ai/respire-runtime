@@ -221,6 +221,11 @@ fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
     if let Some(destination) = migrated_destination(source_id)? {
         return Ok(json!({"state":"already_migrated","dir":destination}));
     }
+    // Windows admission-directory persistence has not yet been independently
+    // established for the power-loss model. Do not start new side effects when
+    // a lost admission could later be mistaken for an unattempted operation.
+    anyhow::ensure!(!cfg!(windows),
+        "new legacy migration is disabled on Windows pending durable admission validation; original data was preserved");
     let accounts = crate::service::accounts_root();
     if accounts.exists() {
         anyhow::ensure!(!std::fs::symlink_metadata(&accounts)?.file_type().is_symlink(),

@@ -162,7 +162,7 @@ pub(super) fn reject_conflicting_admission(home: &Path, original: Option<&HostMi
         let candidate = read_frames(home, &entry.path())?.context("migration intent disappeared")?;
         anyhow::ensure!(entry.path() == path(home, &candidate.original)?, "migration intent filename changed");
         if original.is_none_or(|original| candidate.original != *original)
-            && (candidate.original.source_id == source_id || candidate.original.account == account) {
+            && (candidate.original.source_id == source_id || candidate.original.account.eq_ignore_ascii_case(account)) {
             anyhow::ensure!(migration_control_result(&candidate.original)?.is_some(),
                 "another unfinished migration owns this source or account; recover its original operation");
         }
@@ -404,6 +404,8 @@ mod tests {
         assert!(admit_or_load(&home, &other, &profile).is_err());
         other.account = original.account.clone();
         other.source_id = "a".repeat(64);
+        assert!(admit_or_load(&home, &other, &profile).is_err());
+        other.account = original.account.to_ascii_uppercase();
         assert!(admit_or_load(&home, &other, &profile).is_err());
         assert!(migrate_profile_locked(&home, &original.source_id, &original.account, None).is_err());
         assert!(!path(&home, &other)?.exists());
