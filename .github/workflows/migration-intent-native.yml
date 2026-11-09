@@ -55,6 +55,7 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}"
           node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
       - name: Exercise real HKCU fence and journal failure models
-        run: cargo test --locked -p respire_app migration::intent:: -- --test-threads=1
+        run: |
+          cargo test --locked -p respire_app migration::intent:: -- --test-threads=1
       # Supplemental source-level native evidence only. This does not replace
       # process-interruption, installer, SDK, G1 or four-package regression gates.
