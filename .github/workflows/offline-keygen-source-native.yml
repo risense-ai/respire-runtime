@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 7be0ceedd17a6b2c6fa60076e60272c3bec8bb8b
+          ref: 72d4f30bb36f3aaf6d59994e58bdc8511b1c965c
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -81,7 +81,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           foreach ($engine in @('powershell.exe','pwsh')) {
-            foreach ($test in @('test-client2-focus-readiness.ps1','test-client2-diary-readback.ps1','test-client2-cleanup-identity.ps1','test-client2-gui-exit-code.ps1','test-client2-document-readiness.ps1','test-client2-document-descendants.ps1')) {
+            foreach ($test in @('test-client2-focus-readiness.ps1','test-client2-diary-readback.ps1','test-client2-cleanup-identity.ps1','test-client2-gui-exit-code.ps1','test-client2-document-readiness.ps1','test-client2-document-descendants.ps1','test-client2-focus-replacement.ps1')) {
               & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
               if ($LASTEXITCODE -ne 0) { throw "GUI fixture policy failed: $engine / $test" }
             }
