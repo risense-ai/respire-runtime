@@ -230,6 +230,7 @@ fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
     anyhow::ensure!(!profiles[selected].destination.exists(), "migration account already exists; nothing was overwritten");
     let staging_root = home.join(".rsrs-migration-staging");
     private_directory(&staging_root)?;
+    intent::reject_conflicting_admission(home, control, source_id, account)?;
     let mut admitted = match control {
         Some(original) => Some(intent::admit_or_load(home, original, &profiles[selected])?),
         None => None,
@@ -318,7 +319,7 @@ pub fn control_migrate_profile(
         match migration_control_result(original)? {
             Some(details) => (Outcome::Completed, details),
             None => match intent::load(&home, original)? {
-                Some(record) if record.phase == intent::Phase::Copying => {
+                Some(record) if record.phase == intent::Phase::Copying && !cfg!(windows) => {
                     crate::service::require_profile_change_host()?;
                     crate::service::ensure_writable()?;
                     anyhow::ensure!(!crate::service::off_mode(), "migration recovery is unavailable while memory is off");

@@ -81,36 +81,104 @@ fn validate(home: &Path, original: &HostMigrationOperation, record: &Intent) -> 
     Ok(())
 }
 
-pub(super) fn load(home: &Path, original: &HostMigrationOperation) -> Result<Option<Intent>> {
-    let path = path(home, original)?;
-    no_links(&path)?;
-    let metadata = match std::fs::symlink_metadata(&path) {
+fn read_frames(home: &Path, path: &Path) -> Result<Option<Intent>> {
+    no_links(path)?;
+    let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     anyhow::ensure!(metadata.is_file() && metadata.len() <= 64 * 1024, "invalid migration intent size or type");
     let mut bytes = Vec::new();
-    std::fs::File::open(&path)?.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() <= 64 * 1024, "migration intent exceeds its size limit");
-    let record: Intent = serde_json::from_slice(&bytes)?;
-    validate(home, original, &record)?;
-    Ok(Some(record))
+    std::fs::File::open(path)?.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 64 * 1024 && bytes.last() == Some(&b'\n'),
+        "migration intent is truncated or exceeds its size limit");
+    let mut previous: Option<Intent> = None;
+    for frame in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let record: Intent = serde_json::from_slice(frame)?;
+        validate(home, &record.original, &record)?;
+        if let Some(prior) = previous.as_ref() { transition(prior, &record)?; }
+        else { anyhow::ensure!(record.phase == Phase::Copying, "migration intent lacks admission"); }
+        previous = Some(record);
+    }
+    Ok(previous)
+}
+
+fn transition(previous: &Intent, next: &Intent) -> Result<()> {
+    anyhow::ensure!(previous.original == next.original && previous.source == next.source
+        && previous.session_digest == next.session_digest, "migration intent binding changed");
+    anyhow::ensure!(match (previous.phase, next.phase) {
+        (Phase::Copying, Phase::Copying) => true,
+        (Phase::Copying, Phase::Transforming) | (Phase::Transforming, Phase::Ready) => previous.stage == next.stage,
+        _ => false,
+    }, "migration intent phase regressed or changed its transformation stage");
+    Ok(())
+}
+
+pub(super) fn load(home: &Path, original: &HostMigrationOperation) -> Result<Option<Intent>> {
+    let record = read_frames(home, &path(home, original)?)?;
+    if let Some(record) = record.as_ref() { validate(home, original, record)?; }
+    Ok(record)
 }
 
 pub(super) fn save(home: &Path, record: &Intent) -> Result<()> {
+    use std::io::Write;
     validate(home, &record.original, record)?;
     let path = path(home, &record.original)?;
     no_links(&path)?;
-    private_directory(path.parent().context("migration intent has no parent")?)?;
-    write_json(&path, &serde_json::to_value(record)?)
+    let directory = path.parent().context("migration intent has no parent")?;
+    private_directory(directory)?;
+    // Admission directory creation must also survive a power loss on Unix.
+    #[cfg(unix)] { std::fs::File::open(home)?.sync_all()?; }
+    let prior = load(home, &record.original)?;
+    if let Some(prior) = prior.as_ref() { transition(prior, record)?; }
+    else { anyhow::ensure!(record.phase == Phase::Copying, "migration intent lacks admission"); }
+    let mut bytes = serde_json::to_vec(record)?;
+    bytes.push(b'\n');
+    let existing = if prior.is_some() { std::fs::metadata(&path)?.len() } else { 0 };
+    anyhow::ensure!(existing + bytes.len() as u64 <= 64 * 1024, "migration intent journal is full; retain it for recovery");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if prior.is_some() { options.append(true); } else { options.create_new(true); }
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    // Never replace this filename. FlushFileBuffers (Windows) / fsync (Unix)
+    // orders each appended phase before its side effects, without rename recovery.
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)] { std::fs::File::open(directory)?.sync_all()?; }
+    Ok(())
+}
+
+pub(super) fn reject_conflicting_admission(home: &Path, original: Option<&HostMigrationOperation>, source_id: &str, account: &str) -> Result<()> {
+    let directory = home.join(".rsrs-migration-intents");
+    no_links(&directory)?;
+    if !directory.exists() { return Ok(()); }
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let candidate = read_frames(home, &entry.path())?.context("migration intent disappeared")?;
+        anyhow::ensure!(entry.path() == path(home, &candidate.original)?, "migration intent filename changed");
+        if original.is_none_or(|original| candidate.original != *original)
+            && (candidate.original.source_id == source_id || candidate.original.account == account) {
+            anyhow::ensure!(migration_control_result(&candidate.original)?.is_some(),
+                "another unfinished migration owns this source or account; recover its original operation");
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn admit_or_load(home: &Path, original: &HostMigrationOperation, profile: &Profile) -> Result<Intent> {
     if let Some(record) = load(home, original)? {
+        // Until Windows directory-entry power-loss behavior is independently
+        // verified, an existing intent is evidence only, not replay authority.
+        anyhow::ensure!(!cfg!(windows), "automatic interrupted migration recovery is not enabled on Windows");
         verify_source(&record, profile)?;
         return Ok(record);
     }
+    reject_conflicting_admission(home, Some(original), &original.source_id, &original.account)?;
     no_links(&profile.source)?;
     let record = Intent {
         schema: 1, original: original.clone(), source: profile.source.canonicalize()?,
@@ -183,6 +251,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn copying_recovers_to_fresh_stage_and_retains_partial_snapshot() -> Result<()> {
         let isolate = crate::test_lock::Isolate::new()?;
         std::env::set_var("RSRS_DATA_DIR", isolate.path().canonicalize()?);
@@ -262,30 +331,84 @@ mod tests {
             assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Unknown);
             assert!(!profile.destination.exists());
             assert!(load(&home, &original)?.is_none());
+            admit_or_load(&home, &original, &profile)?;
+            let outcome = control_migrate_profile(&ownership, &original, true)?.outcome;
+            if cfg!(windows) {
+                assert!(outcome == Outcome::Unknown);
+                assert!(!profile.destination.exists());
+                return Ok(());
+            }
+            assert!(outcome == Outcome::Completed);
+            let receipt_before = std::fs::read(profile.destination.join(RECEIPT))?;
+            let intent_before = std::fs::read(path(&home, &original)?)?;
+            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Completed);
+            assert_eq!(std::fs::read(profile.destination.join(RECEIPT))?, receipt_before);
+            assert_eq!(std::fs::read(path(&home, &original)?)?, intent_before);
+            // A separate accepted operation exercises the non-replay phases.
+            original.operation_id = uuid::Uuid::new_v4().to_string();
+            original.key = original.operation_id.clone();
+            original.account = "second-intent-fixture".into();
+            original.fingerprint = hex::encode(Sha256::digest(original.fingerprint_bytes()?));
             let mut record = admit_or_load(&home, &original, &profile)?;
-            // Simulated durable phase records only; no transformation is executed here.
             for phase in [Phase::Transforming, Phase::Ready] {
                 record.phase = phase;
                 save(&home, &record)?;
                 let before = std::fs::read(path(&home, &original)?)?;
                 assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Unknown);
                 assert_eq!(std::fs::read(path(&home, &original)?)?, before);
-                assert!(!profile.destination.exists());
+                assert!(!crate::service::accounts_root().join(&original.account).exists());
             }
-            record.phase = Phase::Copying;
-            save(&home, &record)?;
-            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Completed);
-            let receipt_before = std::fs::read(profile.destination.join(RECEIPT))?;
-            let intent_before = std::fs::read(path(&home, &original)?)?;
-            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Completed);
-            assert_eq!(std::fs::read(profile.destination.join(RECEIPT))?, receipt_before);
-            assert_eq!(std::fs::read(path(&home, &original)?)?, intent_before);
             Ok(())
         })();
         for (name, value) in saved {
             match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
         }
         result
+    }
+
+
+    #[test]
+    fn append_journal_never_falls_back_after_torn_or_regressed_phase() -> Result<()> {
+        use std::io::Write;
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let (original, profile) = fixture(&home)?;
+        let mut record = admit_or_load(&home, &original, &profile)?;
+        record.phase = Phase::Transforming;
+        save(&home, &record)?;
+        record.phase = Phase::Copying;
+        assert!(save(&home, &record).is_err());
+        let mut file = std::fs::OpenOptions::new().append(true).open(path(&home, &original)?)?;
+        file.write_all(b"{\"schema\":1")?;
+        file.sync_all()?;
+        assert!(load(&home, &original).is_err());
+        assert!(admit_or_load(&home, &original, &profile).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn new_operation_cannot_take_an_unfinished_source_or_account() -> Result<()> {
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let (original, profile) = fixture(&home)?;
+        let mut record = admit_or_load(&home, &original, &profile)?;
+        record.phase = Phase::Transforming;
+        save(&home, &record)?;
+        let before = std::fs::read(path(&home, &original)?)?;
+        let mut other = original.clone();
+        other.operation_id = uuid::Uuid::new_v4().to_string();
+        other.key = other.operation_id.clone();
+        other.account = "different-account".into();
+        assert!(admit_or_load(&home, &other, &profile).is_err());
+        other.account = original.account.clone();
+        other.source_id = "a".repeat(64);
+        assert!(admit_or_load(&home, &other, &profile).is_err());
+        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, None).is_err());
+        assert!(!path(&home, &other)?.exists());
+        assert_eq!(std::fs::read(path(&home, &original)?)?, before);
+        Ok(())
     }
 
 }
