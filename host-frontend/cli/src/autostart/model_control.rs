@@ -133,7 +133,7 @@ pub(super) fn installed_model_runtime() -> Result<(PathBuf, crate::runtime_fetch
     Ok((binary, manifest))
 }
 
-pub(super) fn verify_model_owner(
+pub(in crate::autostart) fn verify_model_owner(
     health: &crate::net_rpc::Health, root: &Path, profile: &Path,
     managed: Option<&super::super::super::Registration>, binary: &Path,
     manifest: &crate::runtime_fetch::ManagedManifest, expected_account: Option<&str>,
