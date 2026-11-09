@@ -1498,7 +1498,11 @@ fn run(args: Cli) -> Result<()> {
                 || respire_client_host::env::var("RSRS_JSON")
                     .is_ok_and(|value| value == "1" || value == "true"),
         );
-        // Account control owns its recovery receipt; the legacy profile wrapper must not replay it.
+        // Runtime distinguishes legacy journals from operation-owned recovery.
+        // Recover only the former; account control must retain its original receipt.
+        if !runtime_policy::client_only() {
+            rpc::recover_legacy_login_before_account_control()?;
+        }
         match args.command.as_ref() {
             Some(Command::Keygen { pass, force }) => return run_keygen(pass.as_deref(), *force),
             Some(Command::Register {

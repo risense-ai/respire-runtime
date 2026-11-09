@@ -64,9 +64,18 @@ fn load(root: &Path) -> Result<Option<(Original, String)>> {
     std::fs::File::open(file)?.take(16385).read_to_end(&mut bytes)?;
     anyhow::ensure!(bytes.len() <= 16384, "offline keygen record exceeds bound");
     let record: Original=serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid offline keygen record"))?;
-    validate_record(&record,root)?;
+    // Existing evidence is bound to the OS canonical root (including Windows
+    // verbatim prefixes). Missing roots remain a read-only first-use probe.
+    let canonical_root = root.canonicalize()?;
+    no_links(&path(&canonical_root))?;
+    validate_record(&record,&canonical_root)?;
     Ok(Some((record,hash(&bytes))))
 }
+pub(crate) fn pending_for_selected_root() -> Result<bool> {
+    let (root, _) = respire_client_host::config::control_roots()?;
+    Ok(load(&root)?.is_some())
+}
+
 fn valid_digest(value:&str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -508,12 +517,57 @@ mod tests {
         assert_eq!(selected,root);
         assert!(!profile.exists());
         assert!(load(&root)?.is_none());
+        assert!(!pending_for_selected_root()?);
         prepare_account(true,"synthetic-user","https://example.invalid")?;
         prepare_account(false,"synthetic-user","https://example.invalid")?;
         assert!(!root.exists() && !profile.exists());
         assert_eq!(std::fs::read_dir(temp.path())?.count(),0);
         Ok(())
     }
+    #[test]
+    fn existing_pending_uses_canonical_root_without_accepting_a_foreign_binding() -> Result<()> {
+        let temp=tempfile::tempdir()?;
+        let canonical=temp.path().canonicalize()?;
+        #[cfg(not(windows))]
+        let lexical=canonical.clone();
+        #[cfg(windows)]
+        let lexical={
+            // Test-only spellings of one real root, including a verbatim TMP.
+            // Production authorization never strips prefixes or normalizes strings.
+            let value=canonical.to_str().context("synthetic root is not UTF-8")?;
+            if let Some(unc)=value.strip_prefix(r"\\?\UNC\") {
+                PathBuf::from(format!(r"\\{}",unc))
+            } else {
+                PathBuf::from(value.strip_prefix(r"\\?\").context("synthetic canonical root lacks verbatim prefix")?)
+            }
+        };
+        let record=original(&canonical);
+        save(&record,&mut None)?;
+        let (loaded,_)=load(&lexical)?.context("canonical pending unavailable")?;
+        assert_eq!(loaded.root,canonical);
+        #[cfg(windows)] assert_ne!(lexical,canonical);
+        let mut foreign=record.clone(); foreign.root=canonical.join("different-root");
+        std::fs::write(path(&lexical),serde_json::to_vec(&foreign)?)?;
+        assert!(load(&lexical).is_err());
+        std::fs::write(path(&lexical),b"invalid pending")?;
+        assert!(load(&lexical).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_pending_does_not_authorize_a_symlink_alias() -> Result<()> {
+        let temp=tempfile::tempdir()?;
+        let base=temp.path().canonicalize()?;
+        let root=base.join("real-root"); std::fs::create_dir(&root)?;
+        save(&original(&root),&mut None)?;
+        let alias=base.join("alias");
+        std::os::unix::fs::symlink(&root,&alias)?;
+        assert!(load(&alias).is_err());
+        assert!(reject_generic_recovery(&alias).is_err());
+        Ok(())
+    }
+
     #[test]
     fn journal_is_secret_free_exact_owner_and_cas_bound() -> Result<()> {
         let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;

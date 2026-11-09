@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 88c4592f2c329fe27baedfe8344c356b65abcb4c
+          ref: 425765753eb08b139dd1cc25ecbaf2a810396393
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -72,6 +72,8 @@ jobs:
           cargo test --locked -p respire_host_frontend --lib offline_keygen
           cargo test --locked -p respire_host_frontend --lib embedding::tests
           cargo test --locked -p respire_host_frontend --lib snapshot_control
+          cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
+          cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
       - name: Build exact Runtime source (not a published asset)
         env:
           RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
