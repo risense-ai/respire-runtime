@@ -60,6 +60,22 @@ impl AccountCoordinator {
         Self { host }
     }
 
+    /// Admit a new explicit account intent from the live original keygen owner.
+    /// The caller retains takeover; this independently queries the original Runtime receipt.
+    pub fn prepare_keygen_account(&self, takeover: &LibraryLock,
+        source: &crate::KeygenAccountTransfer, register: bool, user: &str, addr: &str,
+    ) -> Result<crate::KeygenAccountAdmission> {
+        crate::maintenance::prepare_keygen_account(takeover, Arc::clone(&self.host), source, register, user, addr)
+    }
+
+    /// Read only the exact durable mapping, including the crash-before-old-context-cleanup case.
+    pub fn lookup_existing_keygen_transfer(&self, takeover: &LibraryLock,
+        source: &crate::KeygenAccountTransfer, register: bool, user: &str, addr: &str,
+    ) -> Result<Option<crate::KeygenAccountAdmission>> {
+        self.host.require_account_write()?;
+        crate::maintenance::lookup_keygen_account(takeover, source, register, user, addr)
+    }
+
     /// The old one-request desktop transport cannot retain an in-memory owner.
     /// Continue only the exact durably bound operation, querying its receipt first.
     pub fn login_or_continue(
@@ -134,9 +150,12 @@ impl AccountCoordinator {
         password: &str,
         super_password: Option<&str>,
     ) -> Result<ResultEnvelope> {
+        let (root, _) = respire_client_host::config::control_roots()?;
+        let pending = crate::maintenance::pending_account(&root.canonicalize()?, true, user, addr)?;
+        let id = pending.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.operate(
-            &uuid::Uuid::new_v4().to_string(),
-            None,
+            &id,
+            pending.as_ref().map(|(_, source)| source.as_path()),
             true,
             AccountControl::Register {
                 addr: addr.to_owned(),
@@ -192,9 +211,12 @@ impl AccountCoordinator {
                 Some(continuation),
             );
         }
+        let (root, _) = respire_client_host::config::control_roots()?;
+        let pending = crate::maintenance::pending_account(&root.canonicalize()?, false, user, addr)?;
+        let id = pending.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.operate(
-            &uuid::Uuid::new_v4().to_string(),
-            None,
+            &id,
+            pending.as_ref().map(|(_, source)| source.as_path()),
             false,
             operation,
             Some(continuation),

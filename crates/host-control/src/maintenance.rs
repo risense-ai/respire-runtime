@@ -18,7 +18,8 @@ use crate::launch::{hash, process_birth};
 use crate::VerifiedRuntime;
 
 mod accounts;
-pub(crate) use accounts::{finish_account_routing, pending_account};
+pub(crate) use accounts::{finish_account_routing, pending_account, prepare_keygen_account, lookup_keygen_account};
+pub use accounts::{KeygenAccountTransfer, KeygenAccountAdmission};
 mod private_io;
 mod takeover;
 use private_io::{marker_bytes, private_write, registration_digest};
@@ -241,6 +242,17 @@ pub struct Maintenance {
     completed: bool,
 }
 
+// Refusal fence only: neither presence nor a parseable pending DTO grants ownership.
+fn reject_offline_keygen(root: &Path) -> Result<()> {
+    let path = respire_client_host::config::normalize_control_path(
+        &root.join("runtime/autostart/offline-keygen.json"))?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => anyhow::bail!("offline keygen is pending; use its verified original-operation handoff"),
+    }
+}
+
 fn account_owner_token(
     recovery: RecoveryMode,
     previous: Option<&Marker>,
@@ -292,6 +304,7 @@ impl Maintenance {
             "host maintenance already has an active controller"
         );
         let (root, _) = selected_roots()?;
+        reject_offline_keygen(&root)?;
         anyhow::ensure!(
             takeover.protects(&root.join("runtime/takeover"))?,
             "maintenance requires this installation's takeover ownership"
@@ -367,6 +380,7 @@ impl Maintenance {
         coordinator: &str,
     ) -> Result<Self> {
         host.require_account_write()?;
+        reject_offline_keygen(root)?;
         anyhow::ensure!(
             current_boot_token().is_none(),
             "host maintenance already has a controller"

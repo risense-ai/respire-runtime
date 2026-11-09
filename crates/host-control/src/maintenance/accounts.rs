@@ -1,6 +1,9 @@
 //! Nonsecret account recovery binding. Published before any private auth effect.
 //! It is never inferred from a current selection or an unrelated maintenance owner.
 use super::*;
+mod keygen_transfer;
+pub use keygen_transfer::{KeygenAccountTransfer, KeygenAccountAdmission};
+pub(crate) use keygen_transfer::{prepare_keygen_account, lookup_keygen_account};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +26,8 @@ struct AccountBinding {
     maintenance_token: String,
     original: AccountOrigin,
     sent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keygen_source: Option<keygen_transfer::KeygenSource>,
 }
 
 fn binding_path(root: &Path, id: &str) -> Result<PathBuf> {
@@ -147,6 +152,7 @@ impl Maintenance {
     ) -> Result<(Self, HostAuthIdentity, bool)> {
         host.require_account_write()?;
         let (root, _) = selected_roots()?;
+        reject_offline_keygen(&root)?;
         anyhow::ensure!(
             takeover.protects(&root.join("runtime/takeover"))?,
             "account recovery requires installation takeover"
@@ -171,7 +177,7 @@ impl Maintenance {
                 .is_none_or(|active| active == operation_id),
             "another original account operation is pending; no new authentication was sent"
         );
-        let (original, user, addr, token, sent) = match recovery {
+        let (original, user, addr, token, sent, keygen_source) = match recovery {
             RecoveryMode::Fresh => {
                 anyhow::ensure!(
                     bytes.is_none() && prior.is_none(),
@@ -188,6 +194,7 @@ impl Maintenance {
                     addr.to_owned(),
                     uuid::Uuid::new_v4().to_string(),
                     false,
+                    None,
                 )
             }
             RecoveryMode::QueryOriginal => {
@@ -215,6 +222,7 @@ impl Maintenance {
                     binding.addr,
                     binding.maintenance_token,
                     binding.sent,
+                    binding.keygen_source,
                 )
             }
         };
@@ -231,6 +239,7 @@ impl Maintenance {
             maintenance_token: token.clone(),
             original: original.clone(),
             sent,
+            keygen_source,
         };
         let encoded = serde_json::to_vec(&binding)?;
         if bytes.as_deref() != Some(encoded.as_slice()) {
@@ -325,6 +334,7 @@ mod tests {
                 store_ready: false,
             },
             sent: false,
+            keygen_source: None,
         }
     }
     #[test]
