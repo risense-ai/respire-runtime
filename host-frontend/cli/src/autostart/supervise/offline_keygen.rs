@@ -20,6 +20,8 @@ struct Original {
     token: String, coordinator: String, marker_sha256: String,
     original_identity: HostAuthIdentity, session_sha256: Option<String>, stage: Stage,
     actor: Option<RuntimeIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    final_actor: Option<RuntimeIdentity>,
     was_serving: bool, store_ready: bool,
 }
 fn path(root: &Path) -> PathBuf { root.join("runtime/autostart/offline-keygen.json") }
@@ -92,6 +94,8 @@ fn validate_record(record:&Original,root:&Path) -> Result<()> {
         || (record.was_serving && matches!(record.stage,Stage::RollbackFinished|Stage::RollbackHandedOff));
     anyhow::ensure!(record.actor.is_some() == actor_required && (record.was_serving || !record.store_ready),
         "offline keygen stage has inconsistent live actor evidence");
+    anyhow::ensure!(record.final_actor.is_none() || matches!(record.stage, Stage::HandedOff | Stage::RollbackHandedOff)
+        && record.actor.is_some(), "offline keygen final actor precedes durable handoff");
     Ok(())
 }
 fn require_startable(stage:Stage) -> Result<()> {
@@ -125,6 +129,13 @@ fn validate_transition(previous:&Original,next:&Original) -> Result<()> {
     binding.marker_sha256=previous.marker_sha256.clone();
     binding.session_sha256=previous.session_sha256.clone();
     binding.actor=previous.actor.clone();
+    binding.final_actor=previous.final_actor.clone();
+    anyhow::ensure!(if let Some(final_actor) = &previous.final_actor {
+        next.final_actor.as_ref() == Some(final_actor)
+    } else {
+        next.final_actor.is_none() || matches!((previous.stage,next.stage),
+            (Stage::Finished,Stage::HandedOff) | (Stage::RollbackFinished,Stage::RollbackHandedOff))
+    }, "offline keygen final actor changed outside handoff");
     anyhow::ensure!(serde_json::to_value(&binding)? == serde_json::to_value(previous)?
         && previous.session_sha256.as_ref().is_none_or(|digest| next.session_sha256.as_ref() == Some(digest))
         && previous.actor.as_ref().is_none_or(|actor| next.actor.as_ref() == Some(actor)),
@@ -196,7 +207,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
             let record=Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force,
                 root:root.clone(),source:profile.clone(),profile:profile.clone(),binary:binary.clone(),image_sha256:image_sha256.clone(),
                 token:token.to_owned(),coordinator:coordinator.to_owned(),marker_sha256:marker_sha256.to_owned(),
-                original_identity:control::identity(&profile)?,session_sha256:None,stage:Stage::Prepared,actor:None,
+                original_identity:control::identity(&profile)?,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,
                 was_serving:health.is_some(),store_ready:health.as_ref().is_some_and(|owner| owner.store_ready) };
             verify_selection(&record)?;
             save(&record,&mut digest)?;
@@ -228,7 +239,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
             && control::identity(&record.profile)? == record.original_identity,
             "offline keygen rollback source identity changed");
         record.stage=Stage::RolledBack; save(&record,&mut digest)?;
-        if send { finish_initial_rollback(&mut record,&mut digest,&mut maintenance)?; }
+        if send { finish_initial_rollback(&takeover,&mut record,&mut digest,&mut maintenance)?; }
         // A query-only process never guesses whether it should restore an owner.
         return Ok(envelope);
     }
@@ -272,7 +283,7 @@ pub(crate) fn verify_original_target(root:&Path,profile:&Path,identity:&HostAuth
         installation_id:health.installation_id,profile:health.data_dir,account_id:health.account_id })
 }
 
-fn finish_initial_rollback(record:&mut Original,digest:&mut Option<String>,maintenance:&mut lifecycle::Maintenance) -> Result<()> {
+fn finish_initial_rollback(takeover:&respire_client_host::lock::LibraryLock,record:&mut Original,digest:&mut Option<String>,maintenance:&mut lifecycle::Maintenance) -> Result<()> {
     verify_selection(record)?;
     anyhow::ensure!(control::identity(&record.profile)? == record.original_identity,
         "offline keygen rollback original identity changed");
@@ -289,6 +300,9 @@ fn finish_initial_rollback(record:&mut Original,digest:&mut Option<String>,maint
     maintenance.finish()?;
     record.stage=Stage::RollbackFinished; save(record,digest)?;
     maintenance.finish_handoff()?;
+    if record.was_serving {
+        record.final_actor=finish_embedded_serving_handoff(takeover,record,&record.original_identity,record.store_ready)?;
+    }
     record.stage=Stage::RollbackHandedOff; save(record,digest)?;
     remove_rollback(record,digest.as_deref().context("offline keygen rollback cleanup digest missing")?)
 }
@@ -369,7 +383,7 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
         anyhow::ensure!(control::identity(&profile)? == record.original_identity,
             "offline keygen rolled-back identity changed");
         if record.was_serving {
-            anyhow::ensure!(record.actor.as_ref() == Some(&verify_original_target(&root,&profile,&record.original_identity,record.store_ready)?),
+            anyhow::ensure!(completed_actor(&record)? == &verify_original_target(&root,&profile,&record.original_identity,record.store_ready)?,
                 "offline keygen rollback actor changed; no spawn retried");
         } else {
             anyhow::ensure!(crate::rpc::probe_runtime()?.is_none() && !crate::rpc::endpoint_path().try_exists()?,
@@ -382,7 +396,7 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
         verify_selection(&record)?;
         lifecycle::verify_offline_keygen_finished(&root)?;
         let session=record.session_sha256.as_deref().context("offline keygen completed digest missing")?;
-        anyhow::ensure!(record.actor.as_ref() == Some(&verify_target(&root,&profile,&record.operation_id,session)?),
+        anyhow::ensure!(completed_actor(&record)? == &verify_target(&root,&profile,&record.operation_id,session)?,
             "offline keygen finished actor changed; no spawn attempted");
         remove_finished(&record,&digest)?;
         return Ok(true);
@@ -417,9 +431,55 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
     maintenance.finish()?;
     record.stage=Stage::Finished; save(&record,&mut digest)?;
     maintenance.finish_handoff()?;
+    record.final_actor=finish_embedded_serving_handoff(takeover,&record,&HostAuthIdentity::Unbound {
+        operation_id:record.operation_id.clone(),session_sha256:session.clone()},true)?;
     record.stage=Stage::HandedOff; save(&record,&mut digest)?;
     remove_finished(&record,digest.as_deref().context("offline keygen cleanup digest missing")?)?;
     Ok(true)
+}
+
+/// Only the successful in-process completion path calls this. Finished records
+/// are deliberately not resumable: a lost drain/spawn result cannot be replayed.
+fn finish_embedded_serving_handoff(takeover:&respire_client_host::lock::LibraryLock,record:&Original,identity:&HostAuthIdentity,ready:bool)
+    -> Result<Option<RuntimeIdentity>> {
+    let Some(selected)=crate::embedding::selection() else { return Ok(None); };
+    anyhow::ensure!(matches!(record.stage,Stage::Finished|Stage::RollbackFinished),
+        "offline keygen compatibility handoff precedes completion");
+    anyhow::ensure!(takeover.protects(&record.root.join("runtime/takeover"))?, "offline keygen takeover mismatch");
+    let expected_identity=if record.stage == Stage::Finished {
+        HostAuthIdentity::Unbound { operation_id:record.operation_id.clone(),
+            session_sha256:record.session_sha256.clone().context("offline keygen completed session missing")? }
+    } else { record.original_identity.clone() };
+    anyhow::ensure!(identity == &expected_identity, "offline keygen compatibility identity differs from original receipt");
+    let (durable,_)=load(&record.root)?.context("offline keygen completion evidence missing")?;
+    anyhow::ensure!(serde_json::to_value(&durable)? == serde_json::to_value(record)?,
+        "offline keygen completion evidence changed before handoff");
+    selected.verify_offline_keygen_handoff()?;
+    verify_selection(record)?;
+    lifecycle::verify_offline_keygen_finished(&record.root)?;
+    let old=record.actor.as_ref().context("offline keygen completed actor missing")?;
+    anyhow::ensure!(old == &verify_original_target(&record.root,&record.profile,identity,ready)?,
+        "offline keygen strict actor changed before compatibility handoff");
+    crate::embedding::account_host().context("embedded account host missing")?
+        .finish_key_handoff(&record.profile,identity,true)?;
+    verify_selection(record)?;
+    let successor=verify_original_target(&record.root,&record.profile,identity,ready)?;
+    anyhow::ensure!(successor.instance_id != old.instance_id,
+        "offline keygen compatibility handoff did not replace strict actor");
+    Ok(Some(successor))
+}
+fn completed_actor(record:&Original) -> Result<&RuntimeIdentity> {
+    completed_actor_for_host(record,crate::embedding::selection().is_some())
+}
+fn completed_actor_for_host(record:&Original,embedded:bool) -> Result<&RuntimeIdentity> {
+    if embedded {
+        // Old records lacking a confirmed successor remain untouched, not
+        // reinterpreted as permission to convert a grant into legacy authority.
+        record.final_actor.as_ref().context("offline keygen compatibility actor unconfirmed")
+    } else {
+        anyhow::ensure!(record.final_actor.is_none(), "offline keygen successor requires its original embedded host");
+        record.actor.as_ref().context("offline keygen completed actor missing")
+    }
 }
 
 fn remove_finished(record:&Original,digest:&str) -> Result<()> {
@@ -495,7 +555,7 @@ mod tests {
         Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force:false,
             root:root.to_owned(),source:root.to_owned(),profile:root.to_owned(),binary:root.join("runtime-image"),
             image_sha256:"a".repeat(64),token:uuid::Uuid::new_v4().to_string(),coordinator:"synthetic-coordinator".into(),
-            marker_sha256:"b".repeat(64),original_identity:HostAuthIdentity::Absent,session_sha256:None,stage:Stage::Prepared,actor:None,was_serving:false,store_ready:false }
+            marker_sha256:"b".repeat(64),original_identity:HostAuthIdentity::Absent,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,was_serving:false,store_ready:false }
     }
     #[test]
     fn absent_pending_probe_does_not_create_first_use_paths() -> Result<()> {
@@ -657,7 +717,43 @@ mod tests {
             image_path:record.binary.display().to_string(),image_sha256:record.image_sha256.clone(),
             installation_root:root.display().to_string(),installation_id:"synthetic".into(),profile:root.display().to_string(),account_id:"synthetic".into()});
         record.stage=Stage::Verified; save(&record,&mut digest)?;
+        let mut premature=record.clone();
+        premature.final_actor=record.actor.clone();
+        assert!(validate_record(&premature,&root).is_err());
+        let mut changed=record.clone();
+        changed.stage=Stage::Finished;
+        changed.actor.as_mut().context("synthetic actor missing")?.instance_id="changed".into();
+        assert!(validate_transition(&record,&changed).is_err());
         record.stage=Stage::Finished; save(&record,&mut digest)?;
+        assert!(require_startable(record.stage).is_err());
+        let mut successor=record.actor.clone().context("synthetic actor missing")?;
+        successor.instance_id="successor".into();
+        let mut old_terminal=record.clone(); old_terminal.stage=Stage::HandedOff;
+        assert!(completed_actor_for_host(&old_terminal,true).is_err());
+        assert!(completed_actor_for_host(&old_terminal,false).is_ok());
+        let mut rollback=record.clone(); rollback.stage=Stage::RollbackFinished;
+        rollback.session_sha256=None; rollback.was_serving=true;
+        validate_record(&rollback,&root)?;
+        let mut rollback_terminal=rollback.clone(); rollback_terminal.stage=Stage::RollbackHandedOff;
+        rollback_terminal.final_actor=Some(successor.clone());
+        validate_record(&rollback_terminal,&root)?;
+        validate_transition(&rollback,&rollback_terminal)?;
+        assert!(require_startable(rollback.stage).is_err());
+        let mut premature_rollback=rollback.clone(); premature_rollback.final_actor=Some(successor.clone());
+        assert!(validate_record(&premature_rollback,&root).is_err());
+        let mut foreign_rollback=rollback_terminal.clone(); foreign_rollback.operation_id=uuid::Uuid::new_v4().to_string();
+        assert!(validate_transition(&rollback,&foreign_rollback).is_err());
+        let mut terminal=record.clone();
+        terminal.stage=Stage::HandedOff; terminal.final_actor=Some(successor);
+        validate_transition(&record,&terminal)?;
+        assert!(completed_actor_for_host(&terminal,false).is_err());
+        assert!(completed_actor_for_host(&terminal,true).is_ok());
+        let mut changed_terminal=terminal.clone();
+        changed_terminal.final_actor.as_mut().context("synthetic successor missing")?.instance_id="foreign".into();
+        assert!(validate_transition(&terminal,&changed_terminal).is_err());
+        let mut changed_source=terminal.clone();
+        changed_source.operation_id=uuid::Uuid::new_v4().to_string();
+        assert!(validate_transition(&record,&changed_source).is_err());
         assert!(remove_finished(&record,digest.as_deref().context("synthetic journal digest missing")?).is_err());
         record.stage=Stage::HandedOff; save(&record,&mut digest)?;
         assert!(remove_finished(&record,"wrong-digest").is_err());

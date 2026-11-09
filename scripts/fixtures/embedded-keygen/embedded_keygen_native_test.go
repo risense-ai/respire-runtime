@@ -49,6 +49,11 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
  if h.PID == 0 || h.Version != info.Version || !samePath(h.Exe,executable) || !samePath(h.DataDir,m.DataRoot) { t.Fatal("serving actor identity mismatch") }
  var actor struct { Instance string `json:"instance_id"`; Birth string `json:"process_start_id"`; Generation uint64 `json:"generation"`; StoreReady bool `json:"store_ready"` }
  if json.Unmarshal(raw,&actor) != nil || actor.Instance == "" || actor.Birth == "" || actor.Generation == 0 || !actor.StoreReady { t.Fatal("strong actor identity unavailable") }
+ // Exercise the real Client2 unscoped diagnostic RPC, not just health.
+ // Only inspect its success bit; do not log the diagnostic payload.
+ diagnostic, err := m.RPC("status"); if err != nil { t.Fatal("Client2 unscoped status RPC failed") }
+ var diagnosticEnvelope struct { OK bool `json:"ok"`; Error json.RawMessage `json:"error"` }
+ if json.Unmarshal(diagnostic,&diagnosticEnvelope) != nil || !diagnosticEnvelope.OK || len(diagnosticEnvelope.Error) > 0 && string(diagnosticEnvelope.Error) != "null" { t.Fatal("Client2 unscoped status RPC was refused") }
  // Repeated explicit Start is idempotent at the actual Client2 manager surface.
  if err = m.Start(); err != nil { t.Fatal("second Start failed") }
  next, nextRaw, err := m.Health(healthCtx); if err != nil || next.PID != h.PID || next.Exe != h.Exe { t.Fatal("Start replaced the verified actor") }
