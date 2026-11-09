@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 64de59880b4c8b0c39aa318d087c46a374c83337
+          ref: 1043dbbafcaee7e1f16270929bca83f90c6dc373
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -76,6 +76,16 @@ jobs:
           cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
           cargo test --locked -p respire_commands clean_stop
           cargo test --locked -p respire_commands endpoint_cleanup
+      - name: GUI fixture policy under Windows PowerShell 5 and PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($engine in @('powershell.exe','pwsh')) {
+            foreach ($test in @('test-client2-diary-readback.ps1','test-client2-cleanup-identity.ps1')) {
+              & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
+              if ($LASTEXITCODE -ne 0) { throw "GUI fixture policy failed: $engine / $test" }
+            }
+          }
       - name: Build exact Runtime source (not a published asset)
         env:
           RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
@@ -158,3 +168,4 @@ jobs:
             ${{ runner.temp }}/offline-keygen-source-gui/native-gui.json
           if-no-files-found: warn
           retention-days: 1
+
