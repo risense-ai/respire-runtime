@@ -10,6 +10,10 @@ use respire_protocol::migration_control::HostMigrationOperation;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 
+#[cfg(windows)]
+#[path = "migration_registry.rs"]
+mod registry;
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Phase { Copying, Transforming, Ready }
@@ -118,6 +122,7 @@ fn transition(previous: &Intent, next: &Intent) -> Result<()> {
 pub(super) fn load(home: &Path, original: &HostMigrationOperation) -> Result<Option<Intent>> {
     let record = read_frames(home, &path(home, original)?)?;
     if let Some(record) = record.as_ref() { validate(home, original, record)?; }
+    #[cfg(windows)] registry::verify(home, original, record.as_ref())?;
     Ok(record)
 }
 
@@ -150,10 +155,12 @@ pub(super) fn save(home: &Path, record: &Intent) -> Result<()> {
     file.write_all(&bytes)?;
     file.sync_all()?;
     #[cfg(unix)] { std::fs::File::open(directory)?.sync_all()?; }
+    #[cfg(windows)] registry::persist(home, record)?;
     Ok(())
 }
 
 pub(super) fn reject_conflicting_admission(home: &Path, original: Option<&HostMigrationOperation>, source_id: &str, account: &str) -> Result<()> {
+    #[cfg(windows)] registry::reject_conflicts(home, original, source_id, account)?;
     let directory = home.join(".rsrs-migration-intents");
     no_links(&directory)?;
     if !directory.exists() { return Ok(()); }
@@ -172,9 +179,6 @@ pub(super) fn reject_conflicting_admission(home: &Path, original: Option<&HostMi
 
 pub(super) fn admit_or_load(home: &Path, original: &HostMigrationOperation, profile: &Profile) -> Result<Intent> {
     if let Some(record) = load(home, original)? {
-        // Until Windows directory-entry power-loss behavior is independently
-        // verified, an existing intent is evidence only, not replay authority.
-        anyhow::ensure!(!cfg!(windows), "automatic interrupted migration recovery is not enabled on Windows");
         verify_source(&record, profile)?;
         return Ok(record);
     }
@@ -194,7 +198,7 @@ pub(super) fn admit_or_load(home: &Path, original: &HostMigrationOperation, prof
 mod tests {
     use super::*;
 
-    fn fixture(home: &Path) -> Result<(HostMigrationOperation, Profile)> {
+    pub(super) fn fixture(home: &Path) -> Result<(HostMigrationOperation, Profile)> {
         let source = home.join(".onememory");
         private_directory(&source)?;
         write_json(&source.join("session.json"), &json!({"user":"synthetic-intent-owner"}))?;
@@ -216,6 +220,7 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (original, profile) = fixture(&home)?;
         let orphan = home.join(".rsrs-migration-staging").join(uuid::Uuid::new_v4().to_string());
         private_directory(&orphan)?;
@@ -241,6 +246,7 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (original, profile) = fixture(&home)?;
         let mut record = admit_or_load(&home, &original, &profile)?;
         write_json(&profile.source.join("session.json"), &json!({"user":"changed-owner"}))?;
@@ -257,6 +263,7 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", isolate.path().canonicalize()?);
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (original, profile) = fixture(&home)?;
         let record = admit_or_load(&home, &original, &profile)?;
         private_directory(&record.stage)?;
@@ -278,6 +285,7 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", isolate.path().canonicalize()?);
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (original, profile) = fixture(&home)?;
         let mut record = admit_or_load(&home, &original, &profile)?;
         record.phase = Phase::Transforming;
@@ -302,6 +310,7 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (_, profile) = fixture(&home)?;
         let stage = home.join("stage");
         let bytes = std::fs::read(profile.source.join("session.json"))?;
@@ -321,6 +330,7 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", &root);
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let saved = ["HOME", "USERPROFILE"].map(|name| (name, std::env::var_os(name)));
         std::env::set_var("HOME", &home);
         std::env::set_var("USERPROFILE", &home);
@@ -373,6 +383,7 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (original, profile) = fixture(&home)?;
         let mut record = admit_or_load(&home, &original, &profile)?;
         record.phase = Phase::Transforming;
@@ -392,6 +403,7 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
         let (original, profile) = fixture(&home)?;
         let mut record = admit_or_load(&home, &original, &profile)?;
         record.phase = Phase::Transforming;
