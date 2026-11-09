@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: b88d3a3e27f115e93d8a39cdff8db37ca3e949fd
+          ref: e4d9e1d802d2854917a6e6fe858bb672268aa34e
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -169,3 +169,327 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
+  windows-client2-candidate-ui:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUNTIME_TARGET: x86_64-pc-windows-msvc
+    steps:
+      # Require the independently reviewed exact CLI source commit.
+      - name: Require reviewed exact candidate CLI
+        shell: pwsh
+        run: |
+          $cliSha='e4d9e1d802d2854917a6e6fe858bb672268aa34e'
+          if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-cli
+          ref: e4d9e1d802d2854917a6e6fe858bb672268aa34e
+          path: .cli-source
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-client2
+          ref: e50f877c92ea4ddcbbbc25a657aa046442b9ed90
+          path: .client2-source
+          persist-credentials: false
+      - name: Verify exact clean source and reviewed Client2 inputs before any build
+        shell: bash
+        env:
+          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
+          test "$(git -C .cli-source rev-parse HEAD)" = 'e4d9e1d802d2854917a6e6fe858bb672268aa34e'
+          test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
+          for repo in . .cli-source .client2-source; do
+            git -C "$repo" diff --exit-code
+            git -C "$repo" diff --cached --exit-code
+          done
+          test -z "$(git -C .client2-source status --porcelain)"
+          python - <<'PYBLOBS'
+          import subprocess
+          expected={'scripts/build.ps1':'cf5e618b42fda4ce46234e842335144d979ce740',
+            'go.mod':'c21140b15042790efc753995d59db4d65acceeb2',
+            'go.sum':'c7a7a55b97c9b19537f831125b6d97fdd5dc36ce',
+            'build/winres.json':'ac9b250f621a5129e55be046ca8301893404a478',
+            'internal/desktop/build/icon-light.png':'e12a9fc997b4c324dd05050508c0ad3a0192b6fd',
+            'main.go':'5eda26849c0a9844e18c275b374cf8edba0e51da'}
+          for path,blob in expected.items():
+              actual=subprocess.check_output(['git','-C','.client2-source','hash-object','--path='+path,path],text=True).strip()
+              assert actual==blob,path
+          PYBLOBS
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .client2-source/go.mod
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Select exact existing public SDK cache
+        id: sdk
+        shell: bash
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache
+        with:
+          path: .sdk/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify SDK bytes without exposing a private download credential
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+      - name: Test shared host control and protocol on native Windows
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p respire_host_control
+          cargo test --locked -p respire_protocol --test keygen_handoff
+          cargo test --locked -p respire_host_frontend --lib offline_keygen
+          cargo test --locked -p respire_host_frontend --lib embedding::tests
+          cargo test --locked -p respire_host_frontend --lib snapshot_control
+          cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
+          cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
+          cargo test --locked -p respire_commands clean_stop
+          cargo test --locked -p respire_commands endpoint_cleanup
+      - name: GUI fixture policy under Windows PowerShell 5 and PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($engine in @('powershell.exe','pwsh')) {
+            foreach ($test in @('test-client2-focus-readiness.ps1','test-client2-diary-readback.ps1','test-client2-cleanup-identity.ps1','test-client2-gui-exit-code.ps1','test-client2-document-readiness.ps1','test-client2-document-descendants.ps1','test-client2-focus-replacement.ps1')) {
+              & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
+              if ($LASTEXITCODE -ne 0) { throw "GUI fixture policy failed: $engine / $test" }
+            }
+          }
+      - name: Build exact Runtime source (not a published asset)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Build exact CLI source (not a published asset)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
+      - name: Package temporary candidate with bound hashes (never a release artifact)
+        shell: bash
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/client2-candidate-ui-payload"
+          mkdir "$payload"
+          cp target/debug/rsrs-runtime.exe "$payload/rsrs-runtime-$RUNTIME_TARGET.exe"
+          node scripts/stage-core-runtime.mjs "$payload"
+          (cd "$RUNNER_TEMP" && tar --format=ustar -czf "rsrs-runtime-$RUNTIME_TARGET.tar.gz" -C "$payload" .)
+          python - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,tomllib
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); payload=root/'client2-candidate-ui-payload'
+          target=os.environ['RUNTIME_TARGET']; binary=f'rsrs-runtime-{target}.exe'
+          archive=root/f'rsrs-runtime-{target}.tar.gz'
+          version=tomllib.loads(pathlib.Path('runtime/Cargo.toml').read_text())['package']['version']
+          digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+          files=[]
+          for path in sorted(payload.rglob('*')):
+              assert not path.is_symlink()
+              if path.is_file(): files.append({'path':path.relative_to(payload).as_posix(),'size':path.stat().st_size,'sha256':digest(path)})
+          build=dict(schema_version=2,runtime_version=version,tag=f'v{version}',channel='dev',target_triple=target,
+              archive_file=archive.name,archive_sha256=digest(archive),binary_file=binary,binary_sha256=digest(payload/binary),
+              source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+              compat={'min_cli':'1.0.21-dev.5','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
+              capabilities={'business_executor':'1','mcp_server':'1','offline_keygen_handoff':'1'},files=files)
+          (root/f'runtime-build-{target}.json').write_text(json.dumps(build)+'\n')
+          with open(os.environ['GITHUB_ENV'],'a') as output: output.write(f'RUNTIME_VERSION={version}\n')
+          PY
+      - name: Fetch only three pinned public GUI model inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          models="$RUNNER_TEMP/client2-candidate-ui-models"
+          mkdir -p "$models/onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/tokenizer.json' --output "$models/tokenizer.json"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' --output "$models/onnx/model_quantized.onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort' --output "$models/onnx/model_quantized.cpu-v1.ort"
+          python - <<'PYMODEL'
+          import hashlib,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'client2-candidate-ui-models'
+          files={'tokenizer.json':'6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
+            'onnx/model_quantized.onnx':'0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
+            'onnx/model_quantized.cpu-v1.ort':'7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff'}
+          for name,expected in files.items():
+              path=root/name
+              assert path.is_file() and not path.is_symlink() and not path.is_junction()
+              with path.open('rb') as source:
+                  assert hashlib.file_digest(source,'sha256').hexdigest()==expected, name
+          assert (root/'onnx/model_quantized.cpu-v1.ort').stat().st_size==569654128
+          PYMODEL
+      - name: Build exact Client2 candidate without publication
+        shell: pwsh
+        working-directory: .client2-source
+        run: |
+          $ErrorActionPreference='Stop'
+          # Exact build.ps1 blob cf5e618b42fda4ce46234e842335144d979ce740 reviewed locally; resource, lock and entry-point blobs verified before build.
+          $version = '0.2.56-dev.${{ github.run_number }}'
+          ./scripts/build.ps1 -Version $version -Arch amd64
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate Client2 source build failed' }
+          if (-not (Test-Path -LiteralPath './dist/respire-windows-amd64.exe' -PathType Leaf)) { throw 'Candidate EXE missing' }
+          $versionFile = Join-Path $env:RUNNER_TEMP 'client2-candidate-ui-version.json'
+          $process = Start-Process -FilePath "$PWD/dist/respire-windows-amd64.exe" -ArgumentList '--version' -RedirectStandardOutput $versionFile -WindowStyle Hidden -PassThru
+          try {
+            if (-not $process.WaitForExit(10000)) {
+              # The retained owned Process handle identifies this child, not a rediscovered PID.
+              $process.Kill()
+              if (-not $process.WaitForExit(5000)) { throw 'Candidate version probe cleanup unconfirmed' }
+              throw 'Candidate version probe timed out'
+            }
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) { throw 'Candidate version probe failed' }
+            $info = Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json
+            if ($info.version -ne $version -or $info.platform -ne 'windows-amd64') { throw 'Candidate executable identity mismatch' }
+          } finally { $process.Dispose() }
+      - name: Require tracked source unchanged after builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repo in . .cli-source .client2-source; do
+            git -C "$repo" diff --exit-code
+            git -C "$repo" diff --cached --exit-code
+          done
+      - name: Record public source and byte provenance only
+        shell: bash
+        env:
+          JOB_NAME: windows-client2-candidate-ui
+        run: |
+          set -euo pipefail
+          python - <<'PYMANIFEST'
+          import hashlib,json,os,pathlib,subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); workspace=pathlib.Path.cwd()
+          sha=lambda p: hashlib.file_digest(p.open('rb'),'sha256').hexdigest()
+          commit=lambda p: subprocess.check_output(['git','-C',str(p),'rev-parse','HEAD'],text=True).strip()
+          target=os.environ['RUNTIME_TARGET']
+          report={
+            'schema_version':1,'scope':'Client2 source-candidate Windows x64 UI only',
+            'official_client2_asset':False,'release_acceptance':False,'g1_passed':False,
+            'client2_build_version':'0.2.56-dev.'+os.environ['GITHUB_RUN_NUMBER'],
+            'runtime_cli_version_execution':'not-evaluated','ui_result':'not-evaluated',
+            'client2_git_blobs':{name:subprocess.check_output(['git','-C','.client2-source','hash-object','--path='+name,name],text=True).strip() for name in ['scripts/build.ps1','go.mod','go.sum','build/winres.json','internal/desktop/build/icon-light.png','main.go']},
+            'repository':os.environ['GITHUB_REPOSITORY'],'run_id':os.environ['GITHUB_RUN_ID'],
+            'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],'job':os.environ['JOB_NAME'],
+            'source':{'runtime':commit(workspace),'cli':commit(workspace/'.cli-source'),
+              'client2':commit(workspace/'.client2-source')},
+            'commands':[
+              'cargo build --locked -p respire_runtime --bin rsrs-runtime',
+              'cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target',
+              './scripts/build.ps1 -Version 0.2.56-dev.'+os.environ['GITHUB_RUN_NUMBER']+' -Arch amd64'],
+            'sha256':{
+              'client2_exe':sha(workspace/'.client2-source/dist/respire-windows-amd64.exe'),
+              'cli_exe':sha(workspace/'.cli-source/target/debug/rsrs.exe'),
+              'runtime_exe':sha(root/'client2-candidate-ui-payload'/('rsrs-runtime-'+target+'.exe')),
+              'runtime_archive':sha(root/('rsrs-runtime-'+target+'.tar.gz')),
+              'runtime_build_metadata':sha(root/('runtime-build-'+target+'.json')),
+              'core_runtime_manifest':sha(root/'client2-candidate-ui-payload/core-runtime.json'),
+              'sdk_lock':sha(workspace/'sdk/core-sdk.lock.json'),
+              'crate_sdk_lock':sha(workspace/'crates/core-sdk/core-sdk.lock.json')},
+            'models':{name:sha(root/'client2-candidate-ui-models'/name) for name in
+              ['tokenizer.json','onnx/model_quantized.onnx','onnx/model_quantized.cpu-v1.ort']}}
+          (root/'client2-candidate-ui-source-manifest.json').write_text(json.dumps(report,indent=2)+'\n')
+          manifest={'schema_version':1,'mode':'source-client2-ui-candidate',
+            'repository':'risense-ai/respire-client2','source_commit':report['source']['client2'],
+            'platform':'windows-amd64','exe_file':'respire-windows-amd64.exe',
+            'exe_sha256':report['sha256']['client2_exe'],'build_version':report['client2_build_version'],
+            'build_command':report['commands'][2],'run_id':str(os.environ['GITHUB_RUN_ID']),
+            'run_attempt':str(os.environ['GITHUB_RUN_ATTEMPT']),'job':str(os.environ['GITHUB_JOB'])}
+          (root/'client2-candidate-ui-input.json').write_text(json.dumps(manifest)+'\n')
+          PYMANIFEST
+      - name: Candidate launcher policy in both Windows shells
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($engine in @('powershell.exe','pwsh')) {
+            foreach ($test in @('test-client2-source-candidate-binding.ps1','test-client2-account-focus-stability.ps1')) {
+              & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
+              if ($LASTEXITCODE -ne 0) { throw "Candidate policy failed: $engine / $test" }
+            }
+          }
+      - name: Candidate native UI against isolated exact source payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-candidate-ui-input.json" -SourceClient2Commit e50f877c92ea4ddcbbbc25a657aa046442b9ed90 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/client2-candidate-ui-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-candidate-ui-models"
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate UI subset failed; release acceptance remains unproven' }
+      - name: Produce allowlisted UI result and independently require subset success
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PYRESULT'
+          import json,math,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); folder=root/'client2-candidate-ui-gui'
+          summary={'schema_version':1,'scope':'source candidate UI subset only','passed':False,
+            'pending_error_cancel':'not-evaluated','completed_poll_count':'not-observed',
+            'full_gui_acceptance':'not-evaluated','g1_passed':False,'reports_readable':False,'action_stage':'unknown'}
+          checks={}
+          try:
+              r=json.loads((folder/'report.json').read_text(encoding='utf-8-sig'))
+              n=json.loads((folder/'native-gui.json').read_text(encoding='utf-8-sig'))
+              o=n.get('offline',{}); focus=o.get('account_focus_stability',{})
+              allowed_stages={'account_navigation','offline_initialization','key_generation',
+                'recovery_dismiss','overview_navigation','runtime_start','account_verification',
+                'credential_persistence','important_editor_open','important_save','important_created_reader',
+                'diary_editor_open','diary_save','diary_created_reader','diary_runtime_readback',
+                'diary_navigation','diary_select_saved_day','diary_saved_reader','diary_close_reader'}
+              stage=o.get('action_stage')
+              summary['action_stage']=stage if type(stage) is str and stage in allowed_stages else 'unknown'
+              def finite_number(value):
+                  return type(value) in (int,float) and math.isfinite(value)
+              observations=focus.get('observations'); observed=focus.get('observed_window_ms'); elapsed=focus.get('elapsed_ms')
+              timed_receipt=(type(focus.get('requested_seconds')) is int and focus['requested_seconds']==10
+                and type(observations) is int and observations>=2
+                and finite_number(observed) and observed>=10000
+                and finite_number(elapsed) and elapsed>=observed and elapsed<15000)
+              checks={'candidate_mode':r.get('fixture_mode')=='source-client2-ui-candidate' and n.get('fixture_mode')=='source-client2-ui-candidate',
+                'source_candidate_verified':r.get('source_candidate_verified') is True,
+                'connectivity_passed':r.get('status')=='connectivity-passed' and n.get('status')=='native-connectivity-passed',
+                'cleanup_confirmed':r.get('cleanup_exit_confirmed') is True and not r.get('cleanup_error'),
+                'native_identity_verified':n.get('identity_verified') is True,
+                'accessibility_verified':r.get('native_accessibility_read') is True,
+                'foreground_verified':r.get('foreground_verified') is True,
+                'input_observed':r.get('gui_input_observed') is True,
+                'timed_focus_window':focus.get('status')=='timed-window-passed' and focus.get('completed_poll_count')=='not-observed' and timed_receipt,
+                'offline_subset_passed':o.get('status')=='offline-subset-passed',
+                'scope_not_overclaimed':all(x.get('full_gui_acceptance')=='not-evaluated' and x.get('g1_passed') is False for x in [r,n,o])}
+              for key in ['onboarding_completed','runtime_bound','local_keys_initialized','important_memory_readback','diary_readback','settings_persisted','runtime_normal_stop_confirmed']:
+                  checks[key]=o.get(key) is True
+              summary['reports_readable']=True
+          except (OSError,ValueError,TypeError,AttributeError):
+              pass
+          summary['checks']=checks; summary['passed']=summary['reports_readable'] and bool(checks) and all(checks.values())
+          (root/'client2-candidate-ui-result.json').write_text(json.dumps(summary,indent=2)+'\n')
+          if not summary['passed']: raise SystemExit('Candidate UI result missing or failed; see allowlisted booleans')
+          PYRESULT
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-only-client2-candidate-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/client2-candidate-ui-source-manifest.json
+            ${{ runner.temp }}/client2-candidate-ui-input.json
+            ${{ runner.temp }}/client2-candidate-ui-result.json
+          # No raw report, tree, profile, environment, recovery material or bindings.
+          if-no-files-found: warn
+          retention-days: 1
