@@ -173,6 +173,8 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     crate::runtime_policy::require_host("offline keygen handoff")?;
     anyhow::ensure!(lifecycle::current_boot_token().is_none(), "offline keygen requires its own controller");
     let (binary,image_sha256)=crate::runtime_fetch::require_offline_keygen_handoff()?;
+    #[cfg(test)]
+    tests::assert_no_forbidden_admission();
     let (root,profile)=respire_client_host::config::control_roots()?;
     let takeover=crate::runtime_policy::takeover_lock()?;
     if operation.is_none() { std::fs::create_dir_all(&profile)?; }
@@ -551,6 +553,100 @@ fn remove_transferred(record:&Original,digest:&str,admission:&respire_host_contr
 #[cfg(test)]
 mod tests {
     use super::*;
+    std::thread_local! {
+        static FORBID_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    pub(super) fn assert_no_forbidden_admission() {
+        FORBID_ADMISSION.with(|forbidden| assert!(!forbidden.get(), "unsupported keygen crossed the side-effect boundary"));
+    }
+    struct AdmissionTrap;
+    impl AdmissionTrap {
+        fn install() -> Self { FORBID_ADMISSION.with(|value| value.set(true)); Self }
+    }
+    impl Drop for AdmissionTrap {
+        fn drop(&mut self) { FORBID_ADMISSION.with(|value| value.set(false)); }
+    }
+    fn snapshot_tree(root:&Path) -> Result<std::collections::BTreeMap<PathBuf,Option<Vec<u8>>>> {
+        fn visit(root:&Path,at:&Path,out:&mut std::collections::BTreeMap<PathBuf,Option<Vec<u8>>>) -> Result<()> {
+            for entry in std::fs::read_dir(at)? {
+                let entry=entry?; let path=entry.path(); let kind=entry.file_type()?;
+                anyhow::ensure!(!kind.is_symlink(), "unexpected test fixture link");
+                let relative=path.strip_prefix(root)?.to_owned();
+                if kind.is_dir() { out.insert(relative,None); visit(root,&path,out)?; }
+                else { out.insert(relative,Some(std::fs::read(path)?)); }
+            }
+            Ok(())
+        }
+        let mut result=std::collections::BTreeMap::new(); visit(root,root,&mut result)?; Ok(result)
+    }
+    #[test]
+    fn unsupported_metadata_keygen_never_enters_side_effects() -> Result<()> {
+        let _env=crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
+            "RSRS_DATA_DIR","RSRS_BIN_DIR","RSRS_RUNTIME_BIN","RSRS_CLIENT_ONLY","RSRS_NO_AUTOSTART"])?;
+        let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR",&root);
+        std::env::set_var("RSRS_BIN_DIR",root.join("bin"));
+        for key in ["RSRS_RUNTIME_BIN","RSRS_CLIENT_ONLY","RSRS_NO_AUTOSTART"] { std::env::remove_var(key); }
+        assert!(crate::embedding::selection().is_none());
+        crate::runtime_fetch::runtime_fetch_tests::install_lifecycle_fixture()?;
+        // This has authenticated schema-2 metadata and an intact file inventory,
+        // but deliberately lacks offline_keygen_handoff. No installer is called.
+        let before=snapshot_tree(&root)?;
+        let _trap=AdmissionTrap::install();
+        let error=keygen(None,false).err().context("unsupported Runtime accepted keygen")?;
+        assert_eq!(error.to_string(),"offline_keygen_handoff_unsupported: upgrade Runtime before generating local keys");
+        assert_eq!(snapshot_tree(&root)?,before);
+        assert!(!path(&root).exists());
+        assert!(!root.join("runtime/autostart/maintenance.json").exists());
+        assert!(!root.join("runtime/endpoint.json").exists());
+        assert!(!root.join("session.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_embedding_keygen_never_enters_side_effects() -> Result<()> {
+        const CHILD: &str="RESP_ENV_KEYGEN_CAPABILITY_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            // OnceLock selection is process-local; never contaminate other tests.
+            let thread=std::thread::current();
+            let test_name=thread.name().context("test name missing")?;
+            let output=std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact",test_name,"--nocapture"])
+                .env(CHILD,"1").output()?;
+            anyhow::ensure!(output.status.success(), "isolated unsupported embedding test failed: {}",
+                String::from_utf8_lossy(&output.stderr));
+            anyhow::ensure!(String::from_utf8_lossy(&output.stdout).contains("embedded-capability-rejection-checked"),
+                "isolated capability test did not execute its assertions");
+            return Ok(());
+        }
+        let _env=crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
+            "RSRS_DATA_DIR","RSRS_BIN_DIR","RSRS_RUNTIME_BIN","RSRS_CLIENT_ONLY","RSRS_NO_AUTOSTART"])?;
+        let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?.join("untouched");
+        std::env::set_var("RSRS_DATA_DIR",&root);
+        std::env::set_var("RSRS_BIN_DIR",temp.path().join("bin"));
+        for key in ["RSRS_RUNTIME_BIN","RSRS_CLIENT_ONLY","RSRS_NO_AUTOSTART"] { std::env::remove_var(key); }
+        fn current_test_image() -> Result<respire_host_control::VerifiedRuntime> {
+            let image=std::env::current_exe()?.canonicalize()?;
+            let version=image.parent().and_then(|path| path.file_name()).and_then(|name| name.to_str())
+                .context("test image directory missing")?;
+            let digest=hash(&std::fs::read(&image)?);
+            respire_host_control::VerifiedRuntime::verify_installed(&image,&digest,version,12345)
+        }
+        fn forbidden_account_host() -> std::sync::Arc<dyn respire_host_control::HostLifecycle> {
+            panic!("unsupported embedding entered account host fallback")
+        }
+        crate::embedding::install_runtime_embedding(crate::embedding::RuntimeEmbedding {
+            verify_runtime:current_test_image, account_host:forbidden_account_host,
+            offline_keygen_handoff:None,
+        })?;
+        let _trap=AdmissionTrap::install();
+        let error=keygen(None,false).err().context("unsupported embedding accepted keygen")?;
+        assert_eq!(error.to_string(),"offline_keygen_handoff_unsupported: embedded Runtime lacks the implementation");
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_dir(temp.path())?.count(),0);
+        println!("embedded-capability-rejection-checked");
+        Ok(())
+    }
     fn original(root:&Path) -> Original {
         Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force:false,
             root:root.to_owned(),source:root.to_owned(),profile:root.to_owned(),binary:root.join("runtime-image"),
