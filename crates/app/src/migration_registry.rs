@@ -32,7 +32,7 @@ fn key_path(home: &Path) -> Result<String> {
 fn open(home: &Path) -> Result<Option<RegCloseKeyGuard>> {
     let user = HKEY::RegOpenCurrentUser(co::KEY::READ)
         .map_err(|error| anyhow!("open migration registry user: {error}"))?;
-    match user.RegOpenKeyEx(Some(&key_path(home)?), co::REG_OPTION::default(), co::KEY::QUERY_VALUE) {
+    match user.RegOpenKeyEx(Some(&key_path(home)?), co::REG_OPTION::default(), co::KEY::QUERY_VALUE | co::KEY::WOW64_64KEY) {
         Ok(key) => Ok(Some(key)),
         Err(error) if error == co::ERROR::FILE_NOT_FOUND => Ok(None),
         Err(error) => Err(anyhow!("open migration registry fence: {error}")),
@@ -92,7 +92,7 @@ pub(super) fn persist(home: &Path, record: &Intent) -> Result<()> {
     let user = HKEY::RegOpenCurrentUser(co::KEY::CREATE_SUB_KEY)
         .map_err(|error| anyhow!("open migration registry user for admission: {error}"))?;
     let (key, _) = user.RegCreateKeyEx(&key_path(home)?, None, co::REG_OPTION::NON_VOLATILE,
-        co::KEY::QUERY_VALUE | co::KEY::SET_VALUE, None)
+        co::KEY::QUERY_VALUE | co::KEY::SET_VALUE | co::KEY::WOW64_64KEY, None)
         .map_err(|error| anyhow!("create migration registry fence: {error}"))?;
     check_size(&key)?;
     let fence = Fence { schema: 1, operation: record.original.operation_id.clone(),
@@ -186,4 +186,49 @@ mod tests {
         assert!(!profile.destination.exists());
         Ok(())
     }
+
+    #[test]
+    fn registry_transforming_rejects_rolled_back_copying_file_and_new_operation() -> Result<()> {
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let _scope = TestScope::new(&home);
+        let (original, profile) = super::super::tests::fixture(&home)?;
+        let mut record = admit_or_load(&home, &original, &profile)?;
+        let journal = path(&home, &original)?;
+        let old_file = std::fs::read(&journal)?;
+        record.phase = Phase::Transforming;
+        save(&home, &record)?;
+        // Model old file state while the authoritative fence is already newer.
+        std::fs::write(&journal, old_file)?;
+        assert!(load(&home, &original).is_err());
+        let mut other = original.clone();
+        other.operation_id = uuid::Uuid::new_v4().to_string();
+        other.key = other.operation_id.clone();
+        assert!(admit_or_load(&home, &other, &profile).is_err());
+        assert!(!profile.destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_missing_or_wrong_type_is_not_a_fresh_admission() -> Result<()> {
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let _scope = TestScope::new(&home);
+        let (original, profile) = super::super::tests::fixture(&home)?;
+        admit_or_load(&home, &original, &profile)?;
+        let key = HKEY::CURRENT_USER.RegOpenKeyEx(Some(&key_path(&home)?), co::REG_OPTION::default(),
+            co::KEY::QUERY_VALUE | co::KEY::SET_VALUE | co::KEY::WOW64_64KEY)
+            .map_err(|error| anyhow!("open isolated test key: {error}"))?;
+        key.RegSetValueEx(Some(&original.operation_id), RegistryValue::Dword(1))
+            .map_err(|error| anyhow!("set isolated test type: {error}"))?;
+        assert!(load(&home, &original).is_err());
+        key.RegDeleteValue(Some(&original.operation_id))
+            .map_err(|error| anyhow!("remove isolated test value: {error}"))?;
+        assert!(load(&home, &original).is_err());
+        assert!(admit_or_load(&home, &original, &profile).is_err());
+        Ok(())
+    }
+
 }
