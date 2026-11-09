@@ -50,14 +50,28 @@ const MIN_CLI: &str = "1.0.21-dev.5";
 const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
+    install_panic_hook();
     // Remove the inherited secret before any worker or business code can spawn.
     match consume_boot_token().and_then(run) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
+            respire_logging::error(format_args!("rsrs-runtime failed"));
             eprintln!("rsrs-runtime: {error:#}");
             ExitCode::from(2)
         }
     }
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| location.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        respire_logging::log_panic(info.payload(), &location);
+        previous(info);
+    }));
 }
 
 fn consume_boot_token() -> Result<Option<String>> {
@@ -144,6 +158,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         return match respire_core_sdk::worker::run() {
             Ok(()) => Ok(0),
             Err(error) => {
+                respire_logging::error(format_args!("Core worker stopped"));
                 eprintln!("core worker: {error:#}");
                 Ok(2)
             }
@@ -314,6 +329,11 @@ fn publish_identity() {
 }
 
 fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
+    // Serving errors must survive detached stderr without persisting request data.
+    let log_path = respire_app::service::main_data_dir()
+        .join("logs")
+        .join("runtime.log");
+    let _ = respire_logging::init(respire_logging::LoggingConfig::new(log_path));
     if flags.background_child {
         anyhow::ensure!(flags.host == "127.0.0.1",
             "legacy host mode only accepts the existing loopback endpoint");

@@ -7,6 +7,7 @@ members = [
     "crates/host-commands",
     "crates/client-host",
     "crates/host-control",
+    "crates/logging",
     "runtime",            # P2 import: bin rsrs-runtime (lands after WP-3 merges in respire-cli)
     "spawn",              # P2 import: durable spawn / boot token / job object (respire_spawn)
     "crates/protocol",    # P2 import: respire_protocol — RPC contract, crates.io source of truth
