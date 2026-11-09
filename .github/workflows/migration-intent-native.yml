@@ -55,6 +55,10 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}"
           node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
       - name: Exercise real HKCU fence and journal failure models
+        env:
+          # Existing source-unit fixtures explicitly use HashingEmbedder. This
+          # mode is confined to this step, never native product acceptance.
+          RSRS_CORE_TEST_MODE: '1'
         run: |
           cargo test --locked -p respire_app migration:: -- --test-threads=1
       # Supplemental source-level native evidence only. This does not replace
