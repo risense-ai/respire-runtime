@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 72d4f30bb36f3aaf6d59994e58bdc8511b1c965c
+          ref: b88d3a3e27f115e93d8a39cdff8db37ca3e949fd
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
