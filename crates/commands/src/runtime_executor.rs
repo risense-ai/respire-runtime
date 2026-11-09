@@ -164,6 +164,21 @@ fn execute(args: Vec<String>) -> anyhow::Result<Captured> {
             .context("default profile migration failed")?;
     }
 
+    // Foreground writes commit source data without waiting for derived model
+    // artifacts. Keep this thread-local scope through source-change retries;
+    // dropping it restores the caller's indexing policy on every exit path.
+    let _deferred = matches!(
+        cli.command.as_ref(),
+        Some(
+            Command::Remember { .. }
+                | Command::Update { .. }
+                | Command::Import { .. }
+                | Command::Attach { .. }
+                | Command::Restore { .. }
+        )
+    )
+    .then(respire_app::core_sdk::defer_indexing);
+
     let args_for_retry = args.clone();
     let _progress = crate::progress::Scope::start(cli.progress_id.clone(), false, false);
     let _model_task = crate::model_progress::TaskScope::new(cli.model_task_id.clone());
