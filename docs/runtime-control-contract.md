@@ -587,3 +587,24 @@ observations. Schema/consumer success does not prove a consumed grant, parent
 revocation, credential durability, remote idempotency, filesystem publication,
 no network replay or native execution. Those still need exact-source CI and
 private-control integration evidence. No localaccount/profile draft is included.
+
+
+### Explicit offline-keygen serving handoff
+
+`control.auth.keygen_complete` is a distinct, read-only handoff using
+`HostAuthKeygenParams` and the original operation/idempotency key. It requires an
+exact Verified maintenance grant, the inherited parent watcher, and an Unbound
+identity anchored to the original Committed keygen journal candidate. It never
+replays key generation, alters that journal, or returns recovery material. It
+acquires no library lock alongside the serving actor. Runtime independently
+verifies the live target's store readiness, profile, account, protocol, version,
+PID/birth and executable path/digest twice; both identity snapshots must match.
+Journal, session and parent authorization are rechecked before returning the
+independent `HostKeygenHandoffReceipt` (`keygen-handoff` envelope).
+
+This does not make `HostAuthResult` terminal for maintenance. The existing
+`host-auth-keygen-finished` negative fixture remains invalid. Only the new handoff
+receipt permits the host to complete the explicit Start handoff. Unknown,
+noncommitted or mismatched receipts and changed/dead actors must retain recovery
+ownership without replay. Before any keygen effect, the host must verify the
+selected binary's release-bound metadata capability `offline_keygen_handoff: "1"`.

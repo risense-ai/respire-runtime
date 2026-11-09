@@ -199,8 +199,12 @@ pub(crate) fn verify_account_completion_authority() -> Result<()> {
     let binding = grant.maintenance.as_ref().context("account completion maintenance is missing")?;
     let bytes = read_private_file(&startup.context.root.join("runtime/autostart/maintenance.json"))?
         .context("account completion maintenance disappeared")?;
-    let marker = parse_control(&bytes)?;
-    anyhow::ensure!(hash(&bytes) == binding.marker_sha256 && marker["phase"] == "Verified",
+    verify_completion_marker(&bytes, &binding.marker_sha256)
+}
+
+fn verify_completion_marker(bytes: &[u8], expected_sha256: &str) -> Result<()> {
+    let marker = parse_control(bytes)?;
+    anyhow::ensure!(hash(bytes) == expected_sha256 && marker["phase"] == "Verified",
         "account completion requires the exact verified maintenance receipt");
     Ok(())
 }
@@ -1003,6 +1007,20 @@ pub(crate) fn hash_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_requires_exact_verified_marker_not_starting_or_paused() -> Result<()> {
+        for phase in ["Paused", "Starting", "Unknown"] {
+            let bytes = serde_json::to_vec(&json!({"phase":phase}))?;
+            assert!(verify_completion_marker(&bytes, &hash(&bytes)).is_err());
+        }
+        let bytes = serde_json::to_vec(&json!({"phase":"Verified"}))?;
+        verify_completion_marker(&bytes, &hash(&bytes))?;
+        assert!(verify_completion_marker(&bytes, &"0".repeat(64)).is_err());
+        assert!(verify_completion_marker(b"not-json", &hash(b"not-json")).is_err());
+        Ok(())
+    }
+
 
     fn fixture() -> (LaunchContext, LaunchGrant) {
         let context = LaunchContext {

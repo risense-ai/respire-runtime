@@ -128,6 +128,35 @@ pub struct HostLoginRecoveryResult {
 pub const HOST_AUTH_SCHEMA_V: u32 = 1;
 pub const HOST_AUTH_KEYGEN_METHOD: &str = "control.auth.keygen";
 pub const HOST_AUTH_RESULT_METHOD: &str = "control.auth.result";
+/// Read-only explicit-Start handoff. This does not change the keygen outcome.
+pub const HOST_AUTH_KEYGEN_COMPLETE_METHOD: &str = "control.auth.keygen_complete";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostKeygenRuntimeIdentity {
+    pub pid: u32,
+    pub process_start_id: String,
+    pub instance_id: String,
+    pub generation: u64,
+    pub image_path: String,
+    pub image_sha256: String,
+    pub installation_root: String,
+    pub installation_id: String,
+    pub profile: String,
+    pub account_id: String,
+}
+
+/// Independent live evidence, never an authentication result or recovery secret.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostKeygenHandoffReceipt {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub session_sha256: String,
+    pub path: PathBuf,
+    pub runtime: HostKeygenRuntimeIdentity,
+}
+
 
 pub const HOST_AUTH_REGISTER_METHOD: &str = "control.auth.register";
 pub const HOST_AUTH_LOGIN_METHOD: &str = "control.auth.login";

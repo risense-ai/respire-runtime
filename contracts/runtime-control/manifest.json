@@ -3097,6 +3097,58 @@
     {
       "path": "fixtures/negative/host-settings-snapshot-discovery-mutated.json",
       "sha256": "41d606515135324d857493fc7a8b58ad68277e288199bfb64d04ec5ca46a31cd"
+    },
+    {
+      "path": "schema/keygen-handoff.schema.json",
+      "sha256": "516451d98546a095cd2b75a37c8e29bfbf208ccfd4eec9c8acaf6c2ed9561b98"
+    },
+    {
+      "path": "fixtures/keygen-handoff/positive-live.json",
+      "sha256": "a3f1e24c4fd7368c1180a329a639276193b2a1d10d14f927a7ef17803901a5bc"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-secret.json",
+      "sha256": "61a1cd6e99f01a42698483b2d55ce9786b5d9ce621d64474c9981997a6651ba7"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-fake-verified.json",
+      "sha256": "57fd11d2de15af688b4ccf8fef848da1237223918d2b27fda90440b0d024136d"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-auth-result.json",
+      "sha256": "8269439fa63032669d17d8de5343a8ed6f79c665e5438c93a4de1eff4e062def"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-nested-secret.json",
+      "sha256": "e1a41494e442e923fb6c9407ed8b3ce892d924e3892031d28f248272da009b54"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-pid.json",
+      "sha256": "5a9e0b38a8a297121cc6e9f86645f50699d006cae42d26a9b9486198d859830f"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-generation.json",
+      "sha256": "7d12e833e5605858a1684e0c96cd59274a34042e0375a41d83b6157ab337ffdb"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-birth.json",
+      "sha256": "748be7c7439c2225f7888a4be694d6b700dc3a17710def9998e5a7cc57163959"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-image.json",
+      "sha256": "a148eed321e37e7c2fbd3655b6f78ee4ae755afa5c53ad883653f85565a00ce0"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-operation.json",
+      "sha256": "36c496541341d5192e1086ced12c74b852298d2bee56fb9b1da3ebb12084ad9e"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-schema.json",
+      "sha256": "1036833fe0f9bc1164db520d7affb97e599a5b4a675598d11df0fb772de60fec"
+    },
+    {
+      "path": "fixtures/keygen-handoff/negative-session.json",
+      "sha256": "5ed3941a96f62dd07be75d85b266fdb0b90bb792373f2fdb7a73b4fd30477266"
     }
   ],
   "extensions": {
@@ -3421,6 +3473,27 @@
           "fixtures/negative/host-agent-config-unknown-response-success.json",
           "fixtures/negative/host-agent-config-rollback-foreign-bytes.json",
           "fixtures/negative/host-agent-config-params-unknown.json"
+        ]
+      }
+    },
+    "keygen_handoff": {
+      "schema": "schema/keygen-handoff.schema.json",
+      "fixtures": {
+        "positive": [
+          "fixtures/keygen-handoff/positive-live.json"
+        ],
+        "negative": [
+          "fixtures/keygen-handoff/negative-secret.json",
+          "fixtures/keygen-handoff/negative-fake-verified.json",
+          "fixtures/keygen-handoff/negative-auth-result.json",
+          "fixtures/keygen-handoff/negative-nested-secret.json",
+          "fixtures/keygen-handoff/negative-pid.json",
+          "fixtures/keygen-handoff/negative-generation.json",
+          "fixtures/keygen-handoff/negative-birth.json",
+          "fixtures/keygen-handoff/negative-image.json",
+          "fixtures/keygen-handoff/negative-operation.json",
+          "fixtures/keygen-handoff/negative-schema.json",
+          "fixtures/keygen-handoff/negative-session.json"
         ]
       }
     }

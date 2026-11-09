@@ -1,0 +1,23 @@
+{
+  "fixture_type": "keygen_handoff",
+  "expected": "reject",
+  "payload": {
+    "schema_version": 1,
+    "operation_id": "00000000-0000-4000-8000-000000000001",
+    "session_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "path": "/fixture/session.json",
+    "runtime": {
+      "pid": 42,
+      "process_start_id": "fixture-birth",
+      "instance_id": "fixture-instance",
+      "generation": 1,
+      "image_path": "/fixture/runtime",
+      "image_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "installation_root": "/fixture",
+      "installation_id": "fixture-installation",
+      "profile": "/fixture",
+      "account_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "verified": true
+  }
+}

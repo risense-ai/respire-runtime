@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Offline keygen explicit Start handoff receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "session_sha256",
+    "path",
+    "runtime"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "operation_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "session_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "generation",
+        "process_start_id",
+        "instance_id",
+        "image_path",
+        "installation_root",
+        "installation_id",
+        "profile",
+        "account_id",
+        "image_sha256"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_start_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installation_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}
