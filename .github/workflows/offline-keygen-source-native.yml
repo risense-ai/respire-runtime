@@ -1,0 +1,130 @@
+name: Extra offline keygen source regression (not release acceptance)
+on:
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - 'crates/app/**'
+      - 'crates/protocol/**'
+      - 'crates/host-control/**'
+      - '.github/workflows/offline-keygen-source-native.yml'
+permissions:
+  contents: read
+jobs:
+  windows-source:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      RUNTIME_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-cli
+          ref: 6f3ad6e2d7acde813be8277dc43638ee98d61117
+          path: .cli-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Select exact existing public SDK cache
+        id: sdk
+        shell: bash
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache
+        with:
+          path: .sdk/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify SDK bytes without exposing a private download credential
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+      - name: Build both exact source candidates (not published assets)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p respire_host_control
+          cargo test --locked -p respire_protocol --test keygen_handoff
+          cargo build --locked -p respire_runtime --bin rsrs-runtime
+          cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
+      - name: Package temporary candidate with bound hashes (never a release artifact)
+        shell: bash
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/offline-keygen-source-payload"
+          mkdir "$payload"
+          cp target/debug/rsrs-runtime.exe "$payload/rsrs-runtime-$RUNTIME_TARGET.exe"
+          node scripts/stage-core-runtime.mjs "$payload"
+          (cd "$RUNNER_TEMP" && tar --format=ustar -czf "rsrs-runtime-$RUNTIME_TARGET.tar.gz" -C "$payload" .)
+          python - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,tomllib
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); payload=root/'offline-keygen-source-payload'
+          target=os.environ['RUNTIME_TARGET']; binary=f'rsrs-runtime-{target}.exe'
+          archive=root/f'rsrs-runtime-{target}.tar.gz'
+          version=tomllib.loads(pathlib.Path('runtime/Cargo.toml').read_text())['package']['version']
+          digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+          files=[]
+          for path in sorted(payload.rglob('*')):
+              assert not path.is_symlink()
+              if path.is_file(): files.append({'path':path.relative_to(payload).as_posix(),'size':path.stat().st_size,'sha256':digest(path)})
+          build=dict(schema_version=2,runtime_version=version,tag=f'v{version}',channel='dev',target_triple=target,
+              archive_file=archive.name,archive_sha256=digest(archive),binary_file=binary,binary_sha256=digest(payload/binary),
+              source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+              compat={'min_cli':'1.0.21-dev.5','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
+              capabilities={'business_executor':'1','mcp_server':'1','offline_keygen_handoff':'1'},files=files)
+          (root/f'runtime-build-{target}.json').write_text(json.dumps(build)+'\n')
+          with open(os.environ['GITHUB_ENV'],'a') as output: output.write(f'RUNTIME_VERSION={version}\n')
+          PY
+      - name: Fetch only three pinned public GUI model inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          models="$RUNNER_TEMP/offline-keygen-models"
+          mkdir -p "$models/onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/tokenizer.json' --output "$models/tokenizer.json"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' --output "$models/onnx/model_quantized.onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort' --output "$models/onnx/model_quantized.cpu-v1.ort"
+          python - <<'PYMODEL'
+          import hashlib,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'offline-keygen-models'
+          files={'tokenizer.json':'6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
+            'onnx/model_quantized.onnx':'0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
+            'onnx/model_quantized.cpu-v1.ort':'7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff'}
+          for name,expected in files.items():
+              path=root/name
+              assert path.is_file() and not path.is_symlink() and not path.is_junction()
+              with path.open('rb') as source:
+                  assert hashlib.file_digest(source,'sha256').hexdigest()==expected, name
+          assert (root/'onnx/model_quantized.cpu-v1.ort').stat().st_size==569654128
+          PYMODEL
+      - name: Original Windows GUI fixture against isolated source candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./.cli-source/scripts/probe-client2-gui.ps1 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/offline-keygen-source-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/offline-keygen-models"
+          if ($LASTEXITCODE -ne 0) { throw 'Source-only GUI regression failed; release acceptance remains unproven' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-only-offline-keygen-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/offline-keygen-source-gui/report.json
+            ${{ runner.temp }}/offline-keygen-source-gui/native-gui.json
+          if-no-files-found: warn
+          retention-days: 1
