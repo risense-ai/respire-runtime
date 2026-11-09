@@ -33,6 +33,7 @@ struct Startup {
     grant: Option<LaunchGrant>,
     auth_control: bool,
     paused_control: bool,
+    unbound_identity: Option<respire_protocol::HostAuthIdentity>,
 }
 
 pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -> Result<()> {
@@ -45,6 +46,10 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     fs::create_dir_all(respire_app::service::main_data_dir())?;
     fs::create_dir_all(respire_app::service::data_dir())?;
     let context = current_context(port)?;
+    let unbound_identity = serving_unbound_identity(&context.profile)?;
+    if let Some(identity) = unbound_identity.as_ref() {
+        respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, identity)?;
+    }
     let (grant, instance_id) = if let Some(token) = boot_token {
         let nonce = token
             .strip_prefix("launch-v1:")
@@ -82,7 +87,7 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     }
     respire_commands::rpc_serve::set_launch_instance_id(&instance_id)?;
     STARTUP
-        .set(Startup { context, grant, auth_control: false, paused_control: false })
+        .set(Startup { context, grant, auth_control: false, paused_control: false, unbound_identity })
         .map_err(|_| anyhow::anyhow!("runtime startup identity was installed twice"))?;
     Ok(())
 }
@@ -111,7 +116,7 @@ pub(crate) fn authorize_offline_read(grant: LaunchGrant,
     let context = offline_read_context(grant.port, kind)?;
     validate_grant(&grant, &context, grant.managed_id.is_some(), &grant.nonce, now_ms()?)?;
     verify_offline_read_authority(&grant, &context, kind)?;
-    STARTUP.set(Startup { context, grant: Some(grant), auth_control: false, paused_control: false })
+    STARTUP.set(Startup { context, grant: Some(grant), auth_control: false, paused_control: false, unbound_identity: None })
         .map_err(|_| anyhow::anyhow!("offline read grant was already consumed"))?;
     Ok(())
 }
@@ -270,7 +275,11 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     if !auth { control_account(&context.profile)?; }
     // Pin the exact resolved spelling used by memory_revision before it opens DB.
     if !auth { respire_app::service::install_runtime_profile(resolved_profile); }
-    STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth, paused_control: paused })
+    let unbound_identity = if auth { None } else { serving_unbound_identity(&context.profile)? };
+    if let Some(identity) = unbound_identity.as_ref() {
+        respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, identity)?;
+    }
+    STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth, paused_control: paused, unbound_identity })
         .map_err(|_| anyhow::anyhow!("runtime control grant was already consumed"))?;
     Ok(())
 }
@@ -508,7 +517,34 @@ fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
         current_context(startup.context.port)? == startup.context,
         "runtime launch context changed before opening the store"
     );
+    if !startup.auth_control {
+        anyhow::ensure!(
+            serving_unbound_identity(&startup.context.profile)? == startup.unbound_identity,
+            "offline serving session changed before opening the store"
+        );
+        if let Some(identity) = startup.unbound_identity.as_ref() {
+            respire_app::login_transaction::verify_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+        }
+    }
     verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.paused_control)
+}
+
+fn serving_unbound_identity(profile: &Path) -> Result<Option<respire_protocol::HostAuthIdentity>> {
+    use respire_client_host::identity::{auth_session_identity, AuthSessionIdentity};
+    let Some(session) = respire_client_host::identity::read_session_json(&profile.join("session.json"))? else {
+        return Ok(None);
+    };
+    // Legacy sessions retain their existing migration and credential path.
+    // A new transaction claim must never fall back to legacy authorization.
+    if session.get("auth_operation_id").is_none() {
+        return Ok(None);
+    }
+    match auth_session_identity(profile, hash)? {
+        AuthSessionIdentity::Unbound { operation_id, session_sha256 } =>
+            Ok(Some(respire_protocol::HostAuthIdentity::Unbound { operation_id, session_sha256 })),
+        AuthSessionIdentity::Bound { .. } => Ok(None),
+        AuthSessionIdentity::Absent => anyhow::bail!("offline serving session disappeared during authorization"),
+    }
 }
 
 fn current_context(port: u16) -> Result<LaunchContext> {
@@ -1019,6 +1055,32 @@ mod tests {
 
     #[test]
     fn detached_grant_accepts_only_its_exact_context() -> Result<()> {
+        let offline = tempfile::tempdir()?;
+        let session_path = offline.path().join("session.json");
+        assert!(serving_unbound_identity(offline.path())?.is_none());
+        let mut session = json!({"vault_version":4,"kdf_salt":"fixture-salt",
+            "wrapped_urk":"fixture-wrap","urk_nonce":"fixture-nonce"});
+        fs::write(&session_path, serde_json::to_vec(&session)?)?;
+        assert!(serving_unbound_identity(offline.path())?.is_none());
+        session["keyring_account"] = json!("login-fixture");
+        session["keyring_backend"] = json!("native");
+        session["auth_operation_id"] = json!("12345678-1234-4234-8234-123456789abc");
+        let bytes = serde_json::to_vec(&session)?;
+        fs::write(&session_path, &bytes)?;
+        assert!(matches!(serving_unbound_identity(offline.path())?,
+            Some(respire_protocol::HostAuthIdentity::Unbound { operation_id, session_sha256 })
+                if operation_id == "12345678-1234-4234-8234-123456789abc" && session_sha256 == hash(&bytes)));
+        for (field, value) in [("auth_operation_id", Value::Null),
+            ("auth_operation_id", json!("wrong-operation")), ("keyring_backend", json!("kernel")),
+            ("user", json!("")), ("extra", json!("unexpected"))] {
+            let mut changed = session.clone();
+            changed[field] = value;
+            fs::write(&session_path, serde_json::to_vec(&changed)?)?;
+            assert!(serving_unbound_identity(offline.path()).is_err());
+        }
+        session["user"] = json!("fixture-account");
+        fs::write(&session_path, serde_json::to_vec(&session)?)?;
+        assert!(serving_unbound_identity(offline.path())?.is_none());
         let (context, grant) = fixture();
         validate_grant(&grant, &context, false, &grant.nonce, 2000)?;
         validate_control(Some(&grant), &context, None, None, None, None)?;
