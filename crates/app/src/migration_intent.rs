@@ -243,4 +243,49 @@ mod tests {
         assert!(!profile.destination.exists());
         Ok(())
     }
+
+    #[test]
+    fn result_entry_recovers_only_durable_copying_and_is_idempotent() -> Result<()> {
+        use respire_protocol::migration_control::HostMigrationOutcome as Outcome;
+        let isolate = crate::test_lock::Isolate::new()?;
+        let root = isolate.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let saved = ["HOME", "USERPROFILE"].map(|name| (name, std::env::var_os(name)));
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        let result = (|| -> Result<()> {
+            let (mut original, profile) = fixture(&home)?;
+            original.fingerprint = hex::encode(Sha256::digest(original.fingerprint_bytes()?));
+            let ownership = crate::login_transaction::AuthOwnership::acquire(&root, &root)?;
+            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Unknown);
+            assert!(!profile.destination.exists());
+            assert!(load(&home, &original)?.is_none());
+            let mut record = admit_or_load(&home, &original, &profile)?;
+            // Simulated durable phase records only; no transformation is executed here.
+            for phase in [Phase::Transforming, Phase::Ready] {
+                record.phase = phase;
+                save(&home, &record)?;
+                let before = std::fs::read(path(&home, &original)?)?;
+                assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Unknown);
+                assert_eq!(std::fs::read(path(&home, &original)?)?, before);
+                assert!(!profile.destination.exists());
+            }
+            record.phase = Phase::Copying;
+            save(&home, &record)?;
+            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Completed);
+            let receipt_before = std::fs::read(profile.destination.join(RECEIPT))?;
+            let intent_before = std::fs::read(path(&home, &original)?)?;
+            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Completed);
+            assert_eq!(std::fs::read(profile.destination.join(RECEIPT))?, receipt_before);
+            assert_eq!(std::fs::read(path(&home, &original)?)?, intent_before);
+            Ok(())
+        })();
+        for (name, value) in saved {
+            match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
+        }
+        result
+    }
+
 }
