@@ -29,6 +29,26 @@ const RECEIPT: &str = ".rsrs-migration.json";
 const SOURCE_RECEIPT: &str = ".rsrs-migrated.json";
 const DEFAULT_ENV: &str = "RSRS_DEFAULT_DATA_DIR";
 
+/// Receipt fields bind the migration context; the persistent credential and
+/// authenticated unwrap prove that the selected vault is still usable.
+pub fn verify_local_session(session: &Value) -> Result<()> {
+    let alias = session["keyring_account"].as_str().context("migration credential alias is missing")?;
+    let backend = session["keyring_backend"].as_str().context("migration credential backend is missing")?;
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_i64().context("invalid migration vault version")?,
+    };
+    anyhow::ensure!(backend != "kernel", "migrated local session requires a persistent credential backend");
+    let secret = if version == 1 {
+        crate::keystore::read_imported_v1_password(alias, backend)?
+    } else {
+        crate::keystore::read_imported(alias, "super", backend)?
+    };
+    crate::auth::unlock_session_keys(session, if version == 1 { &secret } else { "" },
+        if version == 1 { None } else { Some(secret.as_str()) }, "")?;
+    Ok(())
+}
+
 struct Profile {
     source: PathBuf,
     destination: PathBuf,
