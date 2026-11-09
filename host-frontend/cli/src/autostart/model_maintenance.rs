@@ -42,7 +42,7 @@ fn roots() -> Result<(PathBuf, PathBuf)> {
 }
 
 fn account(profile: &Path) -> Result<Option<String>> {
-    Ok(respire_client_host::identity::session_user_of_dir(profile)?
+    Ok(respire_client_host::identity::host_session_user_of_dir(profile, hash)?
         .map(|user| hash(user.as_bytes())))
 }
 

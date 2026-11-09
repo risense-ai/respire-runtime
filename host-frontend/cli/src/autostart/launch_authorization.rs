@@ -240,7 +240,7 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
         grant.image_path == binary && grant.image_sha256.eq_ignore_ascii_case(&manifest.sha256),
         "host control image changed while preparing authorization"
     );
-    let expected_account_id = respire_client_host::identity::session_user_of_dir(&profile)?
+    let expected_account_id = respire_client_host::identity::host_session_user_of_dir(&profile, hash)?
         .map(|user| hash(user.as_bytes()));
     anyhow::ensure!(
         grant.account_id
@@ -639,7 +639,7 @@ mod tests {
         assert!(matches!(auth_session_identity(&profile, hash)?,
             AuthSessionIdentity::Unbound { operation_id: id, session_sha256 }
                 if id == operation_id && session_sha256 == hash(&candidate)));
-        assert!(account_identity_source(&profile).is_err());
+        assert_eq!(account_identity_source(&profile)?, profile.display().to_string());
         for invalid in ["{}", "{", r#"{"user":null}"#, r#"{"user":""}"#] {
             fs::write(&session, invalid)?;
             assert!(auth_session_identity(&profile, hash).is_err());

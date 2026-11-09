@@ -8,6 +8,7 @@ import (
  "encoding/json"
  "os"
  "path/filepath"
+ "strings"
  "testing"
  "time"
 )
@@ -41,7 +42,7 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
  // Foreign operation input must never create another keygen O.
  if _, err = m.hostOperation(ctx, []string{"runtime","auth-result","--operation-id","cbb9ee67-bb58-49bf-aea5-20089f79f598"},"","",""); err == nil { t.Fatal("mismatched original operation accepted") }
  after, err := os.ReadFile(pending); if err != nil || !bytes.Equal(before,after) { t.Fatal("refused lookup altered original evidence") }
- if err = m.Start(); err != nil { t.Fatal("managed explicit Start failed") }
+ if err = m.Start(); err != nil { logEmbeddedStartFailure(t,m,err); t.Fatal("managed explicit Start failed") }
  if _, err = os.Stat(pending); !os.IsNotExist(err) { t.Fatal("completed handoff retained original pending record") }
  healthCtx, healthCancel := context.WithTimeout(context.Background(), 15*time.Second); defer healthCancel()
  h, raw, err := m.Health(healthCtx); if err != nil { t.Fatal("serving actor unavailable") }
@@ -54,4 +55,40 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
  var afterActor struct { Instance string `json:"instance_id"`; Birth string `json:"process_start_id"`; Generation uint64 `json:"generation"`; StoreReady bool `json:"store_ready"` }
  if json.Unmarshal(nextRaw,&afterActor) != nil || actor != afterActor { t.Fatal("Start changed strong actor identity") }
  t.Log("managed keygen, refused foreign operation, explicit Start and same-actor checks passed")
+}
+
+// Only closed-set labels are emitted. Never log the host error or private files.
+func logEmbeddedStartFailure(t *testing.T, m *Manager, failure error) {
+ reason := "unclassified"
+ for _, label := range []string{
+  "current account identity missing user",
+  "host runtime exited before readiness", "host runtime did not become ready",
+  "runtime owner changed during startup", "failed to start host runtime",
+  "offline keygen original is not committed", "offline keygen original identity changed",
+  "offline keygen starting marker changed", "offline keygen completion binding mismatch",
+  "offline keygen completion readiness mismatch", "offline keygen actor changed during completion",
+  "offline keygen original Paused marker changed", "offline keygen owner already exists",
+  "offline keygen capability Runtime binding changed", "selected Runtime changed during host command",
+  "offline keygen target", "offline keygen completion", "Runtime host action failed",
+ } { if strings.Contains(failure.Error(),label) { reason=label; break } }
+ readiness := "unknown"
+ if strings.Contains(failure.Error(),"last_store_ready=Some(false)") { readiness="store_not_ready" } else if strings.Contains(failure.Error(),"last_store_ready=None") { readiness="health_absent" } else if strings.Contains(failure.Error(),"last_store_ready=Some(true)") { readiness="store_ready_observed" }
+ stage := embeddedPhaseLabel(filepath.Join(m.DataRoot,"runtime","autostart","offline-keygen.json"),"stage",
+  []string{"prepared","sent","committed","starting","verified","finished","handed_off","rolled_back","rollback_starting","rollback_finished","rollback_handed_off"})
+ phase := embeddedPhaseLabel(filepath.Join(m.DataRoot,"runtime","autostart","maintenance.json"),"phase",
+  []string{"paused","starting","verified","Paused","Starting","Verified"})
+ endpoint := "unreadable"
+ if _,err:=os.Lstat(filepath.Join(m.DataRoot,"runtime","endpoint.json")); err==nil { endpoint="present" } else if os.IsNotExist(err) { endpoint="absent" }
+ t.Logf("embedded Start diagnostic: reason=%s readiness=%s pending=%s marker=%s endpoint=%s",reason,readiness,stage,phase,endpoint)
+}
+func embeddedPhaseLabel(path, field string, allowed []string) string {
+ meta,err:=os.Lstat(path); if os.IsNotExist(err) {return "absent"}
+ if err!=nil || !meta.Mode().IsRegular() || meta.Size()>65536 {return "unreadable"}
+ raw,err:=os.ReadFile(path); if err!=nil {return "unreadable"}
+ var value map[string]json.RawMessage
+ if json.Unmarshal(raw,&value)!=nil {return "invalid"}
+ var phase string
+ if json.Unmarshal(value[field],&phase)!=nil {return "invalid"}
+ for _,known:=range allowed {if phase==known {return known}}
+ return "unknown"
 }
