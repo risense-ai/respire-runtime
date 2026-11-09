@@ -74,6 +74,8 @@ jobs:
           cargo test --locked -p respire_host_frontend --lib snapshot_control
           cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
           cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
+          cargo test --locked -p respire_commands clean_stop
+          cargo test --locked -p respire_commands endpoint_cleanup
       - name: Build exact Runtime source (not a published asset)
         env:
           RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
