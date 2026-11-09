@@ -1,0 +1,15 @@
+[package]
+name = "respire_logging"
+version = "0.1.0-dev.1"
+edition = "2021"
+rust-version = "1.88"
+description = "dependency-free error-level file logging shared by the respire CLI and runtime"
+license-file = "../../LICENSE"
+repository = "https://github.com/risense-ai/respire-cli"
+publish = false
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -2654,6 +2654,7 @@ fn dispatch_loop_inner(
                 store
             }
             Err(error) => {
+                respire_logging::error(format_args!("runtime failed to initialize the library"));
                 eprintln!("runtime failed to initialize the library: {error:#}");
                 if let Some(startup) = startup.as_ref() {
                     startup.revoke();
@@ -2664,6 +2665,7 @@ fn dispatch_loop_inner(
     };
     respire_app::service::install_runtime_profile(respire_app::service::data_dir());
     if let Err(error) = respire_app::read_heat::reload() {
+        respire_logging::error(format_args!("runtime failed to load read_heat configuration"));
         eprintln!("runtime failed to load read_heat configuration: {error:#}");
         stop_process(1);
     }
@@ -2702,12 +2704,14 @@ fn dispatch_loop_inner(
             }
         });
     if classifier.is_err() {
+        respire_logging::error(format_args!("runtime failed to start the classifier worker"));
         stop_process(1);
     }
     let (write_tx, write_rx) = mpsc::sync_channel::<WriteJob>(256);
     if let Ok(mut installed) = WRITE_TX.lock() {
         *installed = Some(write_tx.clone());
     } else {
+        respire_logging::error(format_args!("runtime failed to install the write queue"));
         eprintln!("runtime failed to install the write queue");
         stop_process(1);
     }
@@ -2745,6 +2749,7 @@ fn dispatch_loop_inner(
                             }
                             Err(error) => {
                                 STATS_FAILED.fetch_add(1, Ordering::AcqRel);
+                                respire_logging::error(format_args!("recall statistics writeback failed"));
                                 eprintln!("recall statistics writeback failed: {error:#}");
                             }
                         }
@@ -2816,6 +2821,7 @@ fn dispatch_loop_inner(
             }
         });
     if writer.is_err() {
+        respire_logging::error(format_args!("runtime failed to start the writer worker"));
         stop_process(1);
     }
     respire_app::service::install_autosync_notifier(kick_autosync);
@@ -2826,6 +2832,7 @@ fn dispatch_loop_inner(
         .stack_size(16 * 1024 * 1024)
         .spawn(index_loop);
     if let Err(error) = indexer.as_ref() {
+        respire_logging::error(format_args!("runtime failed to start the index worker"));
         eprintln!("runtime failed to start the index worker: {error}");
         stop_process(1);
     }
@@ -3092,6 +3099,7 @@ fn dispatch_loop_inner(
     }
     if let Ok(indexer) = indexer {
         if indexer.join().is_err() {
+            respire_logging::error(format_args!("background index worker panicked during shutdown"));
             eprintln!("background index worker panicked during shutdown");
             clean = false;
         }
@@ -3108,6 +3116,7 @@ fn dispatch_loop_inner(
     }
     STORE_READY.store(false, Ordering::Release);
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+        respire_logging::error(format_args!("Core worker shutdown failed"));
         eprintln!("Core worker shutdown failed: {error:#}");
         set_control_state("failed");
         // Keep ownership until stop_process confirms native-child cleanup.

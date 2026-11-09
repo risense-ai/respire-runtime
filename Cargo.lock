@@ -1629,6 +1629,7 @@ dependencies = [
  "clap",
  "hex",
  "respire_app",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "rusqlite",
@@ -1760,6 +1761,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_logging"
+version = "0.1.0-dev.1"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "respire_protocol"
 version = "2.0.0-dev.7"
 dependencies = [
@@ -1770,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "2.0.0-dev.1"
+version = "2.0.0-dev.2"
 dependencies = [
  "anyhow",
  "respire_app",
@@ -1780,6 +1788,7 @@ dependencies = [
  "respire_host_commands",
  "respire_host_control",
  "respire_host_frontend",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "serde",
