@@ -1468,6 +1468,7 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
     journal.operations[index].phase = AuthPhase::Authorized;
     save_journal(&journal)?;
     let mut prepared = PreparedLogin::prepare_with_vault_inner(addr, &authorized, secret, vault, None, use_source)?;
+    prepared.login_password = Some(params.password.clone());
     commit_account(ownership, &mut journal, index, &mut prepared)
 }
 
