@@ -256,7 +256,7 @@ impl Maintenance {
                 && actual.owner_birth == held.owner_birth
                 && controller_alive(&actual)?
                 && current_boot_token().as_deref() == Some(held.token.as_str())
-                && actual.expected_version == env!("CARGO_PKG_VERSION")
+                && actual.expected_version == super::maintenance_issuer_version()?
                 && serde_json::to_vec(&actual)?
                     == serde_json::to_vec(&serde_json::from_slice::<Marker>(&bytes)?)?
                 && hash(&bytes)
@@ -566,7 +566,7 @@ impl Maintenance {
                 && actual.token == held.token
                 && actual.owner_pid == std::process::id()
                 && actual.owner_birth == held.owner_birth
-                && actual.expected_version == env!("CARGO_PKG_VERSION")
+                && actual.expected_version == super::maintenance_issuer_version()?
                 && actual.expected_profile.as_ref() == Some(&original.binding.profile)
                 && current_boot_token().as_deref() == Some(held.token.as_str())
                 && controller_alive(&actual)?
@@ -985,7 +985,7 @@ fn adopt_snapshot_marker(takeover: &LibraryLock) -> Result<Maintenance> {
         serde_json::to_vec(&value)?
             == serde_json::to_vec(&serde_json::from_slice::<Marker>(&bytes)?)?
             && !controller_alive(&value)?
-            && value.expected_version == env!("CARGO_PKG_VERSION")
+            && value.expected_version == super::maintenance_issuer_version()?
             && value.expected_profile.as_ref() == Some(&profile),
         "snapshot recovery requires the exact abandoned marker and original profile"
     );
