@@ -257,7 +257,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
     fn copying_recovers_to_fresh_stage_and_retains_partial_snapshot() -> Result<()> {
         let isolate = crate::test_lock::Isolate::new()?;
         std::env::set_var("RSRS_DATA_DIR", isolate.path().canonicalize()?);
@@ -343,11 +342,6 @@ mod tests {
             assert!(load(&home, &original)?.is_none());
             admit_or_load(&home, &original, &profile)?;
             let outcome = control_migrate_profile(&ownership, &original, true)?.outcome;
-            if cfg!(windows) {
-                assert!(outcome == Outcome::Unknown);
-                assert!(!profile.destination.exists());
-                return Ok(());
-            }
             assert!(outcome == Outcome::Completed);
             let receipt_before = std::fs::read(profile.destination.join(RECEIPT))?;
             let intent_before = std::fs::read(path(&home, &original)?)?;
