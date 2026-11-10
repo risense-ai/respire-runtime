@@ -117,7 +117,7 @@ pub(super) fn reject_conflicts(home: &Path, original: Option<&HostMigrationOpera
             let candidate = read_frames(home, &home.join(".rsrs-migration-intents").join(format!("{name}.json")))?
                 .context("an unfinished migration has lost its file evidence; no new operation was admitted")?;
             verify(home, &candidate.original, Some(&candidate))?;
-            anyhow::ensure!(migration_control_result(&candidate.original)?.is_some(),
+            anyhow::ensure!(candidate.phase == Phase::RejectedSchema || migration_control_result(&candidate.original)?.is_some(),
                 "another unfinished migration owns this source or account");
         }
     }

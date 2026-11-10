@@ -3,6 +3,7 @@
 //! Copying has no external side effects and may be restarted into a fresh stage.
 //! Transforming is deliberately not replayable: credential writes and randomized
 //! database conversion need a separate transaction journal before that is safe.
+//! RejectedSchema is terminal and carries no credential or publication effects.
 //! Unpublished Ready also stays closed until staged data and credentials can be
 //! independently revalidated; its receipt alone is not an integrity proof.
 use super::*;
@@ -16,7 +17,7 @@ mod registry;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Phase { Copying, Transforming, Ready }
+pub(super) enum Phase { Copying, Transforming, Ready, RejectedSchema }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,7 +114,7 @@ fn transition(previous: &Intent, next: &Intent) -> Result<()> {
         && previous.session_digest == next.session_digest, "migration intent binding changed");
     anyhow::ensure!(match (previous.phase, next.phase) {
         (Phase::Copying, Phase::Copying) => true,
-        (Phase::Copying, Phase::Transforming) | (Phase::Transforming, Phase::Ready) => previous.stage == next.stage,
+        (Phase::Copying, Phase::RejectedSchema) | (Phase::Copying, Phase::Transforming) | (Phase::Transforming, Phase::Ready) => previous.stage == next.stage,
         _ => false,
     }, "migration intent phase regressed or changed its transformation stage");
     Ok(())
@@ -170,7 +171,7 @@ pub(super) fn reject_conflicting_admission(home: &Path, original: Option<&HostMi
         anyhow::ensure!(entry.path() == path(home, &candidate.original)?, "migration intent filename changed");
         if original.is_none_or(|original| candidate.original != *original)
             && (candidate.original.source_id == source_id || candidate.original.account.eq_ignore_ascii_case(account)) {
-            anyhow::ensure!(migration_control_result(&candidate.original)?.is_some(),
+            anyhow::ensure!(candidate.phase == Phase::RejectedSchema || migration_control_result(&candidate.original)?.is_some(),
                 "another unfinished migration owns this source or account; recover its original operation");
         }
     }
@@ -213,6 +214,126 @@ mod tests {
         let profile = Profile { source, destination: crate::service::accounts_root().join(&original.account),
             identity: source_id, services: ["1memory", "memocap", "respire"] };
         Ok((original, profile))
+    }
+
+    #[test]
+    fn invalid_snapshot_rejects_before_checkpoint_and_preserves_original() -> Result<()> {
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let (_, profile) = fixture(&home)?;
+        let database = profile.source.join("onememory.db");
+        Connection::open(&database)?.execute_batch("CREATE TABLE memories (id INTEGER PRIMARY KEY, user TEXT, ciphertext TEXT, nonce TEXT, created_at INTEGER, updated_at INTEGER)")?;
+        let before = std::fs::read(&database)?;
+        let checkpoint = std::cell::Cell::new(false);
+        let stage = home.join("invalid-stage");
+        let error = snapshot_profile_checkpoint(&profile, &stage, &[], true, || {
+            checkpoint.set(true);
+            Ok(())
+        }).err().context("incompatible schema was accepted")?;
+        assert!(error.downcast_ref::<InvalidSchema>().is_some());
+        assert!(!checkpoint.get());
+        assert_eq!(std::fs::read(database)?, before);
+        assert!(!stage.join(RECEIPT).exists());
+        assert!(!profile.destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn durable_schema_rejection_is_terminal_and_releases_conflicts() -> Result<()> {
+        let isolate = crate::test_lock::Isolate::new()?;
+        std::env::set_var("RSRS_DATA_DIR", isolate.path().canonicalize()?);
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
+        let (original, profile) = fixture(&home)?;
+        let database = profile.source.join("onememory.db");
+        Connection::open(&database)?.execute_batch("CREATE TABLE memories (id INTEGER PRIMARY KEY, user TEXT, ciphertext TEXT, nonce TEXT, created_at INTEGER, updated_at INTEGER)")?;
+        let error = migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original))
+            .err().context("incompatible schema was accepted")?;
+        assert!(error.downcast_ref::<SchemaRejected>().is_some());
+        let mut record = load(&home, &original)?.context("missing rejection")?;
+        assert!(record.phase == Phase::RejectedSchema);
+        let before = std::fs::read(path(&home, &original)?)?;
+        // Source disappearance must not erase an already durable operation outcome.
+        std::fs::remove_file(database)?;
+        std::fs::remove_file(profile.source.join("session.json"))?;
+        let error = migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original))
+            .err().context("rejected operation was replayed")?;
+        assert!(error.downcast_ref::<SchemaRejected>().is_some());
+        assert_eq!(std::fs::read(path(&home, &original)?)?, before);
+        assert!(!profile.destination.exists());
+        record.phase = Phase::Transforming;
+        assert!(save(&home, &record).is_err());
+        let mut replacement = original.clone();
+        replacement.operation_id = uuid::Uuid::new_v4().to_string();
+        replacement.key = replacement.operation_id.clone();
+        reject_conflicting_admission(&home, Some(&replacement), &replacement.source_id, &replacement.account)?;
+        Ok(())
+    }
+
+    #[test]
+    fn result_query_returns_durable_rejection_without_resnapshot_or_replay() -> Result<()> {
+        let isolate = crate::test_lock::Isolate::new()?;
+        let root = isolate.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
+        let saved = ["HOME", "USERPROFILE"].map(|name| (name, std::env::var_os(name)));
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        let result = (|| -> Result<()> {
+            let (mut original, profile) = fixture(&home)?;
+            original.fingerprint = hex::encode(Sha256::digest(original.fingerprint_bytes()?));
+            Connection::open(profile.source.join("onememory.db"))?.execute_batch(
+                "CREATE TABLE memories (id TEXT, user TEXT, ciphertext TEXT, nonce TEXT, created_at INTEGER, updated_at INTEGER)")?;
+            let ownership = crate::login_transaction::AuthOwnership::acquire(&root, &root)?;
+            let error = control_migrate_profile(&ownership, &original, false)
+                .err().context("invalid schema was accepted")?;
+            assert!(error.downcast_ref::<SchemaRejected>().is_some());
+            let before = std::fs::read(path(&home, &original)?)?;
+            let stage = load(&home, &original)?.context("missing rejection")?.stage;
+            // The query uses the durable outcome, even if the source is later repaired.
+            Connection::open(profile.source.join("onememory.db"))?.execute_batch("DROP TABLE memories")?;
+            let error = control_migrate_profile(&ownership, &original, true)
+                .err().context("rejection query replayed migration")?;
+            assert!(error.downcast_ref::<SchemaRejected>().is_some());
+            assert_eq!(std::fs::read(path(&home, &original)?)?, before);
+            assert_eq!(load(&home, &original)?.context("missing rejection")?.stage, stage);
+            assert!(!profile.destination.exists());
+            let mut changed = original.clone();
+            changed.account = "changed-binding".into();
+            changed.fingerprint = hex::encode(Sha256::digest(changed.fingerprint_bytes()?));
+            let error = control_migrate_profile(&ownership, &changed, true)
+                .err().context("changed operation accepted rejection")?;
+            assert!(error.downcast_ref::<SchemaRejected>().is_none());
+            Ok(())
+        })();
+        for (name, value) in saved {
+            match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
+        }
+        result
+    }
+
+    #[test]
+    fn rejection_cannot_follow_uncertain_effects_or_a_torn_journal() -> Result<()> {
+        use std::io::Write;
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        #[cfg(windows)] let _registry_scope = registry::TestScope::new(&home);
+        let (original, profile) = fixture(&home)?;
+        let mut record = admit_or_load(&home, &original, &profile)?;
+        record.phase = Phase::Transforming;
+        save(&home, &record)?;
+        record.phase = Phase::RejectedSchema;
+        assert!(save(&home, &record).is_err());
+        std::fs::OpenOptions::new().append(true).open(path(&home, &original)?)?.write_all(b"{\"phase\":\"rejected_schema\"")?;
+        assert!(load(&home, &original).is_err());
+        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original)).is_err());
+        assert!(!profile.destination.exists());
+        Ok(())
     }
 
     #[test]

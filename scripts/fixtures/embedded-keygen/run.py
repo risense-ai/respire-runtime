@@ -1,7 +1,7 @@
 """Extra source-native regression, never candidate or GUI release acceptance."""
 import argparse, hashlib, json, os, pathlib, re, shutil, socket, subprocess, tempfile
 
-CLIENT2 = "86553b4ec601c6c0c334318ba5a83f876568ce4f"
+CLIENT2 = "b41808737e2ae8bd55c1c309dfbdb41222cdf77d"
 MODELS = {
  "tokenizer.json":"6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
  "onnx/model_quantized.onnx":"0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",

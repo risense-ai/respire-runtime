@@ -235,8 +235,25 @@ fn receive_and_execute(
             .map_err(|_| ("scope_mismatch", "private migration identity mismatch"))?;
         events.send(ControlEvent::LongControlStarted)
             .map_err(|_| ("control_unavailable", "private migration deadline unavailable"))?;
-        let result = migration.execute(&ownership)
-            .map_err(|_| ("migration_outcome_unknown", "query the original migration operation before retrying"))?;
+        let result = match migration.execute(&ownership) {
+            Ok(result) => result,
+            Err(error) if error.downcast_ref::<respire_app::migration::SchemaRejected>().is_some() => {
+                crate::startup_identity::verify_auth_control_binding(migration.binding(), migration.identity())
+                    .map_err(|_| ("migration_outcome_unknown", "migration rejection identity could not be verified"))?;
+                *control_ready = true;
+                response.ok = false;
+                response.exit = 1;
+                response.code = Some("migration_schema_rejected".into());
+                response.data_dir = Some(migration.binding().profile.to_str()
+                    .ok_or(("migration_outcome_unknown", "migration rejection profile encoding failed"))?.to_owned());
+                response.envelope = Some(ResultEnvelope::new("migration-control", Status::Fail,
+                    serde_json::to_value(migration.original())
+                        .map_err(|_| ("migration_outcome_unknown", "migration rejection binding encoding failed"))?,
+                    Vec::new()));
+                return Ok(());
+            }
+            Err(_) => return Err(("migration_outcome_unknown", "query the original migration operation before retrying")),
+        };
         crate::startup_identity::verify_auth_control_binding(migration.binding(), &result.identity)
             .map_err(|_| ("migration_outcome_unknown", "migration completion identity could not be verified"))?;
         *control_ready = true;
