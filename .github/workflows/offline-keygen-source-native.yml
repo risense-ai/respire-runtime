@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7
+          ref: acd4f623e4c7a21a012999ea4abf3c590406a1dd
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -179,7 +179,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7'
+          $cliSha='acd4f623e4c7a21a012999ea4abf3c590406a1dd'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -188,7 +188,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7
+          ref: acd4f623e4c7a21a012999ea4abf3c590406a1dd
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -204,7 +204,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'acd4f623e4c7a21a012999ea4abf3c590406a1dd'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -490,6 +490,47 @@ jobs:
                           complete=last.get('traversal_complete')
                           if type(complete) is bool: native_initial['last_traversal_complete']=complete
               summary['native_initial']=native_initial
+              # Closed historical preparation evidence; never used by acceptance checks.
+              def preparation(value):
+                  if type(value) is not dict or set(value)!={'route','attempt','kind','proof'}: return 'unknown'
+                  route=value.get('route'); attempt=value.get('attempt'); kind=value.get('kind'); proof=value.get('proof')
+                  if type(route) is not str or route not in {'bounded_attempt','candidate_window'}: return 'unknown'
+                  if type(attempt) is not int: return 'unknown'
+                  if not ((route=='bounded_attempt' and 1<=attempt<=5) or (route=='candidate_window' and attempt==0)): return 'unknown'
+                  if type(kind) is not str or kind not in {'not_reached','unknown','invalid_focus_fields','invalid_focused_id','invalid_requested_id','outside_target','outside_document','offscreen','id_mismatch','verified'}: return 'unknown'
+                  if type(proof) is not str or proof not in {'not_eligible','attempts_exhausted','budget_exhausted','false','exception','verified'}: return 'unknown'
+                  return {'route':route,'attempt':attempt,'kind':kind,'proof':proof}
+              summary['final_preparation']='unknown'
+              summary['final_preparation_history']='unknown'
+              offline_diagnostic=n.get('offline')
+              if type(offline_diagnostic) is dict:
+                  summary['final_preparation']=preparation(offline_diagnostic.get('final_preparation'))
+                  history=offline_diagnostic.get('final_preparation_history')
+                  if type(history) is list and len(history)<=5:
+                      projected=[preparation(item) for item in history]
+                      if all(type(item) is dict for item in projected): summary['final_preparation_history']=projected
+              summary['recovery_dismiss_detail']='unknown'
+              if type(offline_diagnostic) is dict:
+                  detail=offline_diagnostic.get('recovery_dismiss_detail')
+                  if type(detail) is str and detail in {'before_guard','before_focus','escape_send','after_guard','observe_absence','complete'}:
+                      summary['recovery_dismiss_detail']=detail
+              # Last exact native error category, not an initial-document cause or root cause.
+              last_errors={
+                'Offline button focus changed before UIA Invoke':'pre_invoke_focus_rejected',
+                'Offline button preparation exceeded its existing attempt budget':'preparation_budget_exhausted',
+                'Offline button focus failed without a retryable UIA readiness condition':'focus_readiness_rejected',
+                'Offline button did not become focus-ready within the bounded attempts':'focus_attempts_exhausted',
+                'Synthetic text was not observed in the original visible control':'synthetic_text_readback_mismatch',
+                'Visible text focus changed before SendInput':'text_focus_rejected',
+                'Offline Unicode SendInput was incomplete':'text_input_incomplete',
+                'Original recovery dialog controls did not disappear within the bounded checks':'recovery_controls_still_present',
+                'Offline input focus escaped the original visible document':'key_focus_outside_document',
+                'Offline button focus changed before key dispatch':'key_focus_changed',
+                'Offline SendInput key was rejected':'key_input_rejected',
+                'UIA has no focused element':'focused_element_absent',
+                'Offline selector is ambiguous':'offline_selector_ambiguous'}
+              last_error=n.get('error')
+              summary['last_native_error_kind']=last_errors.get(last_error,'unknown') if type(last_error) is str else 'unknown'
               o=n.get('offline',{}); focus=o.get('account_focus_stability',{})
               allowed_stages={'account_navigation','offline_initialization','key_generation',
                 'recovery_dismiss','overview_navigation','runtime_start','account_verification',
