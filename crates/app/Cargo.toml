@@ -38,6 +38,9 @@ hex = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 whoami = "2.1"
 
+[target.'cfg(windows)'.dependencies]
+winsafe = { version = "=0.0.28", features = ["advapi"] }
+
 [dev-dependencies]
 respire_app_domain = { path = "../app-domain", features = ["test-support"] }
 tempfile = "3.15"

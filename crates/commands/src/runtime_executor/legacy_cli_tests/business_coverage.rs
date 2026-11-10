@@ -283,3 +283,43 @@ fn protocol_error_does_not_retry() {
     assert!(err.to_string().contains("epoch"));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn production_executor_defers_writes_and_restores_indexing_scope() -> anyhow::Result<()> {
+    with_isolated_session(|root| {
+        use respire_app::core_sdk::indexing_deferred;
+        assert!(!indexing_deferred());
+        // Call the production entry directly, not the legacy fixture wrapper.
+        let written = super::super::capture_run(vec![
+            "--json".into(), "remember".into(), "deferred source fixture".into(),
+            "--title".into(), "deferred source fixture".into(),
+            "--importance".into(), "important".into(), "--force".into(),
+        ]);
+        assert_eq!(written.exit, 0, "{:?}", written.envelope);
+        assert_eq!(written.envelope.summary["index_state"], "pending");
+        assert!(!indexing_deferred());
+        let id = written.envelope.summary["id"]
+            .as_str().context("remember response is missing its ID")?;
+        let updated = super::super::capture_run(vec![
+            "--json".into(), "update".into(), id.into(),
+            "--title".into(), "updated deferred fixture".into(),
+            "--content".into(), "updated deferred source".into(),
+        ]);
+        assert_eq!(updated.exit, 0, "{:?}", updated.envelope);
+        assert_eq!(updated.envelope.summary["index_state"], "pending");
+        assert!(!indexing_deferred());
+        let shown = super::super::capture_run(vec![
+            "--json".into(), "show".into(), id.into(),
+        ]);
+        assert_eq!(shown.exit, 0, "{:?}", shown.envelope);
+        assert_eq!(shown.envelope.details["entry"]["content"], "updated deferred source");
+        assert!(!indexing_deferred());
+        let failed = super::super::capture_run(vec![
+            "--json".into(), "import".into(),
+            root.join("missing-import.json").to_string_lossy().into_owned(),
+        ]);
+        assert_ne!(failed.exit, 0);
+        assert!(!indexing_deferred(), "failed write leaked its indexing scope");
+        Ok(())
+    })
+}
