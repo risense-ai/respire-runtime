@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: acd4f623e4c7a21a012999ea4abf3c590406a1dd
+          ref: 7449a369ec8c41df98a537dc01958899efbd93f1
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -179,7 +179,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='acd4f623e4c7a21a012999ea4abf3c590406a1dd'
+          $cliSha='7449a369ec8c41df98a537dc01958899efbd93f1'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -188,7 +188,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: acd4f623e4c7a21a012999ea4abf3c590406a1dd
+          ref: 7449a369ec8c41df98a537dc01958899efbd93f1
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -204,7 +204,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'acd4f623e4c7a21a012999ea4abf3c590406a1dd'
+          test "$(git -C .cli-source rev-parse HEAD)" = '7449a369ec8c41df98a537dc01958899efbd93f1'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -531,6 +531,15 @@ jobs:
                 'Offline selector is ambiguous':'offline_selector_ambiguous'}
               last_error=n.get('error')
               summary['last_native_error_kind']=last_errors.get(last_error,'unknown') if type(last_error) is str else 'unknown'
+              # Diagnostic only. Saturated count is a lower bound on complete traversals, not polls.
+              summary['runtime_start_stop_selector']={'state':'unknown','complete_samples':'unknown'}
+              selector_offline=n.get('offline')
+              selector=selector_offline.get('runtime_start_stop_selector') if type(selector_offline) is dict else None
+              if type(selector) is dict and set(selector)=={'state','complete_samples'}:
+                  state=selector.get('state'); samples=selector.get('complete_samples')
+                  if (type(state) is str and state in {'absent','disabled','enabled','ambiguous','unobservable'}
+                      and type(samples) is int and 0<=samples<=256):
+                      summary['runtime_start_stop_selector']={'state':state,'complete_samples':samples}
               o=n.get('offline',{}); focus=o.get('account_focus_stability',{})
               allowed_stages={'account_navigation','offline_initialization','key_generation',
                 'recovery_dismiss','overview_navigation','runtime_start','account_verification',
