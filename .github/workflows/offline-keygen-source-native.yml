@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 94b8c68fc847c6d2ffb607ad3c1adcb190d0e3c7
+          ref: ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -179,7 +179,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='94b8c68fc847c6d2ffb607ad3c1adcb190d0e3c7'
+          $cliSha='ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -188,7 +188,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 94b8c68fc847c6d2ffb607ad3c1adcb190d0e3c7
+          ref: ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -204,7 +204,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '94b8c68fc847c6d2ffb607ad3c1adcb190d0e3c7'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'ddf9b1479bb4e66e2c35a5ac18a066433f58cbf7'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -451,12 +451,16 @@ jobs:
               native_initial={'phase':'unknown','ready':'unknown','attempt_count':'unknown',
                 'last_document_count':'unknown','last_focusable_count':'unknown',
                 'last_traversal_complete':'unknown','elapsed_ms':'unknown','error_kind':'unknown',
-                'pid_observation':'unknown'}
-              phases={'target_guard','read_tree','verify_new_descendant','record_tree','ready','wait_document','budget_exhausted'}
+                'pid_observation':'unknown','discarded_samples':'unknown'}
+              phases={'target_guard','read_tree','verify_new_descendant','record_tree','ready','wait_document','budget_exhausted','discard_unavailable_sample'}
               # Historical observation may precede successful rescan; not a root-cause claim.
               pid_observation=n.get('document_pid_diagnostic')
-              if type(pid_observation) is str and pid_observation in {'unavailable','invalid_type','nonpositive','unbound_positive'}:
+              if type(pid_observation) is str and pid_observation in {'unavailable','invalid_type','nonpositive','unbound_positive','element_unavailable'}:
                   native_initial['pid_observation']=pid_observation
+              # Historical samples only; invalid or excessive counts do not become evidence.
+              discarded=n.get('document_discarded_samples')
+              if type(discarded) is int and 0<=discarded<=256:
+                  native_initial['discarded_samples']=discarded
               phase=n.get('document_readiness_phase')
               if type(phase) is str and phase in phases: native_initial['phase']=phase
               error_kinds={
