@@ -19,6 +19,8 @@ struct Original {
     root: PathBuf, source: PathBuf, profile: PathBuf,
     binary: PathBuf, image_sha256: String,
     token: String, coordinator: String, marker_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_marker_sha256: Option<String>,
     original_identity: HostAuthIdentity, session_sha256: Option<String>, stage: Stage,
     actor: Option<RuntimeIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +90,9 @@ fn validate_record(record:&Original,root:&Path) -> Result<()> {
         && record.binary.is_absolute() && !record.coordinator.is_empty()
         && valid_digest(&record.image_sha256) && valid_digest(&record.marker_sha256),
         "offline keygen original binding mismatch");
+    anyhow::ensure!(record.pending_marker_sha256.as_deref().is_none_or(|digest|
+        valid_digest(digest) && matches!(record.stage,Stage::Prepared|Stage::RolledBack)),
+        "offline keygen marker intent is outside a pre-effect stage");
     let committed=matches!(record.stage,Stage::Committed|Stage::Starting|Stage::Verified|Stage::Finished|Stage::HandedOff);
     anyhow::ensure!(if committed { record.session_sha256.as_deref().is_some_and(valid_digest) }
         else { record.session_sha256.is_none() }, "offline keygen stage has inconsistent receipt evidence");
@@ -104,6 +109,17 @@ fn require_startable(stage:Stage) -> Result<()> {
         "offline_keygen_handoff_pending: prior launch/completion requires independent recovery; no spawn retried");
     Ok(())
 }
+fn keygen_sends_original(stage:Stage,query_only:bool) -> Result<bool> {
+    match stage {
+        Stage::Prepared => {
+            anyhow::ensure!(!query_only,
+                "offline keygen original was not sent; repeat keygen with the original force to resume preparation");
+            Ok(true)
+        }
+        Stage::Sent | Stage::Committed => Ok(false),
+        _ => anyhow::bail!("offline keygen handoff requires explicit recovery; no write was repeated"),
+    }
+}
 fn save(record: &Original, digest: &mut Option<String>) -> Result<()> {
     validate_record(record,&record.root)?;
     let file=path(&record.root); no_links(&file)?;
@@ -115,7 +131,10 @@ fn save(record: &Original, digest: &mut Option<String>) -> Result<()> {
     }
     let bytes=serde_json::to_vec(record)?;
     // A failed publish is not retried here, even if it may have taken effect.
-    if private_write(&file,&bytes,digest.as_deref()).is_err() {
+    let published=private_write(&file,&bytes,digest.as_deref());
+    #[cfg(test)]
+    let published=published.and_then(|()| tests::journal_publish_result());
+    if published.is_err() {
         // Observe a possible after-write error without retrying or overwriting.
         // Equal readback is not proof that the failed durability step succeeded.
         let published=load(&record.root).ok().flatten().is_some_and(|(_,actual)| actual == hash(&bytes));
@@ -128,9 +147,24 @@ fn validate_transition(previous:&Original,next:&Original) -> Result<()> {
     let mut binding=next.clone();
     binding.stage=previous.stage;
     binding.marker_sha256=previous.marker_sha256.clone();
+    binding.pending_marker_sha256=previous.pending_marker_sha256.clone();
     binding.session_sha256=previous.session_sha256.clone();
     binding.actor=previous.actor.clone();
     binding.final_actor=previous.final_actor.clone();
+    if matches!(previous.stage,Stage::Prepared|Stage::RolledBack) {
+        anyhow::ensure!(if next.stage == previous.stage {
+            (next.marker_sha256 == previous.marker_sha256
+                || previous.pending_marker_sha256.as_ref() == Some(&next.marker_sha256))
+                && (next.pending_marker_sha256.is_some()
+                    || previous.pending_marker_sha256.as_ref().is_none_or(|target| target == &next.marker_sha256))
+        } else {
+            previous.pending_marker_sha256.is_none() && next.pending_marker_sha256.is_none()
+                && next.marker_sha256 == previous.marker_sha256
+        }, "offline keygen marker intent must settle before any effect claim");
+    } else {
+        anyhow::ensure!(next.pending_marker_sha256 == previous.pending_marker_sha256,
+            "offline keygen cannot create a marker intent from an effect-bearing stage");
+    }
     anyhow::ensure!(if let Some(final_actor) = &previous.final_actor {
         next.final_actor.as_ref() == Some(final_actor)
     } else {
@@ -142,12 +176,14 @@ fn validate_transition(previous:&Original,next:&Original) -> Result<()> {
         && previous.actor.as_ref().is_none_or(|actor| next.actor.as_ref() == Some(actor)),
         "offline keygen original operation changed");
     anyhow::ensure!(matches!((previous.stage,next.stage),
-        (Stage::Prepared,Stage::Sent) | (Stage::Sent,Stage::Sent) | (Stage::Sent,Stage::Committed)
+        (Stage::Prepared,Stage::Prepared) | (Stage::Prepared,Stage::Sent)
+        | (Stage::Sent,Stage::Sent) | (Stage::Sent,Stage::Committed)
         | (Stage::Committed,Stage::Committed) | (Stage::Sent,Stage::Starting)
         | (Stage::Committed,Stage::Starting) | (Stage::Starting,Stage::Verified)
         | (Stage::Verified,Stage::Finished) | (Stage::Finished,Stage::HandedOff)
-        | (Stage::Sent,Stage::RolledBack) | (Stage::RolledBack,Stage::RollbackStarting)
-        | (Stage::RolledBack,Stage::RollbackFinished) | (Stage::RollbackStarting,Stage::RollbackFinished)
+        | (Stage::Sent,Stage::RolledBack) | (Stage::RolledBack,Stage::RolledBack)
+        | (Stage::RolledBack,Stage::RollbackStarting)
+        | (Stage::RollbackStarting,Stage::RollbackFinished)
         | (Stage::RollbackFinished,Stage::RollbackHandedOff)), "offline keygen phase cannot be replayed or regressed");
     Ok(())
 }
@@ -167,6 +203,36 @@ fn update_marker(record: &mut Original, maintenance: &mut lifecycle::Maintenance
     Ok(())
 }
 
+/// A new controller may replace only one of the exact marker digests already
+/// recorded for this original. Persist its target before publishing that marker.
+fn record_marker_intent(record:&mut Original,digest:&mut Option<String>,observed:Option<&str>,target:&str) -> Result<()> {
+    anyhow::ensure!(matches!(record.stage,Stage::Prepared|Stage::RolledBack)
+        && match observed {
+            Some(actual) => actual == record.marker_sha256 || record.pending_marker_sha256.as_deref() == Some(actual),
+            None => record.stage == Stage::Prepared,
+        }, "offline keygen rebind does not match its original marker intent");
+    if let Some(actual)=observed { record.marker_sha256=actual.to_owned(); }
+    record.pending_marker_sha256=Some(target.to_owned());
+    save(record,digest)
+}
+fn resume_prelaunch_maintenance(record:&mut Original,digest:&mut Option<String>) -> Result<lifecycle::Maintenance> {
+    anyhow::ensure!(matches!(record.stage,Stage::Prepared|Stage::RolledBack),
+        "offline keygen cannot rebind an uncertain effect or launch");
+    let root=record.root.clone(); let profile=record.profile.clone();
+    let token=record.token.clone(); let coordinator=record.coordinator.clone();
+    let marker=record.marker_sha256.clone(); let pending=record.pending_marker_sha256.clone();
+    lifecycle::resume_offline_keygen_prelaunch_maintenance(&root,&profile,&token,&coordinator,
+        &marker,pending.as_deref(),record.stage == Stage::Prepared,
+        |observed,target| record_marker_intent(record,digest,observed,target))
+}
+fn settle_marker_intent(record:&mut Original,digest:&mut Option<String>,maintenance:&mut lifecycle::Maintenance) -> Result<()> {
+    let target=record.pending_marker_sha256.clone().context("offline keygen marker rebind intent missing")?;
+    update_marker(record,maintenance)?;
+    anyhow::ensure!(record.marker_sha256 == target, "offline keygen rebound marker differs from durable intent");
+    record.pending_marker_sha256=None;
+    save(record,digest)
+}
+
 pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvelope> {
     if let Some(id) = operation {
         anyhow::ensure!(canonical_id(id), "auth operation ID must be a canonical random UUID");
@@ -181,15 +247,27 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     if operation.is_none() { std::fs::create_dir_all(&profile)?; }
     let root=root.canonicalize()?; let profile=profile.canonicalize()?;
     let saved=load(&root)?;
-    let (mut record,mut digest,mut maintenance)=if let Some((record,digest))=saved {
+    let (mut record,mut digest,mut maintenance)=if let Some((mut record,digest))=saved {
         anyhow::ensure!(record.force == force && operation.is_none_or(|id| id == record.operation_id),
             "offline keygen requires the original operation and force");
-        anyhow::ensure!(matches!(record.stage, Stage::Sent | Stage::Committed),
-            "offline keygen handoff requires explicit recovery; no write was repeated");
+        let prepared=keygen_sends_original(record.stage,operation.is_some())?;
         verify_selection(&record)?;
-        lifecycle::verify_offline_keygen_marker(&root,&profile,&record.token,&record.coordinator,&record.marker_sha256)?;
-        let maintenance=lifecycle::resume_key_maintenance(&root,&profile,&record.source,&record.token,&record.coordinator)?;
-        (record,Some(digest),maintenance)
+        if prepared {
+            anyhow::ensure!(control::identity(&profile)? == record.original_identity,
+                "offline keygen prepared source identity changed");
+            let health=crate::rpc::probe_runtime()?;
+            verify_prepared_owner(&record,health.as_ref())?;
+            let mut digest=Some(digest);
+            let mut maintenance=resume_prelaunch_maintenance(&mut record,&mut digest)?;
+            // Preserve the rebound marker before a drain can fail or time out.
+            settle_marker_intent(&mut record,&mut digest,&mut maintenance)?;
+            if let Some(health)=health.as_ref() { maintenance.drain_runtime(health)?; }
+            (record,digest,maintenance)
+        } else {
+            lifecycle::verify_offline_keygen_marker(&root,&profile,&record.token,&record.coordinator,&record.marker_sha256)?;
+            let maintenance=lifecycle::resume_key_maintenance(&root,&profile,&record.source,&record.token,&record.coordinator)?;
+            (record,Some(digest),maintenance)
+        }
     } else {
         anyhow::ensure!(operation.is_none(), "offline keygen original record missing; no operation admitted");
         let health=crate::rpc::probe_runtime()?;
@@ -209,7 +287,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
         let mut maintenance=lifecycle::begin_offline_keygen_maintenance(&root,&profile,|token,coordinator,marker_sha256| {
             let record=Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force,
                 root:root.clone(),source:profile.clone(),profile:profile.clone(),binary:binary.clone(),image_sha256:image_sha256.clone(),
-                token:token.to_owned(),coordinator:coordinator.to_owned(),marker_sha256:marker_sha256.to_owned(),
+                token:token.to_owned(),coordinator:coordinator.to_owned(),marker_sha256:marker_sha256.to_owned(),pending_marker_sha256:None,
                 original_identity:control::identity(&profile)?,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,
                 was_serving:health.is_some(),store_ready:health.as_ref().is_some_and(|owner| owner.store_ready) };
             verify_selection(&record)?;
@@ -225,9 +303,10 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     };
     verify_selection(&record)?;
     update_marker(&mut record,&mut maintenance)?;
-    let send=record.stage == Stage::Prepared;
+    let send=keygen_sends_original(record.stage,operation.is_some())?;
     if send {
         anyhow::ensure!(control::identity(&record.profile)? == record.original_identity, "offline keygen source identity changed");
+        require_no_owner()?;
         record.stage=Stage::Sent;
     }
     save(&record,&mut digest)?; // sent + current controller durable before any exchange.
@@ -238,12 +317,12 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     anyhow::ensure!(result.operation_id == record.operation_id && result.path == record.profile.join("session.json"),
         "offline keygen result binding mismatch");
     if result.outcome == HostAuthOutcome::RolledBack {
-        anyhow::ensure!(result.session_sha256.is_none() && result.super_password.is_none()
-            && control::identity(&record.profile)? == record.original_identity,
-            "offline keygen rollback source identity changed");
-        record.stage=Stage::RolledBack; save(&record,&mut digest)?;
+        record_rollback(&mut record,&mut digest,&result)?;
         if send { finish_initial_rollback(&takeover,&mut record,&mut digest,&mut maintenance)?; }
-        // A query-only process never guesses whether it should restore an owner.
+        // Queries reconcile O but never restore a serving owner. Explicit Start
+        // may consume the durable RolledBack pre-launch stage exactly once.
+        let mut envelope=envelope;
+        if !send { envelope.actions.push("runtime start".into()); }
         return Ok(envelope);
     }
     anyhow::ensure!(result.outcome == HostAuthOutcome::Committed, "offline keygen outcome unresolved; original operation retained");
@@ -301,21 +380,85 @@ pub(crate) fn verify_original_target(root:&Path,profile:&Path,identity:&HostAuth
         installation_id:health.installation_id,profile:health.data_dir,account_id:health.account_id })
 }
 
-fn finish_initial_rollback(takeover:&respire_client_host::lock::LibraryLock,record:&mut Original,digest:&mut Option<String>,maintenance:&mut lifecycle::Maintenance) -> Result<()> {
+fn require_no_owner() -> Result<()> {
+    anyhow::ensure!(crate::rpc::probe_runtime()?.is_none() && !crate::rpc::endpoint_path().try_exists()?,
+        "offline keygen live or unknown owner exists; no spawn or write attempted");
+    Ok(())
+}
+
+fn verify_prepared_owner(record:&Original,health:Option<&crate::net_rpc::Health>) -> Result<()> {
+    let Some(health)=health else { return require_no_owner(); };
+    anyhow::ensure!(record.was_serving && health.store_ready == record.store_ready,
+        "offline keygen prepared operation gained a different owner");
+    let manifest=crate::runtime_fetch::read_manifest()?.context("offline keygen Runtime manifest missing")?;
+    let registration=super::super::read_registration(&record.root)?;
+    let managed=registration.as_ref().filter(|config| config.enabled && !config.manually_stopped);
+    let account=match &record.original_identity {
+        HostAuthIdentity::Bound { account_id, .. } => account_id.clone(),
+        _ => hash(record.profile.display().to_string().as_bytes()),
+    };
+    super::launch_authorization::model_control::verify_model_owner(health,&record.root,&record.profile,
+        managed,&record.binary,&manifest,Some(&account))
+}
+
+fn rollback_receipt(record:&Original,result:&HostAuthResult,identity:&HostAuthIdentity) -> Result<()> {
+    anyhow::ensure!(record.stage == Stage::Sent && result.outcome == HostAuthOutcome::RolledBack
+        && result.operation_id == record.operation_id && result.path == record.profile.join("session.json")
+        && result.session_sha256.is_none() && result.super_password.is_none()
+        && identity == &record.original_identity,
+        "offline keygen rollback original receipt or identity changed");
+    Ok(())
+}
+fn record_rollback(record:&mut Original,digest:&mut Option<String>,result:&HostAuthResult) -> Result<()> {
+    rollback_receipt(record,result,&control::identity(&record.profile)?)?;
+    record.stage=Stage::RolledBack;
+    save(record,digest)
+}
+fn claim_rollback(record:&mut Original,digest:&mut Option<String>) -> Result<()> {
+    anyhow::ensure!(record.stage == Stage::RolledBack,
+        "offline keygen rollback already attempted; no completion or spawn retried");
+    // Fence completion as well as spawning, even if the original had no owner.
+    record.stage=Stage::RollbackStarting;
+    save(record,digest)
+}
+
+fn finish_initial_rollback(takeover:&respire_client_host::lock::LibraryLock,record:&mut Original,
+    digest:&mut Option<String>,maintenance:&mut lifecycle::Maintenance) -> Result<()> {
     verify_selection(record)?;
+    anyhow::ensure!(takeover.protects(&record.root.join("runtime/takeover"))?, "offline keygen takeover mismatch");
     anyhow::ensure!(control::identity(&record.profile)? == record.original_identity,
         "offline keygen rollback original identity changed");
+    lifecycle::verify_offline_keygen_marker(&record.root,&record.profile,&record.token,&record.coordinator,&record.marker_sha256)?;
+    require_no_owner()?;
+    claim_rollback(record,digest)?;
     if record.was_serving {
-        record.stage=Stage::RollbackStarting; save(record,digest)?;
         maintenance.start_account_runtime()?;
         let actor=verify_original_target(&record.root,&record.profile,&record.original_identity,record.store_ready)?;
+        let binding=maintenance.offline_keygen_start_binding(&record.profile,&record.token,&record.coordinator)?;
+        let launch=launch::Evidence::capture(record,&actor,&binding)?;
+        let process=crate::net_rpc::runtime_process_identity(actor.pid)?;
         maintenance.offline_keygen_rollback_verified(&record.profile,&record.original_identity,record.store_ready)?;
+        finish_checked(&actor,|| {
+            launch.verify()?;
+            verify_selection(record)?;
+            anyhow::ensure!(takeover.protects(&record.root.join("runtime/takeover"))?
+                && load(&record.root)?.is_some_and(|(_,actual)| Some(actual) == *digest)
+                && crate::net_rpc::runtime_process_identity(actor.pid)? == process,
+                "offline keygen rollback evidence changed before completion");
+            let live=verify_original_target(&record.root,&record.profile,&record.original_identity,record.store_ready)?;
+            anyhow::ensure!(crate::net_rpc::runtime_process_identity(actor.pid)? == process
+                && crate::net_rpc::process_is_running(actor.pid)?,
+                "offline keygen rollback OS actor changed during completion");
+            Ok(live)
+        },|| {
+            maintenance.verify_offline_keygen_completion(&record.profile)?;
+            maintenance.finish()
+        })?;
         record.actor=Some(actor);
-        maintenance.verify_offline_keygen_completion(&record.profile)?;
     } else {
-        lifecycle::verify_offline_keygen_marker(&record.root,&record.profile,&record.token,&record.coordinator,&record.marker_sha256)?;
+        maintenance.finish()?;
     }
-    maintenance.finish()?;
+    lifecycle::verify_offline_keygen_finished(&record.root)?;
     record.stage=Stage::RollbackFinished; save(record,digest)?;
     maintenance.finish_handoff()?;
     if record.was_serving {
@@ -428,6 +571,17 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
         remove_finished(&record,&digest)?;
         return Ok(true);
     }
+    if record.stage == Stage::RolledBack {
+        verify_selection(&record)?;
+        anyhow::ensure!(control::identity(&profile)? == record.original_identity,
+            "offline keygen rollback original identity changed");
+        require_no_owner()?;
+        let mut digest=Some(digest);
+        let mut maintenance=resume_prelaunch_maintenance(&mut record,&mut digest)?;
+        settle_marker_intent(&mut record,&mut digest,&mut maintenance)?;
+        finish_initial_rollback(takeover,&mut record,&mut digest,&mut maintenance)?;
+        return Ok(record.was_serving);
+    }
     require_startable(record.stage)?;
     verify_selection(&record)?;
     lifecycle::verify_offline_keygen_marker(&root,&profile,&record.token,&record.coordinator,&record.marker_sha256)?;
@@ -439,6 +593,11 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
     let envelope=control::auth_result_locked(takeover,&mut maintenance,&record.operation_id,record.force)?;
     let receipt:HostAuthResult=serde_json::from_value(envelope.summary)
         .map_err(|_| anyhow::anyhow!("offline keygen query receipt invalid"))?;
+    if receipt.outcome == HostAuthOutcome::RolledBack {
+        record_rollback(&mut record,&mut digest,&receipt)?;
+        finish_initial_rollback(takeover,&mut record,&mut digest,&mut maintenance)?;
+        return Ok(record.was_serving);
+    }
     let session = committed_start_session(&record, &receipt, &control::identity(&profile)?)?;
     // Never retain the auth.result recovery code, including in the continuation file.
     drop(receipt.super_password);
@@ -575,6 +734,12 @@ mod tests {
     use super::*;
     std::thread_local! {
         static FORBID_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static FAIL_JOURNAL_AFTER_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    pub(super) fn journal_publish_result() -> Result<()> {
+        anyhow::ensure!(!FAIL_JOURNAL_AFTER_PUBLISH.with(|fail| fail.replace(false)),
+            "synthetic unknown durability after journal publication");
+        Ok(())
     }
     pub(super) fn assert_no_forbidden_admission() {
         FORBID_ADMISSION.with(|forbidden| assert!(!forbidden.get(), "unsupported keygen crossed the side-effect boundary"));
@@ -671,7 +836,7 @@ mod tests {
         Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force:false,
             root:root.to_owned(),source:root.to_owned(),profile:root.to_owned(),binary:root.join("runtime-image"),
             image_sha256:"a".repeat(64),token:uuid::Uuid::new_v4().to_string(),coordinator:"synthetic-coordinator".into(),
-            marker_sha256:"b".repeat(64),original_identity:HostAuthIdentity::Absent,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,was_serving:false,store_ready:false }
+            marker_sha256:"b".repeat(64),pending_marker_sha256:None,original_identity:HostAuthIdentity::Absent,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,was_serving:false,store_ready:false }
     }
     #[test]
     fn absent_pending_probe_does_not_create_first_use_paths() -> Result<()> {
@@ -795,12 +960,274 @@ mod tests {
         assert!(require_startable(record.stage).is_err());
         record.stage=Stage::Sent;
         assert!(save(&record,&mut digest).is_err());
+        record.stage=Stage::RollbackFinished;
+        assert!(save(&record,&mut digest).is_err());
+        record.stage=Stage::RolledBack; claim_rollback(&mut record,&mut digest)?;
         record.stage=Stage::RollbackFinished; save(&record,&mut digest)?;
         assert!(remove_rollback(&record,digest.as_deref().context("synthetic journal digest missing")?).is_err());
         record.stage=Stage::RollbackHandedOff; save(&record,&mut digest)?;
         assert!(remove_rollback(&record,"foreign-digest").is_err());
         remove_rollback(&record,digest.as_deref().context("synthetic journal digest missing")?)?;
         assert!(!path(&root).exists());
+        Ok(())
+    }
+    #[test]
+    fn prepared_retry_keeps_original_and_query_never_sends() -> Result<()> {
+        let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+        let mut record=original(&root); let mut digest=None;
+        record.force=true;
+        save(&record,&mut digest)?;
+        let original_id=record.operation_id.clone();
+        let original_token=record.token.clone();
+        // A successfully rebound Paused marker is persisted before retrying a
+        // failed drain. Prepared proves that no keygen exchange has begun.
+        record_marker_intent(&mut record,&mut digest,Some(&"b".repeat(64)),&"c".repeat(64))?;
+        record.marker_sha256="c".repeat(64); record.pending_marker_sha256=None; save(&record,&mut digest)?;
+        let (mut recovered,observed)=load(&root)?.context("prepared original missing")?;
+        assert_eq!(recovered.operation_id,original_id);
+        assert_eq!(recovered.token,original_token);
+        assert!(recovered.force);
+        assert_eq!(recovered.marker_sha256,record.marker_sha256);
+        assert!(keygen_sends_original(recovered.stage,true).is_err());
+        assert!(keygen_sends_original(recovered.stage,false)?);
+        let mut changed=recovered.clone(); changed.force=false;
+        assert!(save(&changed,&mut Some(observed.clone())).is_err());
+        changed=recovered.clone(); changed.original_identity=HostAuthIdentity::Unbound {
+            operation_id:original_id,session_sha256:"d".repeat(64) };
+        assert!(save(&changed,&mut Some(observed.clone())).is_err());
+        recovered.stage=Stage::Sent; save(&recovered,&mut digest)?;
+        for query_only in [false,true] {
+            assert!(!keygen_sends_original(Stage::Sent,query_only)?);
+            assert!(!keygen_sends_original(Stage::Committed,query_only)?);
+            for stage in [Stage::Starting,Stage::Verified,Stage::Finished,Stage::HandedOff,
+                Stage::RolledBack,Stage::RollbackStarting,Stage::RollbackFinished,Stage::RollbackHandedOff] {
+                assert!(keygen_sends_original(stage,query_only).is_err());
+            }
+        }
+        recovered.stage=Stage::Prepared;
+        assert!(save(&recovered,&mut digest).is_err());
+        assert_eq!(load(&root)?.context("sent original missing")?.0.stage,Stage::Sent);
+        Ok(())
+    }
+    #[test]
+    fn reconciled_rollback_claim_is_durable_for_serving_and_idle_originals() -> Result<()> {
+        for was_serving in [false,true] {
+            let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+            let mut record=original(&root); let mut digest=None;
+            record.was_serving=was_serving;
+            save(&record,&mut digest)?;
+            record.stage=Stage::Sent; save(&record,&mut digest)?;
+            let receipt=HostAuthResult {operation_id:record.operation_id.clone(),
+                outcome:HostAuthOutcome::RolledBack,path:root.join("session.json"),
+                session_sha256:None,super_password:None};
+            rollback_receipt(&record,&receipt,&HostAuthIdentity::Absent)?;
+            record.stage=Stage::RolledBack; save(&record,&mut digest)?;
+            let before=std::fs::read(path(&root))?;
+            let mut stale=record.clone();
+            assert!(claim_rollback(&mut stale,&mut Some("foreign-digest".into())).is_err());
+            assert_eq!(std::fs::read(path(&root))?,before);
+            let (mut recovered,observed)=load(&root)?.context("rollback original missing")?;
+            claim_rollback(&mut recovered,&mut Some(observed))?;
+            let (mut interrupted,observed)=load(&root)?.context("rollback claim missing")?;
+            assert_eq!(interrupted.stage,Stage::RollbackStarting);
+            assert_eq!(interrupted.was_serving,was_serving);
+            assert!(claim_rollback(&mut interrupted,&mut Some(observed)).is_err());
+            assert!(require_startable(interrupted.stage).is_err());
+            assert!(keygen_sends_original(interrupted.stage,false).is_err());
+            assert!(rollback_receipt(&interrupted,&receipt,&HostAuthIdentity::Absent).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn rollback_reconciliation_rejects_unknown_foreign_and_committed_evidence() -> Result<()> {
+        let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+        let mut record=original(&root); record.stage=Stage::Sent;
+        let original_id=record.operation_id.clone();
+        let fresh=|| HostAuthResult {operation_id:original_id.clone(),outcome:HostAuthOutcome::RolledBack,
+            path:root.join("session.json"),session_sha256:None,super_password:None};
+        let valid=fresh();
+        rollback_receipt(&record,&valid,&HostAuthIdentity::Absent)?;
+        let mut changed=fresh(); changed.operation_id=uuid::Uuid::new_v4().to_string();
+        assert!(rollback_receipt(&record,&changed,&HostAuthIdentity::Absent).is_err());
+        changed=fresh(); changed.path=root.join("other/session.json");
+        assert!(rollback_receipt(&record,&changed,&HostAuthIdentity::Absent).is_err());
+        changed=fresh(); changed.session_sha256=Some("a".repeat(64));
+        assert!(rollback_receipt(&record,&changed,&HostAuthIdentity::Absent).is_err());
+        changed=fresh(); changed.super_password=Some("synthetic-must-not-be-retained".into());
+        assert!(rollback_receipt(&record,&changed,&HostAuthIdentity::Absent).is_err());
+        for outcome in [HostAuthOutcome::Unknown,HostAuthOutcome::Committed] {
+            changed=fresh(); changed.outcome=outcome;
+            assert!(rollback_receipt(&record,&changed,&HostAuthIdentity::Absent).is_err());
+        }
+        assert!(rollback_receipt(&record,&valid,&HostAuthIdentity::Unbound {
+            operation_id:record.operation_id.clone(),session_sha256:"a".repeat(64) }).is_err());
+        for stage in [Stage::Prepared,Stage::Committed,Stage::Starting,Stage::Verified,Stage::Finished,
+            Stage::HandedOff,Stage::RolledBack,Stage::RollbackStarting,Stage::RollbackFinished,Stage::RollbackHandedOff] {
+            record.stage=stage;
+            assert!(rollback_receipt(&record,&valid,&HostAuthIdentity::Absent).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn marker_intent_cannot_escape_pre_effect_stages_or_authorize_foreign_hashes() -> Result<()> {
+        let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+        for stage in [Stage::Prepared,Stage::RolledBack] {
+            let mut record=original(&root); record.stage=stage;
+            let mut pending=record.clone(); pending.pending_marker_sha256=Some("c".repeat(64));
+            validate_record(&pending,&root)?; validate_transition(&record,&pending)?;
+            let mut target=pending.clone(); target.marker_sha256="c".repeat(64); target.pending_marker_sha256=None;
+            validate_transition(&pending,&target)?;
+            let mut foreign=pending.clone(); foreign.marker_sha256="d".repeat(64);
+            assert!(validate_transition(&pending,&foreign).is_err());
+            let mut abandoned=pending.clone(); abandoned.pending_marker_sha256=None;
+            assert!(validate_transition(&pending,&abandoned).is_err());
+            let mut effect=target.clone(); effect.stage=if stage == Stage::Prepared {Stage::Sent} else {Stage::RollbackStarting};
+            assert!(validate_transition(&pending,&effect).is_err());
+            validate_transition(&target,&effect)?;
+            record.pending_marker_sha256=Some("not-a-digest".into());
+            assert!(validate_record(&record,&root).is_err());
+        }
+        for stage in [Stage::Sent,Stage::Committed,Stage::Starting,Stage::Verified,Stage::Finished,
+            Stage::HandedOff,Stage::RollbackStarting,Stage::RollbackFinished,Stage::RollbackHandedOff] {
+            let mut record=original(&root); record.stage=stage; record.pending_marker_sha256=Some("c".repeat(64));
+            assert!(validate_record(&record,&root).is_err());
+            assert!(resume_prelaunch_maintenance(&mut record,&mut None).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prelaunch_marker_rebind_recovers_process_and_publication_interruptions() -> Result<()> {
+        const PHASE:&str="RSRS_TEST_KEYGEN_REBIND_PHASE";
+        const STAGE:&str="RSRS_TEST_KEYGEN_REBIND_STAGE";
+        fn child(phase:&str,stage:&str,root:&Path) -> Result<()> {
+            let current=std::thread::current();
+            let name=current.name().context("rebind test name missing")?;
+            let output=std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact",name,"--nocapture"])
+                .env(PHASE,phase).env(STAGE,stage).env("RSRS_DATA_DIR",root).output()?;
+            anyhow::ensure!(output.status.success(),"rebind {stage}/{phase} failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+            anyhow::ensure!(String::from_utf8_lossy(&output.stdout).contains("keygen-rebind-cut-checked"),
+                "rebind test child did not execute");
+            Ok(())
+        }
+        let Ok(phase)=std::env::var(PHASE) else {
+            for (stage,initial) in [("prepared","initial"),("prepared","initial_absent"),("rolled_back","initial")] {
+                let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+                for phase in [initial,"intent_unknown","before_marker","after_marker","journal_failure","journal_unknown","recover"] {
+                    child(phase,stage,&root)?;
+                }
+            }
+            return Ok(());
+        };
+        let _env=crate::runtime_fetch::runtime_fetch_tests::env_scope(&["RSRS_DATA_DIR","RSRS_RUNTIME_BOOT_TOKEN"])?;
+        std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN");
+        let root=PathBuf::from(std::env::var_os("RSRS_DATA_DIR").context("rebind root missing")?).canonicalize()?;
+        let stage=std::env::var(STAGE)?;
+        let marker=root.join("runtime/autostart/maintenance.json");
+        if phase == "initial" || phase == "initial_absent" {
+            let mut record=original(&root); let mut digest=None;
+            let result=lifecycle::begin_offline_keygen_maintenance(&root,&root,|token,coordinator,marker| {
+                record.token=token.to_owned(); record.coordinator=coordinator.to_owned(); record.marker_sha256=marker.to_owned();
+                save(&record,&mut digest)?;
+                anyhow::ensure!(phase != "initial_absent", "synthetic interruption before initial marker");
+                Ok(())
+            });
+            if phase == "initial_absent" {
+                assert!(result.is_err() && !marker.exists());
+            } else {
+                let maintenance=result?;
+                if stage == "rolled_back" {
+                    record.stage=Stage::Sent; save(&record,&mut digest)?;
+                    record.stage=Stage::RolledBack; save(&record,&mut digest)?;
+                }
+                // Another process cannot rebind while the exact original controller lives.
+                child("live_controller",&stage,&root)?;
+                drop(maintenance);
+            }
+        } else {
+            let (mut record,observed)=load(&root)?.context("rebind original missing")?;
+            let original=record.clone(); let mut digest=Some(observed);
+            let before=match std::fs::read(&marker) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            match phase.as_str() {
+                "live_controller" => {
+                    let journal=std::fs::read(path(&root))?;
+                    assert!(resume_prelaunch_maintenance(&mut record,&mut digest).is_err());
+                    assert_eq!(std::fs::read(path(&root))?,journal);
+                    assert_eq!(std::fs::read(&marker).ok(),before);
+                }
+                "intent_unknown" => {
+                    FAIL_JOURNAL_AFTER_PUBLISH.with(|fail| fail.set(true));
+                    let error=resume_prelaunch_maintenance(&mut record,&mut digest).err().context("intent fault did not fire")?;
+                    assert!(error.to_string().contains("offline_keygen_record_durability_unknown"));
+                    assert_eq!(std::fs::read(&marker).ok(),before);
+                    assert!(load(&root)?.context("published intent missing")?.0.pending_marker_sha256.is_some());
+                }
+                "before_marker" => {
+                    let token=record.token.clone(); let coordinator=record.coordinator.clone();
+                    let expected=record.marker_sha256.clone(); let pending=record.pending_marker_sha256.clone();
+                    let result=lifecycle::resume_offline_keygen_prelaunch_maintenance(&root,&root,&token,&coordinator,
+                        &expected,pending.as_deref(),record.stage == Stage::Prepared,|previous,target| {
+                            record_marker_intent(&mut record,&mut digest,previous,target)?;
+                            anyhow::bail!("synthetic error after intent but before marker publication")
+                        });
+                    assert!(result.is_err());
+                    assert_eq!(std::fs::read(&marker).ok(),before);
+                    assert!(load(&root)?.context("durable intent missing")?.0.pending_marker_sha256.is_some());
+                }
+                "after_marker" => {
+                    lifecycle::fail_keygen_rebind_after_marker_for_test();
+                    assert!(resume_prelaunch_maintenance(&mut record,&mut digest).is_err());
+                    let actual=hash(&std::fs::read(&marker)?);
+                    let saved=load(&root)?.context("durable target missing")?.0;
+                    assert_ne!(actual,saved.marker_sha256);
+                    assert_eq!(saved.pending_marker_sha256.as_deref(),Some(actual.as_str()));
+                }
+                "journal_failure" => {
+                    let mut maintenance=resume_prelaunch_maintenance(&mut record,&mut digest)?;
+                    assert!(settle_marker_intent(&mut record,&mut Some("foreign-digest".into()),&mut maintenance).is_err());
+                    let actual=hash(&std::fs::read(&marker)?);
+                    let saved=load(&root)?.context("failed journal lost intent")?.0;
+                    assert_eq!(saved.pending_marker_sha256.as_deref(),Some(actual.as_str()));
+                }
+                "journal_unknown" => {
+                    let mut maintenance=resume_prelaunch_maintenance(&mut record,&mut digest)?;
+                    FAIL_JOURNAL_AFTER_PUBLISH.with(|fail| fail.set(true));
+                    let error=settle_marker_intent(&mut record,&mut digest,&mut maintenance).err().context("journal fault did not fire")?;
+                    assert!(error.to_string().contains("offline_keygen_record_durability_unknown"));
+                    let saved=load(&root)?.context("published convergence missing")?.0;
+                    assert!(saved.pending_marker_sha256.is_none());
+                    assert_eq!(saved.marker_sha256,hash(&std::fs::read(&marker)?));
+                }
+                "recover" => {
+                    let mut maintenance=resume_prelaunch_maintenance(&mut record,&mut digest)?;
+                    settle_marker_intent(&mut record,&mut digest,&mut maintenance)?;
+                    let (saved,_)=load(&root)?.context("settled original missing")?;
+                    assert!(saved.pending_marker_sha256.is_none());
+                    assert_eq!(saved.marker_sha256,hash(&std::fs::read(&marker)?));
+                    assert_eq!(saved.stage,original.stage);
+                    assert_eq!(saved.operation_id,original.operation_id);
+                    assert_eq!(saved.original_identity,original.original_identity);
+                    assert_eq!(saved.force,original.force); assert_eq!(saved.token,original.token);
+                    drop(maintenance);
+                    let journal=std::fs::read(path(&root))?;
+                    let mut foreign:serde_json::Value=serde_json::from_slice(&std::fs::read(&marker)?)?;
+                    foreign["owner_birth"]=serde_json::json!("foreign-controller");
+                    std::fs::write(&marker,serde_json::to_vec(&foreign)?)?;
+                    assert!(resume_prelaunch_maintenance(&mut record,&mut digest).is_err());
+                    assert_eq!(std::fs::read(path(&root))?,journal);
+                }
+                _ => anyhow::bail!("unknown synthetic rebind phase"),
+            }
+        }
+        assert!(!root.join("session.json").exists() && !root.join("runtime/endpoint.json").exists()
+            && !root.join("runtime/autostart/launch").exists());
+        println!("keygen-rebind-cut-checked");
         Ok(())
     }
     #[test]

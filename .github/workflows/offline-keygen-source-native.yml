@@ -23,13 +23,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 67f335bbf143c169ea4c9afbb97ab575b5321c01
+          ref: 43d29544fedf118fe7586b2063a5e73794ec037d
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-client2
-          ref: e50f877c92ea4ddcbbbc25a657aa046442b9ed90
+          ref: 86553b4ec601c6c0c334318ba5a83f876568ce4f
           path: .client2-source
           persist-credentials: false
       - uses: actions/setup-go@v5
@@ -180,7 +180,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='67f335bbf143c169ea4c9afbb97ab575b5321c01'
+          $cliSha='43d29544fedf118fe7586b2063a5e73794ec037d'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -189,13 +189,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 67f335bbf143c169ea4c9afbb97ab575b5321c01
+          ref: 43d29544fedf118fe7586b2063a5e73794ec037d
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-client2
-          ref: e50f877c92ea4ddcbbbc25a657aa046442b9ed90
+          ref: 86553b4ec601c6c0c334318ba5a83f876568ce4f
           path: .client2-source
           persist-credentials: false
       - name: Verify exact clean source and reviewed Client2 inputs before any build
@@ -205,8 +205,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '67f335bbf143c169ea4c9afbb97ab575b5321c01'
-          test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
+          test "$(git -C .cli-source rev-parse HEAD)" = '43d29544fedf118fe7586b2063a5e73794ec037d'
+          test "$(git -C .client2-source rev-parse HEAD)" = '86553b4ec601c6c0c334318ba5a83f876568ce4f'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
             git -C "$repo" diff --cached --exit-code
@@ -433,7 +433,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-candidate-ui-input.json" -SourceClient2Commit e50f877c92ea4ddcbbbc25a657aa046442b9ed90 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/client2-candidate-ui-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-candidate-ui-models"
+          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-candidate-ui-input.json" -SourceClient2Commit 86553b4ec601c6c0c334318ba5a83f876568ce4f -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/client2-candidate-ui-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-candidate-ui-models"
           if ($LASTEXITCODE -ne 0) { throw 'Candidate UI subset failed; release acceptance remains unproven' }
       - name: Produce allowlisted UI result and independently require subset success
         if: always()
