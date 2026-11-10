@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: d22fc17864d9e1d638ca6c580ae1cad912740146
+          ref: 1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'd22fc17864d9e1d638ca6c580ae1cad912740146'
+          test "$(git -C .cli-source rev-parse HEAD)" = '1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e954cf25ff07571a3d7d29e25d5709a57d9f9461'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -202,7 +202,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='d22fc17864d9e1d638ca6c580ae1cad912740146'
+          $cliSha='1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -211,7 +211,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: d22fc17864d9e1d638ca6c580ae1cad912740146
+          ref: 1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -227,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'd22fc17864d9e1d638ca6c580ae1cad912740146'
+          test "$(git -C .cli-source rev-parse HEAD)" = '1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e954cf25ff07571a3d7d29e25d5709a57d9f9461'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -617,6 +617,19 @@ jobs:
                           value=readiness.get(key)
                           if type(value) is bool: candidate_focus[key]=value
               summary['candidate_focus_diagnostic']=candidate_focus
+              # Existing failed-node context only; no identifiers or acceptance evidence.
+              candidate_pid={'pid_kind':'unknown','held_member':'unknown','depth':'unknown','ancestor_document':'unknown','in_same_snapshot':'unknown'}
+              if type(candidate_offline) is dict:
+                  failed_pid=candidate_offline.get('account_stability_pid')
+                  if type(failed_pid) is dict:
+                      kind=failed_pid.get('pid_kind')
+                      if type(kind) is str and kind in {'null','non_int','nonpositive','positive_not_in_tree'}: candidate_pid['pid_kind']=kind
+                      depth=failed_pid.get('depth')
+                      if type(depth) is int and 0<=depth<=32: candidate_pid['depth']=depth
+                      for key in ['held_member','ancestor_document','in_same_snapshot']:
+                          value=failed_pid.get(key)
+                          if type(value) is bool: candidate_pid[key]=value
+              summary['candidate_stability_pid']=candidate_pid
               # Diagnostic only. Saturated count is a lower bound on complete traversals, not polls.
               summary['runtime_start_stop_selector']={'state':'unknown','complete_samples':'unknown'}
               selector_offline=n.get('offline')
