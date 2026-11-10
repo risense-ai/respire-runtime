@@ -126,29 +126,6 @@ fn verified_target_health(target: &std::path::Path, account: &str) -> Result<res
     Ok(health)
 }
 
-pub(crate) fn verify_keygen_target(target: &std::path::Path, identity: &HostAuthIdentity)
-    -> Result<HostKeygenRuntimeIdentity> {
-    ensure!(matches!(identity, HostAuthIdentity::Unbound { .. }), "keygen handoff must remain unbound");
-    let root = respire_app::service::main_data_dir().canonicalize()?;
-    login_transaction::verify_auth_identity(&root, target, identity)?;
-    let account = format!("{:x}", Sha256::digest(target.display().to_string().as_bytes()));
-    let snapshot = |health: respire_commands::net_rpc::Health| -> Result<HostKeygenRuntimeIdentity> {
-        ensure!(std::fs::canonicalize(&health.installation_root)? == root
-            && !health.installation_id.is_empty() && !health.instance_id.is_empty()
-            && !health.process_start_id.is_empty(), "keygen serving identity incomplete");
-        Ok(HostKeygenRuntimeIdentity { pid: health.pid, process_start_id: health.process_start_id,
-            instance_id: health.instance_id, generation: health.generation, image_path: health.image_path,
-            image_sha256: health.image_sha256, installation_root: health.installation_root,
-            installation_id: health.installation_id, profile: health.data_dir, account_id: health.account_id })
-    };
-    let before = snapshot(verified_target_health(target, &account)?)?;
-    login_transaction::verify_auth_identity(&root, target, identity)?;
-    let after = snapshot(verified_target_health(target, &account)?)?;
-    ensure!(before == after, "keygen serving actor changed during handoff");
-    login_transaction::verify_auth_identity(&root, target, identity)?;
-    Ok(after)
-}
-
 pub(crate) fn recovery_request(request: &RpcRequest) -> Result<respire_protocol::host_control::HostLoginRecoveryParams> {
     use respire_protocol::host_control::{HostLoginRecoveryParams,
         HOST_AUTH_SCHEMA_V, HOST_LOGIN_RECOVERY_METHOD, HOST_LOGIN_RECOVERY_STATUS_METHOD};

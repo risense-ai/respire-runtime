@@ -9,7 +9,7 @@ use respire_protocol::{
     HostControlLaunchGrant, HostControlOperation, HostControlParams, RpcRequest, RpcResponse,
     HOST_CONTROL_MAX_FRAME_BYTES, HOST_CONTROL_SCHEMA_V,
     HostAuthKeygenParams, HostAuthOutcome, HOST_AUTH_SCHEMA_V,
-    HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD, HOST_AUTH_KEYGEN_COMPLETE_METHOD,
+    HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
     HostModelParams, HOST_MODEL_SCHEMA_V,
 };
 
@@ -683,31 +683,6 @@ fn receive_and_execute(
             Vec::new()));
         return Ok(());
     }
-    if request.method == HOST_AUTH_KEYGEN_COMPLETE_METHOD {
-        let params = validate_auth_request(&request)?;
-        response.operation_id = request.operation_id.clone();
-        response.idempotency_key = request.idempotency_key.clone();
-        crate::startup_identity::authorize_account_completion(grant)
-            .map_err(|_| ("unauthorized", "keygen handoff requires verified maintenance"))?;
-        watch_auth_parent(events.clone())
-            .map_err(|_| ("unauthorized", "keygen handoff parent watch failed"))?;
-        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
-            .map_err(|_| ("scope_mismatch", "keygen handoff binding mismatch"))?;
-        let receipt = respire_app::login_transaction::control_keygen_complete(
-            request.operation_id.as_deref().ok_or(("invalid_request", "keygen operation missing"))?,
-            request.idempotency_key.as_deref().ok_or(("invalid_request", "keygen key missing"))?,
-            &params, crate::auth_control::verify_keygen_target)
-            .map_err(|_| ("keygen_handoff_pending", "keygen live verification incomplete"))?;
-        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
-            .and_then(|_| crate::startup_identity::verify_account_completion_authority())
-            .map_err(|_| ("keygen_handoff_pending", "keygen handoff authority changed"))?;
-        *control_ready = true;
-        response.ok = true;
-        response.exit = 0;
-        response.envelope = Some(ResultEnvelope::new("keygen-handoff", Status::Ok,
-            serde_json::to_value(receipt).map_err(|_| ("keygen_handoff_pending", "keygen handoff encoding failed"))?, Vec::new()));
-        return Ok(());
-    }
     let auth = request.method == HOST_AUTH_KEYGEN_METHOD || request.method == HOST_AUTH_RESULT_METHOD;
     if auth {
         let params = validate_auth_request(&request)?;
@@ -837,7 +812,7 @@ pub(crate) fn validate_auth_request(request: &RpcRequest) -> std::result::Result
     if !uuid(&request.id) || !request.operation_id.as_deref().is_some_and(uuid)
         || request.idempotency_key.as_ref().is_none_or(|key| key.is_empty() || key.len() > 128
             || !key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
-        || ![HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD, HOST_AUTH_KEYGEN_COMPLETE_METHOD].contains(&request.method.as_str())
+        || ![HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD].contains(&request.method.as_str())
         || request.args.len() != 1 || request.scope.is_some() || request.parent_operation_id.is_some()
         || request.queue_wait_ms.is_some() || request.lifecycle.is_some() {
         return Err(("invalid_request", "unsupported auth control RPC shape"));
@@ -929,10 +904,10 @@ mod keygen_handoff_request_tests {
     use super::*;
 
     #[test]
-    fn completion_request_has_original_operation_and_no_claimed_authority() -> Result<()> {
+    fn existing_result_request_has_original_operation_and_no_claimed_authority() -> Result<()> {
         let wire = serde_json::json!({
             "v":PROTOCOL_V,"id":"00000000-0000-4000-8000-000000000001",
-            "method":HOST_AUTH_KEYGEN_COMPLETE_METHOD,
+            "method":HOST_AUTH_RESULT_METHOD,
             "operation_id":"00000000-0000-4000-8000-000000000002","idempotency_key":"fixture-original",
             "args":[serde_json::json!({"schema_version":HOST_AUTH_SCHEMA_V,"force":false,
                 "binding":{"installation_root":"/fixture","profile":"/fixture",
@@ -942,6 +917,9 @@ mod keygen_handoff_request_tests {
         });
         let request: RpcRequest = serde_json::from_value(wire.clone())?;
         assert!(validate_auth_request(&request).is_ok());
+        let mut removed: RpcRequest = serde_json::from_value(wire.clone())?;
+        removed.method = "control.auth.keygen_complete".into();
+        assert!(validate_auth_request(&removed).is_err());
         for field in ["operation_id", "idempotency_key"] {
             let mut missing = wire.clone();
             missing[field] = serde_json::Value::Null;

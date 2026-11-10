@@ -12,8 +12,8 @@ use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResu
 mod login;
 mod identity;
 pub use identity::{control_identity_write, control_identity_write_result};
-mod keygen_handoff;
-pub use keygen_handoff::control_keygen_complete;
+#[cfg(test)]
+mod keygen_existing_protocol;
 mod keys;
 pub use keys::{control_key, control_key_result, control_key_rollback, control_key_complete, verify_key_receipt};
 mod space;

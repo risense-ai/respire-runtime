@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{io::Read, path::{Path, PathBuf}};
 use super::super::{hash, private_write, lifecycle};
 use super::launch_authorization::control;
+mod launch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -260,8 +261,23 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     Ok(output)
 }
 
-pub(crate) use respire_protocol::host_control::HostKeygenRuntimeIdentity as RuntimeIdentity;
-use respire_protocol::host_control::{HostKeygenHandoffReceipt as CompleteReceipt, HOST_AUTH_KEYGEN_COMPLETE_METHOD};
+/// Private continuation-file snapshot of existing Health evidence. This is not
+/// an RPC DTO or a new auth result and must never accept recovery material.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeIdentity {
+    pub pid: u32,
+    pub process_start_id: String,
+    pub instance_id: String,
+    pub generation: u64,
+    pub image_path: String,
+    pub image_sha256: String,
+    pub installation_root: String,
+    pub installation_id: String,
+    pub profile: String,
+    pub account_id: String,
+}
+
 pub(crate) fn verify_target(root:&Path,profile:&Path,operation:&str,session:&str) -> Result<RuntimeIdentity> {
     anyhow::ensure!(control::identity(profile)? == (HostAuthIdentity::Unbound {
         operation_id:operation.to_owned(),session_sha256:session.to_owned()}), "offline keygen identity changed");
@@ -295,7 +311,7 @@ fn finish_initial_rollback(takeover:&respire_client_host::lock::LibraryLock,reco
         let actor=verify_original_target(&record.root,&record.profile,&record.original_identity,record.store_ready)?;
         maintenance.offline_keygen_rollback_verified(&record.profile,&record.original_identity,record.store_ready)?;
         record.actor=Some(actor);
-        maintenance.offline_keygen_complete_binding(&record.profile)?;
+        maintenance.verify_offline_keygen_completion(&record.profile)?;
     } else {
         lifecycle::verify_offline_keygen_marker(&record.root,&record.profile,&record.token,&record.coordinator,&record.marker_sha256)?;
     }
@@ -318,59 +334,68 @@ fn remove_rollback(record:&Original,digest:&str) -> Result<()> {
     Ok(())
 }
 
-fn complete(takeover:&respire_client_host::lock::LibraryLock, maintenance:&lifecycle::Maintenance,
-    record:&Original, actor:&RuntimeIdentity) -> Result<()> {
-    use respire_protocol::{ControlBinding,HostAuthKeygenParams,HostControlLaunchGrant,RpcRequest};
-    use std::time::{Duration,Instant};
-    verify_selection(record)?;
-    anyhow::ensure!(takeover.protects(&record.root.join("runtime/takeover"))?, "offline keygen takeover mismatch");
-    let session=record.session_sha256.as_deref().context("offline keygen committed digest missing")?;
-    anyhow::ensure!(verify_target(&record.root,&record.profile,&record.operation_id,session)? == *actor,
-        "offline keygen actor changed before completion");
-    let binding=maintenance.offline_keygen_complete_binding(&record.profile)?;
-    let registration=super::super::read_registration(&record.root)?;
-    let managed=registration.as_ref().filter(|c| c.enabled && !c.manually_stopped).map(|c| c.id.as_str());
-    let (grant,_)=super::launch_authorization::prepare_grant_for_identity(&record.binary,&record.root,
-        &record.profile,managed,crate::net_rpc::rpc_port(),&actor.account_id,binding)?;
-    let grant:HostControlLaunchGrant=serde_json::from_value(grant)?;
-    anyhow::ensure!(grant.image_path == record.binary && grant.image_sha256.eq_ignore_ascii_case(&record.image_sha256),
-        "offline keygen completion image changed");
-    let params=HostAuthKeygenParams { schema_version:1, binding:ControlBinding {
-        installation_root:record.root.clone(),profile:record.profile.clone(),launch_id:grant.instance_id.clone(),expected_account_id:None },
-        identity:HostAuthIdentity::Unbound {operation_id:record.operation_id.clone(),session_sha256:session.to_owned()},force:record.force };
-    let request=RpcRequest {v:respire_commands::rpc_client::PROTOCOL_V,id:uuid::Uuid::new_v4().to_string(),
-        method:HOST_AUTH_KEYGEN_COMPLETE_METHOD.into(),args:vec![serde_json::to_string(&params)?],scope:None,
-        operation_id:Some(record.operation_id.clone()),idempotency_key:Some(record.operation_id.clone()),
-        parent_operation_id:None,queue_wait_ms:None,lifecycle:None};
-    super::launch_authorization::exchange_control(&record.binary,&grant,&request,Instant::now()+Duration::from_secs(12),|response,pid| {
-        anyhow::ensure!(response.v == request.v && response.id == request.id && response.bin == "rsrs-runtime"
-            && response.pid == Some(pid) && response.operation_id == request.operation_id
-            && response.idempotency_key == request.idempotency_key && response.scope.is_none() && response.web_url.is_none()
-            && response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none(),
-            "offline keygen completion response mismatch");
-        let envelope=response.envelope.context("offline keygen completion receipt missing")?;
-        anyhow::ensure!(envelope.command == "keygen-handoff" && matches!(envelope.status,Status::Ok) && envelope.errors.is_empty(),
-            "offline keygen completion rejected");
-        if let Some(directory)=response.data_dir.as_ref() {
-            anyhow::ensure!(Path::new(directory).canonicalize()? == record.profile,
-                "offline keygen completion response profile mismatch");
-        }
-        for (name,value) in [("control_ready","true"),("store_ready","false")] {
-            let mut items=envelope.items.iter().filter(|item| item.name == name);
-            anyhow::ensure!(items.next().is_some_and(|item| item.value == value
-                && if name == "control_ready" { matches!(item.status,Status::Ok) } else { matches!(item.status,Status::Skip) })
-                && items.next().is_none(), "offline keygen completion readiness mismatch");
-        }
-        let receipt:CompleteReceipt=serde_json::from_value(envelope.summary.clone())
-            .map_err(|_| anyhow::anyhow!("offline keygen completion receipt invalid"))?;
-        anyhow::ensure!(receipt.schema_version == 1 && receipt.operation_id == record.operation_id
-            && receipt.session_sha256 == session && receipt.path == record.profile.join("session.json") && receipt.runtime == *actor,
-            "offline keygen completion binding mismatch");
-        Ok(envelope)
+/// The Paused auth.result has already proved the original operation/key/force and
+/// committed candidate before launch. Runtime rechecks that Unbound identity
+/// after taking the library lock and holds it through serving. Do not acquire a
+/// second library lock or introduce a completion RPC beside that live actor.
+fn complete(takeover: &respire_client_host::lock::LibraryLock,
+    maintenance: &mut lifecycle::Maintenance, record: &Original, actor: &RuntimeIdentity,
+    launch: &launch::Evidence,
+) -> Result<()> {
+    anyhow::ensure!(record.stage == Stage::Verified && record.actor.as_ref() == Some(actor),
+        "offline keygen completion lacks its durable verified actor");
+    let process = crate::net_rpc::runtime_process_identity(actor.pid)?;
+    finish_checked(actor, || {
+        launch.verify()?;
+        verify_selection(record)?;
+        anyhow::ensure!(takeover.protects(&record.root.join("runtime/takeover"))?,
+            "offline keygen takeover mismatch");
+        let (durable, _) = load(&record.root)?.context("offline keygen original evidence missing")?;
+        anyhow::ensure!(serde_json::to_value(&durable)? == serde_json::to_value(record)?,
+            "offline keygen original evidence changed during completion");
+        let session = record.session_sha256.as_deref().context("offline keygen committed digest missing")?;
+        anyhow::ensure!(crate::net_rpc::runtime_process_identity(actor.pid)? == process,
+            "offline keygen OS actor changed before completion check");
+        let live = verify_target(&record.root, &record.profile, &record.operation_id, session)?;
+        anyhow::ensure!(crate::net_rpc::runtime_process_identity(actor.pid)? == process
+            && crate::net_rpc::process_is_running(actor.pid)?,
+            "offline keygen OS actor changed during completion check");
+        Ok(live)
+    }, || {
+        maintenance.verify_offline_keygen_completion(&record.profile)?;
+        maintenance.finish()
     })?;
-    anyhow::ensure!(verify_target(&record.root,&record.profile,&record.operation_id,session)? == *actor,
-        "offline keygen actor changed during completion");
+    lifecycle::verify_offline_keygen_finished(&record.root)
+}
+
+/// Retain the expected exact actor across the local state transition. A failed
+/// post-check is an uncertain completion, never permission to spawn or replay O.
+fn finish_checked(actor: &RuntimeIdentity,
+    mut observe: impl FnMut() -> Result<RuntimeIdentity>, finish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    anyhow::ensure!(observe()? == *actor, "offline keygen actor changed before completion");
+    finish()?;
+    anyhow::ensure!(observe()? == *actor, "offline keygen actor changed during completion");
     Ok(())
+}
+
+/// Authentication status alone is not live/terminal evidence. This admission
+/// runs only after the original Paused auth.result exchange succeeds.
+fn committed_start_session(record: &Original, receipt: &HostAuthResult,
+    identity: &HostAuthIdentity,
+) -> Result<String> {
+    require_startable(record.stage)?;
+    anyhow::ensure!(receipt.outcome == HostAuthOutcome::Committed
+        && receipt.operation_id == record.operation_id
+        && receipt.path == record.profile.join("session.json"),
+        "offline keygen original is not committed");
+    let session = receipt.session_sha256.as_deref().filter(|value| valid_digest(value))
+        .context("offline keygen receipt digest missing or invalid")?;
+    anyhow::ensure!(record.session_sha256.as_deref().is_none_or(|saved| saved == session)
+        && identity == &(HostAuthIdentity::Unbound {
+            operation_id: record.operation_id.clone(), session_sha256: session.to_owned(),
+        }), "offline keygen original identity changed");
+    Ok(session.to_owned())
 }
 
 /// Only the user-facing Start dispatcher calls this with its existing takeover.
@@ -414,23 +439,18 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
     let envelope=control::auth_result_locked(takeover,&mut maintenance,&record.operation_id,record.force)?;
     let receipt:HostAuthResult=serde_json::from_value(envelope.summary)
         .map_err(|_| anyhow::anyhow!("offline keygen query receipt invalid"))?;
-    anyhow::ensure!(receipt.outcome == HostAuthOutcome::Committed && receipt.operation_id == record.operation_id
-        && receipt.path == profile.join("session.json"), "offline keygen original is not committed");
-    let session=receipt.session_sha256.context("offline keygen receipt digest missing")?;
-    anyhow::ensure!(record.session_sha256.as_ref().is_none_or(|saved| saved == &session)
-        && control::identity(&profile)? == (HostAuthIdentity::Unbound {operation_id:record.operation_id.clone(),session_sha256:session.clone()}),
-        "offline keygen original identity changed");
+    let session = committed_start_session(&record, &receipt, &control::identity(&profile)?)?;
     // Never retain the auth.result recovery code, including in the continuation file.
     drop(receipt.super_password);
     record.session_sha256=Some(session.clone()); record.stage=Stage::Starting;
     update_marker(&mut record,&mut maintenance)?; save(&record,&mut digest)?;
     maintenance.start_account_runtime()?;
     let actor=verify_target(&root,&profile,&record.operation_id,&session)?;
+    let binding = maintenance.offline_keygen_start_binding(&profile, &record.token, &record.coordinator)?;
+    let launch = launch::Evidence::capture(&record, &actor, &binding)?;
     maintenance.offline_keygen_target_verified(&profile,&record.operation_id,&session)?;
     record.stage=Stage::Verified; record.actor=Some(actor.clone()); save(&record,&mut digest)?;
-    complete(takeover,&maintenance,&record,&actor)?;
-    maintenance.offline_keygen_complete_binding(&profile)?;
-    maintenance.finish()?;
+    complete(takeover,&mut maintenance,&record,&actor,&launch)?;
     record.stage=Stage::Finished; save(&record,&mut digest)?;
     maintenance.finish_handoff()?;
     record.final_actor=finish_embedded_serving_handoff(takeover,&record,&HostAuthIdentity::Unbound {
@@ -859,13 +879,162 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn completed_receipt_never_accepts_recovery_secret() {
+    fn completed_actor_never_accepts_recovery_secret() {
         let value=serde_json::json!({"schema_version":1,"operation_id":uuid::Uuid::new_v4().to_string(),
             "session_sha256":"a".repeat(64),"path":"/synthetic/session.json","runtime":{
                 "pid":12,"process_start_id":"synthetic","instance_id":"synthetic","generation":1,
                 "image_path":"/synthetic/runtime","image_sha256":"a".repeat(64),
                 "installation_root":"/synthetic","installation_id":"synthetic","profile":"/synthetic","account_id":"synthetic"},
             "super_password":"synthetic-only"});
-        assert!(serde_json::from_value::<CompleteReceipt>(value).is_err());
+        let mut actor = value["runtime"].clone();
+        actor["super_password"] = serde_json::json!("synthetic-only");
+        assert!(serde_json::from_value::<RuntimeIdentity>(actor).is_err());
     }
+    fn fixture_actor(record: &Original) -> RuntimeIdentity {
+        RuntimeIdentity { pid: 42, process_start_id: "fixture-birth".into(),
+            instance_id: "fixture-instance".into(), generation: 1,
+            image_path: record.binary.display().to_string(), image_sha256: record.image_sha256.clone(),
+            installation_root: record.root.display().to_string(), installation_id: "fixture-root".into(),
+            profile: record.profile.display().to_string(), account_id: "fixture-account".into() }
+    }
+
+    #[test]
+    fn existing_result_never_turns_unknown_or_foreign_evidence_into_start() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let mut record = original(&root);
+        record.stage = Stage::Sent;
+        let session = "c".repeat(64);
+        let identity = HostAuthIdentity::Unbound {
+            operation_id: record.operation_id.clone(), session_sha256: session.clone(),
+        };
+        let mut receipt = HostAuthResult { operation_id: record.operation_id.clone(),
+            outcome: HostAuthOutcome::Committed, session_sha256: Some(session.clone()),
+            path: root.join("session.json"), super_password: Some("synthetic-private-pipe-only".into()) };
+        assert_eq!(committed_start_session(&record, &receipt, &identity)?, session);
+        for outcome in [HostAuthOutcome::Unknown, HostAuthOutcome::RolledBack] {
+            receipt.outcome = outcome;
+            assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        }
+        receipt.outcome = HostAuthOutcome::Committed;
+        receipt.operation_id = uuid::Uuid::new_v4().to_string();
+        assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        receipt.operation_id = record.operation_id.clone();
+        receipt.path = root.join("other/session.json");
+        assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        receipt.path = root.join("session.json");
+        receipt.session_sha256 = None;
+        assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        receipt.session_sha256 = Some("d".repeat(64));
+        assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        receipt.session_sha256 = Some(session);
+        assert!(committed_start_session(&record, &receipt, &HostAuthIdentity::Absent).is_err());
+        record.session_sha256 = Some("e".repeat(64));
+        assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        record.session_sha256 = None;
+        for stage in [Stage::Starting, Stage::Verified, Stage::Finished, Stage::HandedOff] {
+            record.stage = stage;
+            assert!(committed_start_session(&record, &receipt, &identity).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_completion_rejects_every_changed_actor_before_and_after_finish() -> Result<()> {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir()?;
+        let actor = fixture_actor(&original(&temp.path().canonicalize()?));
+        let wire = serde_json::to_value(&actor)?;
+        for (field, changed) in [
+            ("pid", serde_json::json!(43)), ("process_start_id", serde_json::json!("other-birth")),
+            ("instance_id", serde_json::json!("other-instance")), ("generation", serde_json::json!(2)),
+            ("image_path", serde_json::json!("other-image")), ("image_sha256", serde_json::json!("f".repeat(64))),
+            ("installation_root", serde_json::json!("other-root")), ("installation_id", serde_json::json!("other-root-id")),
+            ("profile", serde_json::json!("other-profile")), ("account_id", serde_json::json!("other-account")),
+        ] {
+            let mut changed_wire = wire.clone(); changed_wire[field] = changed;
+            let foreign: RuntimeIdentity = serde_json::from_value(changed_wire)?;
+            for after_finish in [false, true] {
+                let finished = Cell::new(false);
+                let result = finish_checked(&actor, || {
+                    Ok(if finished.get() || !after_finish { foreign.clone() } else { actor.clone() })
+                }, || { finished.set(true); Ok(()) });
+                assert!(result.is_err(), "changed {field} accepted");
+                assert_eq!(finished.get(), after_finish, "changed actor advanced maintenance");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_completion_errors_are_not_success_and_never_retry_finish() -> Result<()> {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir()?;
+        let actor = fixture_actor(&original(&temp.path().canonicalize()?));
+        for after_finish in [false, true] {
+            let finishes = Cell::new(0);
+            let result = finish_checked(&actor, || {
+                if !after_finish || finishes.get() > 0 {
+                    anyhow::bail!("synthetic dead process, changed session or unreadable original");
+                }
+                Ok(actor.clone())
+            }, || { finishes.set(finishes.get() + 1); Ok(()) });
+            assert!(result.is_err());
+            assert_eq!(finishes.get(), usize::from(after_finish));
+        }
+        let observations = Cell::new(0);
+        let finishes = Cell::new(0);
+        assert!(finish_checked(&actor, || {
+            observations.set(observations.get() + 1); Ok(actor.clone())
+        }, || {
+            finishes.set(finishes.get() + 1);
+            anyhow::bail!("synthetic marker durability failure");
+        }).is_err());
+        assert_eq!(observations.get(), 1);
+        assert_eq!(finishes.get(), 1);
+        finish_checked(&actor, || { observations.set(observations.get() + 1); Ok(actor.clone()) }, || Ok(()))?;
+        assert_eq!(observations.get(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_auth_result_cannot_claim_a_finished_handoff() -> Result<()> {
+        let wire = serde_json::json!({"operation_id": uuid::Uuid::new_v4().to_string(),
+            "outcome": "finished", "session_sha256": "a".repeat(64),
+            "path": "/fixture/session.json"});
+        assert!(serde_json::from_value::<HostAuthResult>(wire).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn post_finish_failure_retains_verified_original_without_replay_or_cleanup() -> Result<()> {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir()?; let root = temp.path().canonicalize()?;
+        let mut record = original(&root); let mut digest = None;
+        save(&record, &mut digest)?;
+        record.stage = Stage::Sent; save(&record, &mut digest)?;
+        record.session_sha256 = Some("c".repeat(64)); record.stage = Stage::Starting;
+        save(&record, &mut digest)?;
+        let actor = fixture_actor(&record);
+        record.actor = Some(actor.clone()); record.stage = Stage::Verified;
+        save(&record, &mut digest)?;
+        let before = std::fs::read(path(&root))?;
+        let finished = Cell::new(false);
+        assert!(finish_checked(&actor, || {
+            let (durable, _) = load(&root)?.context("fixture original missing")?;
+            anyhow::ensure!(serde_json::to_value(&durable)? == serde_json::to_value(&record)?,
+                "fixture original changed");
+            anyhow::ensure!(!finished.get(), "synthetic actor exited after marker removal");
+            Ok(actor.clone())
+        }, || { finished.set(true); Ok(()) }).is_err());
+        assert!(finished.get());
+        assert_eq!(std::fs::read(path(&root))?, before);
+        let (durable, observed) = load(&root)?.context("fixture original lost")?;
+        assert!(durable.stage == Stage::Verified);
+        assert!(require_startable(durable.stage).is_err());
+        assert!(remove_finished(&durable, &observed).is_err());
+        assert!(path(&root).is_file());
+        Ok(())
+    }
+
 }

@@ -1262,21 +1262,3 @@ for (const [group, count] of [["positive", 7], ["negative", 24]]) {
   }
 }
 console.log(`runtime control contract verified: ${boundPaths.size} bound files (624 prior bindings retained with schema/consumer digest updates; 6 positive / 14 negative AgentConfig cases; prior cohorts retained)`);
-
-// Supplemental explicit-Start evidence is deliberately not a keygenResult terminal.
-const handoff = manifest.extensions?.keygen_handoff;
-if (!handoff || !boundPaths.has(handoff.schema)) fail("keygen handoff schema is not bound");
-const keygenHandoffSchema = readJSON(fixturePath(handoff.schema));
-for (const [group, count] of [["positive", 1], ["negative", 11]]) {
-  const paths = handoff.fixtures[group];
-  if (!Array.isArray(paths) || paths.length !== count) fail("keygen handoff fixture count drift");
-  for (const name of paths) {
-    if (!boundPaths.has(name)) fail("keygen handoff fixture is not bound");
-    const fixture = readJSON(fixturePath(name));
-    if (fixture.fixture_type !== "keygen_handoff" ||
-        fixture.expected !== (group === "positive" ? "accept" : "reject")) fail("keygen handoff fixture kind");
-    if (assetsSchemaValid(fixture.payload, keygenHandoffSchema) !== (group === "positive"))
-      fail("keygen handoff schema result mismatch");
-  }
-}
-console.log("keygen handoff supplemental schema verified (original keygen terminal rules unchanged)");

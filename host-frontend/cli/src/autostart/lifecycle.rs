@@ -549,6 +549,23 @@ impl Maintenance {
         self.offline_keygen_starting_verified(profile)
     }
 
+    /// Capture the actual Starting marker before it advances or is removed.
+    pub(crate) fn offline_keygen_start_binding(&self, profile: &Path, token: &str, coordinator: &str)
+        -> Result<respire_protocol::HostControlMaintenanceBinding> {
+        let root = self.installation_root()?;
+        let actual = marker(root)?.context("offline keygen Starting marker missing")?;
+        let held = self.marker.as_ref().context("offline keygen Starting owner missing")?;
+        anyhow::ensure!(actual.phase == Phase::Starting && held.phase == Phase::Starting
+            && actual.id == coordinator && actual.id == held.id && actual.token == token && actual.token == held.token
+            && actual.owner_pid == std::process::id() && actual.owner_birth == held.owner_birth
+            && controller_alive(&actual)? && actual.expected_profile.as_deref() == Some(profile)
+            && current_boot_token().as_deref() == Some(token)
+            && hash(&fs::read(marker_path(root))?) == self.marker_digest.as_deref().context("offline keygen Starting digest missing")?,
+            "offline keygen Starting controller changed");
+        serde_json::from_value(maintenance_binding(profile, None, false)?
+            .context("offline keygen Starting binding missing")?).map_err(Into::into)
+    }
+
     fn offline_keygen_starting_verified(&mut self, profile: &Path) -> Result<()> {
         let root = self.installation_root()?.to_path_buf();
         let actual = marker(&root)?.context("offline keygen marker missing")?;
@@ -563,7 +580,8 @@ impl Maintenance {
         self.mark(Phase::Verified)
     }
 
-    pub(crate) fn offline_keygen_complete_binding(&self, profile: &Path) -> Result<Option<Value>> {
+    /// Local coordinator check only; this never issues an account-completion grant.
+    pub(crate) fn verify_offline_keygen_completion(&self, profile: &Path) -> Result<()> {
         let (root, selected) = respire_client_host::config::control_roots()?;
         let root = root.canonicalize()?;
         anyhow::ensure!(self.installation_root()? == root && selected.canonicalize()? == profile,
@@ -571,8 +589,7 @@ impl Maintenance {
         let actual = marker(&root)?.context("offline keygen completion marker missing")?;
         let held = self.marker.as_ref().context("offline keygen completion ownership missing")?;
         verified_account_marker(&actual, held, profile, &fs::read(marker_path(&root))?,
-            self.marker_digest.as_deref().context("offline keygen completion digest missing")?)?;
-        maintenance_binding(profile, None, false)
+            self.marker_digest.as_deref().context("offline keygen completion digest missing")?)
     }
 
     /// Embedded Client2 owns supervision; there is no external CLI host to transfer.
