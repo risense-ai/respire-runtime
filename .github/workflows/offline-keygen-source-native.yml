@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 782e3b0c1fa117a2d3c6a5e5970f95267408634e
+          ref: d22fc17864d9e1d638ca6c580ae1cad912740146
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '782e3b0c1fa117a2d3c6a5e5970f95267408634e'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'd22fc17864d9e1d638ca6c580ae1cad912740146'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e954cf25ff07571a3d7d29e25d5709a57d9f9461'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -202,7 +202,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='782e3b0c1fa117a2d3c6a5e5970f95267408634e'
+          $cliSha='d22fc17864d9e1d638ca6c580ae1cad912740146'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -211,7 +211,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 782e3b0c1fa117a2d3c6a5e5970f95267408634e
+          ref: d22fc17864d9e1d638ca6c580ae1cad912740146
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -227,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '782e3b0c1fa117a2d3c6a5e5970f95267408634e'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'd22fc17864d9e1d638ca6c580ae1cad912740146'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e954cf25ff07571a3d7d29e25d5709a57d9f9461'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -571,6 +571,52 @@ jobs:
                 'Offline selector is ambiguous':'offline_selector_ambiguous'}
               last_error=n.get('error')
               summary['last_native_error_kind']=last_errors.get(last_error,'unknown') if type(last_error) is str else 'unknown'
+              # Closed diagnostic projection only; never participates in acceptance checks.
+              candidate_focus={'error_kind':'unknown','stability_status':'unknown','observations':'unknown',
+                'enabled':'unknown','focusable':'unknown','offscreen':'unknown'}
+              candidate_errors={
+                  'Candidate account button was replaced during stability window':'candidate_account_button_was_replaced_during_stability_window',
+                  'Candidate account focus changed during stability window':'candidate_account_focus_changed_during_stability_window',
+                  'Candidate initial RuntimeId unavailable':'candidate_initial_runtimeid_unavailable',
+                  'Candidate stability RuntimeId unavailable':'candidate_stability_runtimeid_unavailable',
+                  'Candidate stability button is not focus-ready':'candidate_stability_button_is_not_focus_ready',
+                  'Candidate stability button name unavailable':'candidate_stability_button_name_unavailable',
+                  'Candidate stability control type unavailable':'candidate_stability_control_type_unavailable',
+                  'Candidate stability depth bound reached':'candidate_stability_depth_bound_reached',
+                  'Candidate stability focus is outside the original document':'candidate_stability_focus_is_outside_the_original_document',
+                  'Candidate stability focus observation exceeded its bound':'candidate_stability_focus_observation_exceeded_its_bound',
+                  'Candidate stability focused ancestry is foreign':'candidate_stability_focused_ancestry_is_foreign',
+                  'Candidate stability focused control type unavailable':'candidate_stability_focused_control_type_unavailable',
+                  'Candidate stability focused identity unavailable':'candidate_stability_focused_identity_unavailable',
+                  'Candidate stability focused visibility unavailable':'candidate_stability_focused_visibility_unavailable',
+                  'Candidate stability has no focused element':'candidate_stability_has_no_focused_element',
+                  'Candidate stability identity acquisition exceeded its bound':'candidate_stability_identity_acquisition_exceeded_its_bound',
+                  'Candidate stability initial ancestry changed':'candidate_stability_initial_ancestry_changed',
+                  'Candidate stability observation exceeded its bound':'candidate_stability_observation_exceeded_its_bound',
+                  'Candidate stability process left the bound tree':'candidate_stability_process_left_the_bound_tree',
+                  'Candidate stability requires an explicit source binding and offline subset':'candidate_stability_requires_an_explicit_source_binding_and_offline_subset',
+                  'Candidate stability root identity unavailable':'candidate_stability_root_identity_unavailable',
+                  'Candidate stability root is foreign':'candidate_stability_root_is_foreign',
+                  'Candidate stability selector is ambiguous':'candidate_stability_selector_is_ambiguous',
+                  'Candidate stability traversal exceeded its bound':'candidate_stability_traversal_exceeded_its_bound',
+                  'Candidate stability unique button unavailable':'candidate_stability_unique_button_unavailable',
+              }
+              error=n.get('error')
+              if type(error) is str: candidate_focus['error_kind']=candidate_errors.get(error,'unknown')
+              candidate_offline=n.get('offline')
+              if type(candidate_offline) is dict:
+                  stability=candidate_offline.get('account_focus_stability')
+                  if type(stability) is dict:
+                      status=stability.get('status')
+                      if type(status) is str and status in {'observing','timed-window-passed'}: candidate_focus['stability_status']=status
+                      count=stability.get('observations')
+                      if type(count) is int and 0<=count<=4096: candidate_focus['observations']=count
+                  readiness=candidate_offline.get('focus_readiness')
+                  if type(readiness) is dict:
+                      for key in ['enabled','focusable','offscreen']:
+                          value=readiness.get(key)
+                          if type(value) is bool: candidate_focus[key]=value
+              summary['candidate_focus_diagnostic']=candidate_focus
               # Diagnostic only. Saturated count is a lower bound on complete traversals, not polls.
               summary['runtime_start_stop_selector']={'state':'unknown','complete_samples':'unknown'}
               selector_offline=n.get('offline')
