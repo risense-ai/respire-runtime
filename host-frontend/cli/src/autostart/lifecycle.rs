@@ -733,6 +733,34 @@ pub(crate) fn verify_offline_keygen_marker(root: &Path, profile: &Path, token: &
     Ok(())
 }
 
+/// Prepared and confirmed RolledBack originals may rebind before any new effect
+/// claim. Journal the exact old/target marker pair before replacing the marker.
+/// Only Prepared permits an absent initial publication; rollback never does.
+pub(crate) fn resume_offline_keygen_prelaunch_maintenance(root: &Path, profile: &Path,
+    token: &str, coordinator: &str, digest: &str, pending: Option<&str>, allow_absent: bool,
+    admit: impl FnOnce(Option<&str>, &str) -> Result<()>) -> Result<Maintenance> {
+    let observed=marker_bytes(root)?.as_deref().map(hash);
+    if let Some(actual)=observed.as_deref() {
+        anyhow::ensure!(actual == digest || pending == Some(actual), "offline keygen marker differs from durable rebind intent");
+        verify_offline_keygen_marker(root, profile, token, coordinator, actual)?;
+    } else {
+        anyhow::ensure!(allow_absent, "offline keygen rollback marker missing; no replacement created");
+    }
+    resume_key_maintenance_admitted(root, profile, profile, token, coordinator, false, |previous,target| {
+        anyhow::ensure!(previous == observed.as_deref(), "offline keygen marker changed before rebind admission");
+        admit(previous,target)
+    })
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_KEYGEN_REBIND_AFTER_MARKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+pub(crate) fn fail_keygen_rebind_after_marker_for_test() {
+    FAIL_KEYGEN_REBIND_AFTER_MARKER.with(|fail| fail.set(true));
+}
+
 pub(crate) fn resume_key_maintenance(
     root: &Path, profile: &Path, source: &Path, token: &str, coordinator: &str,
 ) -> Result<Maintenance> {
@@ -752,6 +780,11 @@ pub(crate) fn resume_agent_config_maintenance(root: &Path, profile: &Path, token
 
 fn resume_key_maintenance_inner(root: &Path, profile: &Path, source: &Path, token: &str, coordinator: &str,
     agent_config: bool) -> Result<Maintenance> {
+    resume_key_maintenance_admitted(root, profile, source, token, coordinator, agent_config, |_,_| Ok(()))
+}
+
+fn resume_key_maintenance_admitted(root: &Path, profile: &Path, source: &Path, token: &str, coordinator: &str,
+    agent_config: bool, admit: impl FnOnce(Option<&str>, &str) -> Result<()>) -> Result<Maintenance> {
     anyhow::ensure!(current_boot_token().is_none(), "host maintenance already has a controller");
     let (selected_root, selected_profile) = respire_client_host::config::control_roots()?;
     anyhow::ensure!(selected_root.canonicalize()? == root && selected_profile.canonicalize()? == profile,
@@ -781,7 +814,11 @@ fn resume_key_maintenance_inner(root: &Path, profile: &Path, source: &Path, toke
             .context("identity recovery controller birth unavailable")?, snapshot: None,
         agent_config: previous_marker.and_then(|value| value.agent_config) };
     let bytes = serde_json::to_vec(&value)?;
+    admit(previous.as_deref().map(hash).as_deref(), &hash(&bytes))?;
     private_write(&marker_path(root), &bytes, previous.as_ref().map(|bytes| hash(bytes)).as_deref())?;
+    #[cfg(test)]
+    anyhow::ensure!(!FAIL_KEYGEN_REBIND_AFTER_MARKER.with(|fail| fail.replace(false)),
+        "synthetic registration-save failure after keygen marker publication");
     let mut config = registration.take().filter(|config| config.enabled && !config.manually_stopped);
     if let Some(config) = config.as_mut() { config.maintenance = true; save(config)?; }
     ACTIVE.with(|slot| *slot.borrow_mut() = Some(token.to_owned()));
@@ -2012,6 +2049,43 @@ mod tests {
         assert!(admitted && result.is_err());
         assert!(!marker_path(&root).exists() && !control_path(&root).exists() && current_boot_token().is_none());
         assert!(verify_offline_keygen_marker(&root, &root, "absent", "absent", "absent").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_offline_keygen_recovers_absent_or_exact_paused_marker_only() -> Result<()> {
+        let _env=crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
+            "RSRS_DATA_DIR","RSRS_RUNTIME_BOOT_TOKEN"])?;
+        let temp=tempfile::tempdir()?; let root=temp.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR",&root);
+        std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN");
+        assert!(current_boot_token().is_none());
+        let token=uuid::Uuid::new_v4().to_string();
+        let coordinator=format!("host-{}",hash(root.display().to_string().as_bytes()));
+        let resume=|token:&str,digest:&str,allow_absent:bool|
+            resume_offline_keygen_prelaunch_maintenance(&root,&root,token,&coordinator,digest,None,allow_absent,|_,_| Ok(()));
+        assert!(resume(&token,&"a".repeat(64),false).is_err());
+        assert!(!marker_path(&root).exists());
+        // Prepared admission exists, but its initial marker publish did not.
+        let mut maintenance=resume(&token,&"a".repeat(64),true)?;
+        let binding=maintenance.auth_launch_binding(&root)?.context("prepared binding missing")?;
+        let digest=binding["marker_sha256"].as_str().context("prepared digest missing")?.to_owned();
+        assert_eq!(current_boot_token().as_deref(),Some(token.as_str()));
+        drop(maintenance); // The owner drain failed; no auth exchange was sent.
+        let bytes=fs::read(marker_path(&root))?;
+        assert!(resume(&token,"foreign",true).is_err());
+        assert!(resume(&uuid::Uuid::new_v4().to_string(),&digest,true).is_err());
+        assert_eq!(fs::read(marker_path(&root))?,bytes);
+        let maintenance=resume(&token,&digest,true)?;
+        assert_eq!(current_boot_token().as_deref(),Some(token.as_str()));
+        drop(maintenance);
+        let mut changed=marker(&root)?.context("prepared marker missing")?;
+        changed.phase=Phase::Starting;
+        let changed_bytes=serde_json::to_vec(&changed)?;
+        fs::write(marker_path(&root),&changed_bytes)?;
+        assert!(resume(&token,&hash(&changed_bytes),true).is_err());
+        assert_eq!(fs::read(marker_path(&root))?,changed_bytes);
+        assert!(current_boot_token().is_none());
         Ok(())
     }
 
