@@ -13,6 +13,9 @@ pub(crate) fn install_frontend() -> Result<()> {
     respire_frontend::install_runtime_embedding(respire_frontend::RuntimeEmbedding {
         verify_runtime: installed_client2_runtime,
         account_host: || Arc::new(RuntimeHost),
+        // This image includes the durable coordinator and completion RPC. This is
+        // process-local code authority, never an untrusted runtime.json flag.
+        offline_keygen_handoff: Some(installed_client2_runtime),
     })
 }
 

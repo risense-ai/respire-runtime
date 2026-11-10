@@ -898,3 +898,39 @@ fn response(id: &str) -> RpcResponse<ResultEnvelope> {
         data_dir: None,
     }
 }
+
+#[cfg(test)]
+mod keygen_handoff_request_tests {
+    use super::*;
+
+    #[test]
+    fn existing_result_request_has_original_operation_and_no_claimed_authority() -> Result<()> {
+        let wire = serde_json::json!({
+            "v":PROTOCOL_V,"id":"00000000-0000-4000-8000-000000000001",
+            "method":HOST_AUTH_RESULT_METHOD,
+            "operation_id":"00000000-0000-4000-8000-000000000002","idempotency_key":"fixture-original",
+            "args":[serde_json::json!({"schema_version":HOST_AUTH_SCHEMA_V,"force":false,
+                "binding":{"installation_root":"/fixture","profile":"/fixture",
+                    "launch_id":"fixture-launch","expected_account_id":null},
+                "identity":{"kind":"unbound","operation_id":"00000000-0000-4000-8000-000000000002",
+                    "session_sha256":"a".repeat(64)}}).to_string()]
+        });
+        let request: RpcRequest = serde_json::from_value(wire.clone())?;
+        assert!(validate_auth_request(&request).is_ok());
+        let mut removed: RpcRequest = serde_json::from_value(wire.clone())?;
+        removed.method = "control.auth.keygen_complete".into();
+        assert!(validate_auth_request(&removed).is_err());
+        for field in ["operation_id", "idempotency_key"] {
+            let mut missing = wire.clone();
+            missing[field] = serde_json::Value::Null;
+            let request: RpcRequest = serde_json::from_value(missing)?;
+            assert!(validate_auth_request(&request).is_err());
+        }
+        let mut params: serde_json::Value = serde_json::from_str(&request.args[0])?;
+        params["verified"] = serde_json::json!(true);
+        let mut request = request;
+        request.args = vec![params.to_string()];
+        assert!(validate_auth_request(&request).is_err());
+        Ok(())
+    }
+}

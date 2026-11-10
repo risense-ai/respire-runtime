@@ -1,16 +1,22 @@
 //! CLI account adapter. Shared host control owns transactions and continuations.
-//! The existing keygen flow remains separate from account and key recovery.
+//! Offline keygen retains its original controller until a verified Start or typed account handoff.
 
-use anyhow::{Context, Result};
-use respire_commands::output::{Item, ResultEnvelope, Status};
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::Context;
+use respire_commands::output::ResultEnvelope;
+#[cfg(test)]
+use respire_commands::output::{Item, Status};
 use respire_protocol::host_control::{
     HostAuthAccountResult, HostAuthAuthorization, HostAuthLoginContinuation,
 };
+#[cfg(test)]
 use respire_protocol::{HostAuthOutcome, HostAuthResult};
 use std::path::Path;
 
-use super::super::lifecycle;
-use super::launch_authorization::{control, shared_host};
+use super::launch_authorization::shared_host;
+#[cfg(test)]
+use super::launch_authorization::control;
 
 pub(crate) use respire_host_control::AccountContinuation;
 
@@ -22,8 +28,10 @@ pub(crate) fn control_register(
 ) -> Result<ResultEnvelope> {
     if crate::output_state::HOST_RPC_OUTPUT.get() {
         anyhow::ensure!(super_password.is_none(), "host registration does not accept supplied recovery material");
+        super::offline_keygen::prepare_account(true, user, addr)?;
         return shared_host::accounts().register_or_query(addr, user, password);
     }
+    super::offline_keygen::prepare_account(true, user, addr)?;
     shared_host::accounts().register(addr, user, password, super_password)
 }
 
@@ -54,6 +62,9 @@ pub(crate) fn control_login_step(
     resume: Option<&HostAuthAccountResult>,
     continuation: &mut Option<AccountContinuation>,
 ) -> Result<ResultEnvelope> {
+    if resume.is_none() && continuation.is_none() {
+        super::offline_keygen::prepare_account(false, user, addr)?;
+    }
     if crate::output_state::HOST_RPC_OUTPUT.get() && resume.is_none() && continuation.is_none() {
         return shared_host::accounts().login_or_continue(addr, user, authorization, super_password, input);
     }
@@ -90,52 +101,16 @@ pub(crate) fn control_keygen(pass: Option<&str>, force: bool) -> Result<ResultEn
     if pass.is_some() {
         eprintln!("INFO from v4, --pass is not used for encryption: the super password is system-generated; copy the output below");
     }
-    keygen_operation(&uuid::Uuid::new_v4().to_string(), force, false)
+    super::offline_keygen::keygen(None, force)
 }
 
 /// Query the original write, never issue another keygen or choose a new operation ID.
 pub(crate) fn control_auth_result(operation_id: &str, force: bool) -> Result<ResultEnvelope> {
-    keygen_operation(operation_id, force, true)
+    super::offline_keygen::keygen(Some(operation_id), force)
 }
 
-fn keygen_operation(operation_id: &str, force: bool, query_only: bool) -> Result<ResultEnvelope> {
-    crate::runtime_policy::require_host("private account control")?;
-    let id = uuid::Uuid::parse_str(operation_id).context("invalid auth operation ID")?;
-    anyhow::ensure!(id.get_version_num() == 4 && id.to_string() == operation_id,
-        "auth operation ID must be a canonical random UUID");
-    control::installed_auth_runtime()?;
-    // Validate configuration before takeover acquisition can create its lock directory.
-    let (_, profile) = respire_client_host::config::control_roots()?;
-    anyhow::ensure!(lifecycle::current_boot_token().is_none(),
-        "private account control must own its maintenance transaction");
-    let takeover = crate::runtime_policy::takeover_lock()?;
-    if !query_only {
-        std::fs::create_dir_all(&profile)?;
-    }
-    let health = crate::rpc::probe_runtime()?;
-    anyhow::ensure!(health.is_some() || !crate::rpc::endpoint_path().try_exists()?,
-        "account control blocked: recorded owner has no verifiable health/drain receipt");
-    let mut maintenance = if query_only {
-        lifecycle::with_explicit_recovery(lifecycle::begin_maintenance_locked)?
-    } else {
-        lifecycle::begin_maintenance_locked()?
-    };
-    if let Some(health) = health.as_ref() {
-        maintenance.drain_runtime(health)?;
-    }
-    let response = if query_only {
-        control::auth_result_locked(&takeover, &mut maintenance, operation_id, force)
-    } else {
-        control::auth_keygen_locked(&takeover, &mut maintenance, operation_id, force)
-    };
-    finish_keygen(response, operation_id, force, query_only, || {
-        if health.is_some() {
-            maintenance.start_account_runtime()?;
-        }
-        maintenance.finish()
-    })
-}
-
+// Legacy adapter output contract only; production uses the durable coordinator.
+#[cfg(test)]
 pub(super) fn finish_keygen(
     response: Result<ResultEnvelope>,
     operation_id: &str,

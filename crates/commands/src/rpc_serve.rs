@@ -2392,6 +2392,20 @@ fn final_stop_receipt(operation_id: &str, success: bool) -> RuntimeStopReceipt {
     }
 }
 
+fn should_revoke_clean_stop(clean: bool, forced: bool) -> bool {
+    clean && !forced
+}
+
+#[cfg(test)]
+#[test]
+fn endpoint_cleanup_is_only_for_clean_unforced_shutdown() {
+    assert!(should_revoke_clean_stop(true, false));
+    assert!(!should_revoke_clean_stop(false, false));
+    assert!(!should_revoke_clean_stop(true, true));
+    assert!(!should_revoke_clean_stop(false, true));
+    assert_eq!(stop_outcome(false, false, true), RuntimeStopOutcome::Failed);
+}
+
 fn stop_outcome(clean: bool, forced: bool, unfinished_empty: bool) -> RuntimeStopOutcome {
     if !clean {
         RuntimeStopOutcome::Failed
@@ -2610,6 +2624,12 @@ struct StartupEndpoint {
 }
 
 impl StartupEndpoint {
+    fn revoke_clean_stop(&self) -> Result<()> {
+        let owner = self.owner.lock()
+            .map_err(|_| anyhow::anyhow!("installation ownership lock poisoned"))?;
+        crate::rpc_worker::revoke_current_endpoint(&owner, &current_url())
+    }
+
     fn revoke(&self) {
         let result = self.owner.lock()
             .map_err(|_| anyhow::anyhow!("installation ownership lock poisoned"))
@@ -3123,6 +3143,16 @@ fn dispatch_loop_inner(
         stop_process(1);
     }
     drop(_store);
+    // Retain both library and installation ownership through endpoint CAS.
+    // Failed/forced exits keep their evidence for exact-owner recovery.
+    if should_revoke_clean_stop(clean, STOP_FORCE_TRIGGERED.load(Ordering::Acquire)) {
+        if let Some(startup) = startup.as_ref() {
+            if let Err(error) = startup.revoke_clean_stop() {
+                eprintln!("runtime failed to revoke its final endpoint: {error:#}");
+                clean = false;
+            }
+        }
+    }
     drop(_lock);
     if !STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
         mark_stop_unfinished(Vec::new());

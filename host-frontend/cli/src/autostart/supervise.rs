@@ -14,6 +14,7 @@ use super::{lifecycle, read_registration, Registration};
 #[path = "launch_authorization.rs"]
 mod launch_authorization;
 mod auth_control;
+pub(crate) mod offline_keygen;
 pub(crate) use launch_authorization::migration_control::control_migrate_profile;
 pub(crate) use launch_authorization::metadata_control::{control_metadata, control_offline_read, discover_legacy_snapshot};
 pub(crate) use launch_authorization::agent_config_control::control_agent_config;

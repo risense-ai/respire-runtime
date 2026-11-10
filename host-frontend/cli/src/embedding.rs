@@ -9,6 +9,9 @@ use std::sync::{Arc, OnceLock};
 pub struct RuntimeEmbedding {
     pub verify_runtime: fn() -> Result<VerifiedRuntime>,
     pub account_host: fn() -> Arc<dyn HostLifecycle>,
+    /// Compiled implementation support, revalidated against the same installed image.
+    /// None preserves ordinary legacy operations but refuses the new handoff.
+    pub offline_keygen_handoff: Option<fn() -> Result<VerifiedRuntime>>,
 }
 
 pub(crate) struct Selection {
@@ -63,6 +66,17 @@ pub(crate) fn account_host() -> Option<Arc<dyn HostLifecycle>> {
 }
 
 impl Selection {
+    pub(crate) fn verify_offline_keygen_handoff(&self) -> Result<VerifiedRuntime> {
+        let current = self.verify()?;
+        let verify = require_handoff_callback(self.embedding.offline_keygen_handoff)?;
+        let capable = verify()?;
+        require_same_image(&current, &capable)?;
+        require_same_image(&self.verify()?, &capable)?;
+        anyhow::ensure!(capable.path() == std::env::current_exe()?.canonicalize()?,
+            "offline keygen capability must belong to the current Runtime image");
+        Ok(capable)
+    }
+
     pub(crate) fn version(&self) -> &str {
         self.runtime.version()
     }
@@ -84,5 +98,52 @@ impl Selection {
             );
         }
         Ok(current)
+    }
+}
+
+fn require_handoff_callback(callback: Option<fn() -> Result<VerifiedRuntime>>)
+    -> Result<fn() -> Result<VerifiedRuntime>> {
+    callback.context("offline_keygen_handoff_unsupported: embedded Runtime lacks the implementation")
+}
+
+/// Callback output cannot confer capability on a different selected executable.
+fn require_same_image(expected: &VerifiedRuntime, actual: &VerifiedRuntime) -> Result<()> {
+    anyhow::ensure!(expected.path() == actual.path()
+        && expected.version() == actual.version()
+        && expected.sha256().eq_ignore_ascii_case(actual.sha256())
+        && expected.port() == actual.port(), "offline keygen capability Runtime binding changed");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn missing_handoff_callback_is_not_implementation_support() {
+        assert!(require_handoff_callback(None).is_err());
+    }
+
+    #[test]
+    fn handoff_capability_rejects_every_changed_image_binding() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let image = dir.path().join("runtime");
+        let other = dir.path().join("other");
+        std::fs::write(&image, b"synthetic-runtime")?;
+        std::fs::write(&other, b"synthetic-runtime")?;
+        let hash = format!("{:x}", Sha256::digest(b"synthetic-runtime"));
+        let selected = VerifiedRuntime::verify_installed(&image, &hash, "4.0.1-dev.5", 12345)?;
+        require_same_image(&selected, &selected)?;
+        for changed in [
+            VerifiedRuntime::verify_installed(&other, &hash, "4.0.1-dev.5", 12345)?,
+            VerifiedRuntime::verify_installed(&image, &hash, "4.0.1-dev.4", 12345)?,
+            VerifiedRuntime::verify_installed(&image, &hash, "4.0.1-dev.5", 12346)?,
+        ] { assert!(require_same_image(&selected, &changed).is_err()); }
+        std::fs::write(&image, b"changed-image")?;
+        let changed_hash = format!("{:x}", Sha256::digest(b"changed-image"));
+        let changed = VerifiedRuntime::verify_installed(&image, &changed_hash, "4.0.1-dev.5", 12345)?;
+        assert!(require_same_image(&selected, &changed).is_err());
+        Ok(())
     }
 }

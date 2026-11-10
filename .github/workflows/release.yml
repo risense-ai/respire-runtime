@@ -351,7 +351,7 @@ jobs:
             source_commit: process.env.RUNTIME_SOURCE_SHA,
             compat: {min_cli: process.env.RUNTIME_MIN_CLI, max_cli: process.env.RUNTIME_MAX_CLI},
             protocol_range: {minimum: 1, maximum: 1},
-            capabilities: {business_executor: '1', mcp_server: '1'},
+            capabilities: {business_executor: '1', mcp_server: '1', offline_keygen_handoff: '1'},
             files: manifestFiles('payload', 'payload')
           };
           if (!/^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$/.test(report.runtime_version)) throw new Error('Invalid runtime_version');

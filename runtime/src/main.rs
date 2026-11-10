@@ -258,6 +258,15 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         return Err(error).context("Runtime client configuration is invalid");
     }
     if flags.start {
+        // Preserve the ordinary background endpoint contract before either route.
+        require_explicit_start_endpoint(&flags)?;
+        if respire_frontend::has_pending_offline_keygen()? {
+            anyhow::ensure!(boot_token.is_none(), "offline host startup cannot consume a runtime boot token");
+            host_account::install_frontend()?;
+            respire_frontend::start_pending_offline_keygen(flags.json)?;
+            print_envelope("start", true, 0, None, Some("started"));
+            return Ok(0);
+        }
         return background_start::start(&flags);
     }
     if flags.status {
@@ -268,6 +277,14 @@ fn run(boot_token: Option<String>) -> Result<i32> {
     }
     // Bare invocation defaults to serving, mirroring `--runtime-internal`.
     serve_command(&flags, boot_token.as_deref())
+}
+
+// Both lifecycle routes consume the already-applied data-dir/port, without
+// reparsing arguments through the companion CLI's different grammar.
+fn require_explicit_start_endpoint(flags: &Flags) -> Result<()> {
+    anyhow::ensure!(flags.host == "127.0.0.1",
+        "background startup currently requires the existing 127.0.0.1 client endpoint");
+    Ok(())
 }
 
 // Only lifecycle/process modes stay in this binary's small startup parser.
@@ -288,6 +305,20 @@ fn uses_host_frontend(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
 mod frontend_route_tests {
     use super::uses_host_frontend;
     fn route(args: &[&str]) -> bool { uses_host_frontend(args.iter().map(std::ffi::OsString::from)) }
+    #[test]
+    fn pending_start_preserves_parsed_endpoint_and_root_parameters() -> anyhow::Result<()> {
+        let mut flags = super::Flags::default();
+        flags.start = true;
+        flags.port = Some(15321);
+        flags.data_dir = Some(std::path::PathBuf::from("synthetic-root"));
+        super::require_explicit_start_endpoint(&flags)?;
+        assert_eq!(flags.port, Some(15321));
+        assert_eq!(flags.data_dir, Some(std::path::PathBuf::from("synthetic-root")));
+        flags.host = "0.0.0.0".into();
+        assert!(super::require_explicit_start_endpoint(&flags).is_err());
+        Ok(())
+    }
+
     #[test]
     fn original_client2_host_commands_use_the_shared_frontend() {
         for command in ["config", "logout", "grant", "account", "space", "migrate", "login",

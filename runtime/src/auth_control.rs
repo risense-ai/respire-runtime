@@ -97,6 +97,10 @@ pub(crate) fn verify_target_runtime(receipt: &HostAuthAccountResult) -> Result<(
 }
 
 pub(crate) fn verify_ready_target_runtime(target: &std::path::Path, account: &str) -> Result<()> {
+    verified_target_health(target, account).map(|_| ())
+}
+
+fn verified_target_health(target: &std::path::Path, account: &str) -> Result<respire_commands::net_rpc::Health> {
     crate::startup_identity::verify_account_completion_authority()?;
     let health = respire_commands::net_rpc::health()?;
     respire_commands::net_rpc::request_scope(&health)?;
@@ -119,7 +123,7 @@ pub(crate) fn verify_ready_target_runtime(target: &std::path::Path, account: &st
     ensure!(respire_commands::net_rpc::instance_is_running(&health)?,
         "target Runtime birth identity changed during verification");
     crate::startup_identity::verify_account_completion_authority()?;
-    Ok(())
+    Ok(health)
 }
 
 pub(crate) fn recovery_request(request: &RpcRequest) -> Result<respire_protocol::host_control::HostLoginRecoveryParams> {

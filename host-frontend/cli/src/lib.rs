@@ -37,3 +37,19 @@ pub use memory::model::{Kind, MemoryEntry, MemoryQuery, StoredMemory, VERSION_TA
 
 /// Version string (used by server /health).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Read-only dispatch probe. Invalid evidence is an error, never an absent hint.
+pub fn has_pending_offline_keygen() -> anyhow::Result<bool> {
+    autostart::pending_offline_keygen()
+}
+
+/// Runtime has already parsed and applied its lifecycle flags. Do not parse
+/// them again as CLI options or fall back to an unrelated background launch.
+pub fn start_pending_offline_keygen(json: bool) -> anyhow::Result<()> {
+    set_json_mode(json);
+    let selected = embedding::selection().ok_or_else(|| anyhow::anyhow!(
+        "offline startup requires the verified Runtime embedding"))?;
+    selected.verify_offline_keygen_handoff()?;
+    anyhow::ensure!(install_cli_host_hooks(), "offline startup host hooks already installed");
+    autostart::start_selected_offline_keygen()
+}

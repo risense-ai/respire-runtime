@@ -423,7 +423,8 @@ mod tests {
     use super::*;
     #[test]
     fn rolled_back_receipt_rejects_nested_issued_material() -> Result<()> {
-        let source = std::path::PathBuf::from("/synthetic/profile");
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().canonicalize()?;
         let mut receipt = HostAuthAccountResult {
             operation_id: uuid::Uuid::new_v4().to_string(),
             outcome: HostAuthAccountOutcome::RolledBack,

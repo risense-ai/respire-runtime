@@ -256,7 +256,7 @@ impl Maintenance {
                 && actual.owner_birth == held.owner_birth
                 && controller_alive(&actual)?
                 && current_boot_token().as_deref() == Some(held.token.as_str())
-                && actual.expected_version == env!("CARGO_PKG_VERSION")
+                && actual.expected_version == super::maintenance_issuer_version()?
                 && serde_json::to_vec(&actual)?
                     == serde_json::to_vec(&serde_json::from_slice::<Marker>(&bytes)?)?
                 && hash(&bytes)
@@ -566,7 +566,7 @@ impl Maintenance {
                 && actual.token == held.token
                 && actual.owner_pid == std::process::id()
                 && actual.owner_birth == held.owner_birth
-                && actual.expected_version == env!("CARGO_PKG_VERSION")
+                && actual.expected_version == super::maintenance_issuer_version()?
                 && actual.expected_profile.as_ref() == Some(&original.binding.profile)
                 && current_boot_token().as_deref() == Some(held.token.as_str())
                 && controller_alive(&actual)?
@@ -985,7 +985,7 @@ fn adopt_snapshot_marker(takeover: &LibraryLock) -> Result<Maintenance> {
         serde_json::to_vec(&value)?
             == serde_json::to_vec(&serde_json::from_slice::<Marker>(&bytes)?)?
             && !controller_alive(&value)?
-            && value.expected_version == env!("CARGO_PKG_VERSION")
+            && value.expected_version == super::maintenance_issuer_version()?
             && value.expected_profile.as_ref() == Some(&profile),
         "snapshot recovery requires the exact abandoned marker and original profile"
     );
@@ -1255,5 +1255,246 @@ fn snapshot_birth_prefix() -> &'static str {
         "linux-starttime-"
     } else {
         "darwin-lstart-"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static VERIFIER_MODE: AtomicU8 = AtomicU8::new(0);
+
+    fn verify_test_embedding() -> Result<respire_host_control::VerifiedRuntime> {
+        let mode = VERIFIER_MODE.load(Ordering::SeqCst);
+        anyhow::ensure!(mode != 1, "snapshot test embedding verifier refused image");
+        let current = std::env::current_exe()?.canonicalize()?;
+        let version = current.parent().and_then(|path| path.file_name())
+            .and_then(|name| name.to_str()).context("test image directory missing")?;
+        let image = if mode == 2 {
+            PathBuf::from(std::env::var_os("RESP_SNAPSHOT_OTHER_IMAGE")
+                .context("changed test image missing")?).canonicalize()?
+        } else { current.clone() };
+        respire_host_control::VerifiedRuntime::verify_installed(
+            &image, &hash(&fs::read(&image)?), version, 12345)
+    }
+
+    fn forbidden_account_host() -> std::sync::Arc<dyn respire_host_control::HostLifecycle> {
+        panic!("snapshot issuer test entered account host")
+    }
+
+    fn write_fixture(root: &Path, value: &Marker) -> Result<Vec<u8>> {
+        let bytes = serde_json::to_vec(value)?;
+        fs::write(marker_path(root), &bytes)?;
+        Ok(bytes)
+    }
+
+    fn hold_fixture(root: &Path, value: &Marker, bytes: &[u8]) -> Maintenance {
+        ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
+        Maintenance {
+            installation: Some(root.to_owned()), config: None, marker: Some(value.clone()),
+            marker_digest: Some(hash(bytes)), completed: false,
+        }
+    }
+
+    fn assert_unchanged(root: &Path, before: &[u8]) -> Result<()> {
+        assert_eq!(fs::read(marker_path(root))?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_snapshot_issuer_gates_use_reverified_runtime() -> Result<()> {
+        const CHILD: &str = "RESP_SNAPSHOT_ISSUER_CHILD";
+        const COMPLETE: &str = "embedded-snapshot-issuer-gates-checked";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let thread = std::thread::current();
+            let name = thread.name().context("snapshot test name missing")?;
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", name, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1").output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            anyhow::ensure!(output.status.success(), "isolated snapshot issuer test failed: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr));
+            anyhow::ensure!(stdout.contains(&format!("test {name} ..."))
+                && stdout.contains("1 passed; 0 failed") && stdout.contains(COMPLETE),
+                "isolated snapshot issuer assertions did not execute: {stdout}");
+            return Ok(());
+        }
+        let _env = crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
+            "RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RUNTIME_BIN", "RSRS_RUNTIME_BOOT_TOKEN",
+            "RESP_SNAPSHOT_OTHER_IMAGE"])?;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                VERIFIER_MODE.store(0, Ordering::SeqCst);
+                ACTIVE.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
+        std::env::remove_var("RSRS_RUNTIME_BIN");
+        std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN");
+        ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        let other_image = root.join("other-runtime-image");
+        fs::write(&other_image, b"different verified image")?;
+        std::env::set_var("RESP_SNAPSHOT_OTHER_IMAGE", &other_image);
+        crate::embedding::install_runtime_embedding(crate::embedding::RuntimeEmbedding {
+            verify_runtime: verify_test_embedding, account_host: forbidden_account_host,
+            offline_keygen_handoff: None,
+        })?;
+        let issuer = verify_test_embedding()?.version().to_owned();
+        assert_ne!(issuer, env!("CARGO_PKG_VERSION"));
+        let (selected_root, profile) = respire_client_host::config::control_roots()?;
+        assert_eq!(selected_root.canonicalize()?, root);
+        assert_eq!(profile.canonicalize()?, root);
+        fs::create_dir_all(marker_path(&root).parent().context("marker parent missing")?)?;
+        let takeover = LibraryLock::acquire(&root.join("runtime/takeover"), Duration::ZERO)?;
+        let binding = ControlBinding {
+            installation_root: root.clone(), profile: root.clone(),
+            launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: Some("a".repeat(64)),
+        };
+        let snapshot_id = "b".repeat(32);
+        let operation = SnapshotOperation::from_original(MaintenanceControlParams {
+            schema_version: MAINTENANCE_CONTROL_SCHEMA_V,
+            request_fingerprint: SnapshotOperation::fingerprint(&binding, 1, &snapshot_id)?,
+            binding: binding.clone(), operation_id: uuid::Uuid::new_v4().to_string(),
+            sync_generation: 1, snapshot_id, action: MaintenanceAction::Query,
+        })?;
+        let owned = Marker {
+            schema: 1, id: format!("host-{}", hash(root.display().to_string().as_bytes())),
+            token: uuid::Uuid::new_v4().to_string(), phase: Phase::Paused,
+            expected_profile: Some(root.clone()), expected_version: issuer.clone(),
+            owner_pid: std::process::id(),
+            owner_birth: manager::process_birth(std::process::id())?.context("controller birth missing")?,
+            snapshot: None, agent_config: None,
+        };
+        assert!(controller_alive(&owned)?);
+
+        // Each call uses the production entry point, with every earlier guard satisfied.
+        for version in [issuer.as_str(), env!("CARGO_PKG_VERSION"), "foreign-issuer"] {
+            for mode in 0..=2 {
+                VERIFIER_MODE.store(mode, Ordering::SeqCst);
+                let mut value = owned.clone();
+                value.expected_version = version.to_owned();
+                let before = write_fixture(&root, &value)?;
+                let maintenance = hold_fixture(&root, &value, &before);
+                let result = maintenance.snapshot_owned_marker(&takeover, &binding);
+                if mode == 0 && version == issuer {
+                    let (path, bytes, actual) = result?;
+                    assert_eq!(path, marker_path(&root));
+                    assert_eq!(bytes, before);
+                    assert_eq!(actual.expected_version, issuer);
+                } else {
+                    let error = result.err().context("invalid issuer unexpectedly owned marker")?;
+                    let expected = match mode {
+                        1 => "snapshot test embedding verifier refused image",
+                        2 => "selected Runtime changed during host command",
+                        _ => "snapshot requires this controller's exact Paused marker",
+                    };
+                    assert_eq!(error.to_string(), expected);
+                }
+                assert_unchanged(&root, &before)?;
+                drop(maintenance);
+
+                value.phase = Phase::Starting;
+                let before = write_fixture(&root, &value)?;
+                let mut maintenance = hold_fixture(&root, &value, &before);
+                let error = maintenance.snapshot_target_verified(&takeover, &operation)
+                    .err().context("target without drain unexpectedly verified")?;
+                let expected = match mode {
+                    1 => "snapshot test embedding verifier refused image",
+                    2 => "selected Runtime changed during host command",
+                    _ if version == issuer => "snapshot target has no drain-backed operation",
+                    _ => "snapshot target does not belong to this exact Starting/Verified controller",
+                };
+                assert_eq!(error.to_string(), expected);
+                assert_unchanged(&root, &before)?;
+                drop(maintenance);
+            }
+        }
+        VERIFIER_MODE.store(0, Ordering::SeqCst);
+        for case in ["foreign-profile", "foreign-token", "foreign-controller", "changed-digest"] {
+            let before = write_fixture(&root, &owned)?;
+            let mut maintenance = hold_fixture(&root, &owned, &before);
+            let mut selected = binding.clone();
+            match case {
+                "foreign-profile" => {
+                    selected.profile = root.join("foreign");
+                    fs::create_dir_all(&selected.profile)?;
+                    selected.profile = selected.profile.canonicalize()?;
+                }
+                "foreign-token" => ACTIVE.with(|slot| *slot.borrow_mut() = Some(uuid::Uuid::new_v4().to_string())),
+                "foreign-controller" => maintenance.marker.as_mut().context("held marker missing")?.id = "foreign".into(),
+                "changed-digest" => maintenance.marker_digest = Some(hash(b"changed")),
+                _ => unreachable!("unknown fixture"),
+            }
+            assert!(maintenance.snapshot_owned_marker(&takeover, &selected).is_err(), "accepted {case}");
+            assert_unchanged(&root, &before)?;
+            drop(maintenance);
+            ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        }
+        // A reaped real process supplies an absent owner PID, not a fabricated birth mismatch.
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .arg("--list").stdout(std::process::Stdio::null()).spawn()?;
+        let dead_pid = child.id();
+        anyhow::ensure!(child.wait()?.success(), "dead-owner fixture failed");
+        assert!(manager::process_birth(dead_pid)?.is_none());
+        let mut abandoned = owned.clone();
+        abandoned.owner_pid = dead_pid;
+        abandoned.snapshot = Some(normal_marker(&operation)?);
+        assert!(!controller_alive(&abandoned)?);
+        for version in [issuer.as_str(), env!("CARGO_PKG_VERSION"), "foreign-issuer"] {
+            for mode in 0..=2 {
+                VERIFIER_MODE.store(mode, Ordering::SeqCst);
+                let mut value = abandoned.clone();
+                value.expected_version = version.to_owned();
+                let before = write_fixture(&root, &value)?;
+                assert!(current_boot_token().is_none());
+                let result = adopt_snapshot_marker(&takeover);
+                if mode == 0 && version == issuer {
+                    let adopted = result?;
+                    let after = marker(&root)?.context("adopted marker missing")?;
+                    assert_eq!(after.expected_version, issuer);
+                    assert_eq!(after.owner_pid, std::process::id());
+                    assert!(controller_alive(&after)?);
+                    assert_ne!(after.token, value.token);
+                    assert_eq!(current_boot_token().as_deref(), Some(after.token.as_str()));
+                    assert_eq!(serde_json::to_value(&after.snapshot)?, serde_json::to_value(&value.snapshot)?);
+                    assert_eq!(after.expected_profile, value.expected_profile);
+                    assert_eq!(after.id, value.id);
+                    drop(adopted);
+                } else {
+                    let error = result.err().context("foreign issuer or failed verifier adopted marker")?;
+                    let expected = match mode {
+                        1 => "snapshot test embedding verifier refused image",
+                        2 => "selected Runtime changed during host command",
+                        _ => "snapshot recovery requires the exact abandoned marker and original profile",
+                    };
+                    assert_eq!(error.to_string(), expected);
+                    assert_unchanged(&root, &before)?;
+                }
+                assert!(current_boot_token().is_none());
+            }
+        }
+        VERIFIER_MODE.store(0, Ordering::SeqCst);
+        for case in ["live-owner", "foreign-profile", "foreign-coordinator", "missing-operation"] {
+            let mut value = abandoned.clone();
+            match case {
+                "live-owner" => { value.owner_pid = owned.owner_pid; value.owner_birth = owned.owner_birth.clone(); }
+                "foreign-profile" => value.expected_profile = Some(root.join("foreign")),
+                "foreign-coordinator" => value.id = "foreign-controller".into(),
+                "missing-operation" => value.snapshot = None,
+                _ => unreachable!("unknown fixture"),
+            }
+            let before = write_fixture(&root, &value)?;
+            assert!(adopt_snapshot_marker(&takeover).is_err(), "accepted {case}");
+            assert_unchanged(&root, &before)?;
+            assert!(current_boot_token().is_none());
+        }
+        println!("{COMPLETE}");
+        Ok(())
     }
 }

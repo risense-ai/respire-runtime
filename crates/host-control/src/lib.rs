@@ -18,7 +18,7 @@ pub use account::{
 };
 pub use key::{KeyCoordinator, KeyRecoveryRequired};
 pub use launch::spawn_serving;
-pub use maintenance::{HostLifecycle, LaunchContext, Maintenance, RegistrationMode};
+pub use maintenance::{HostLifecycle, LaunchContext, Maintenance, RegistrationMode, KeygenAccountTransfer, KeygenAccountAdmission};
 
 pub(crate) const PROTOCOL_V: u32 = respire_commands::rpc_client::PROTOCOL_V;
 

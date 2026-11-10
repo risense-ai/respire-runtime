@@ -465,3 +465,51 @@ mod tests {
         Ok(())
     }
 }
+
+// Runtime's process-local lifecycle adapter, not a public command grant.
+pub(crate) fn pending_offline_keygen() -> Result<bool> {
+    supervise::offline_keygen::pending_for_selected_root()
+}
+pub(crate) fn start_selected_offline_keygen() -> Result<()> {
+    let ownership = crate::runtime_policy::takeover_lock()?;
+    anyhow::ensure!(supervise::offline_keygen::pending_for_selected_root()?,
+        "selected offline operation disappeared; ordinary startup was not attempted");
+    anyhow::ensure!(supervise::offline_keygen::start_explicit(&ownership)?,
+        "selected offline operation did not complete serving handoff; ordinary startup was not attempted");
+    Ok(())
+}
+
+#[cfg(test)]
+mod offline_start_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn offline_start_dispatch_never_falls_back_after_missing_or_invalid_evidence() -> Result<()> {
+        let _lock=crate::TEST_ENV_LOCK.lock().map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 { Some(value)=>std::env::set_var("RSRS_DATA_DIR",value),
+                    None=>std::env::remove_var("RSRS_DATA_DIR") }
+            }
+        }
+        let _restore=Restore(std::env::var_os("RSRS_DATA_DIR"));
+        let temp=tempfile::tempdir()?;
+        let root=temp.path().canonicalize()?.join("first-use");
+        std::env::set_var("RSRS_DATA_DIR",&root);
+        assert!(!pending_offline_keygen()? && !root.exists());
+        std::fs::create_dir_all(&root)?;
+        // Dispatch chose pending, but it disappeared before takeover. No spawn.
+        assert!(start_selected_offline_keygen().is_err());
+        assert!(!root.join("runtime/endpoint.json").exists());
+        let pending=root.join("runtime/autostart/offline-keygen.json");
+        std::fs::create_dir_all(pending.parent().context("pending parent missing")?)?;
+        std::fs::write(&pending,b"invalid pending")?;
+        assert!(pending_offline_keygen().is_err());
+        assert!(start_selected_offline_keygen().is_err());
+        assert_eq!(std::fs::read(&pending)?,b"invalid pending");
+        assert!(!root.join("runtime/endpoint.json").exists());
+        assert!(!root.join("runtime/autostart/maintenance.json").exists());
+        Ok(())
+    }
+}

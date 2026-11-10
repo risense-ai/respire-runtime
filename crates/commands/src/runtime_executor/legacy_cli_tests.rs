@@ -104,22 +104,6 @@ fn with_isolated_session<T>(test: impl FnOnce(&std::path::Path) -> Result<T>) ->
 fn capture_run(args: Vec<String>) -> Captured {
     let parsed =
         Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned()));
-    // Preserve the old fixture's deferred model work, not a fake business executor.
-    let _deferred = parsed
-        .as_ref()
-        .is_ok_and(|cli| {
-            matches!(
-                cli.command.as_ref(),
-                Some(
-                    Command::Remember { .. }
-                        | Command::Update { .. }
-                        | Command::Import { .. }
-                        | Command::Attach { .. }
-                        | Command::Restore { .. }
-                )
-            )
-        })
-        .then(respire_app::core_sdk::defer_indexing);
     let direct = DIRECT_MODE.load(std::sync::atomic::Ordering::Relaxed);
     let result = if let Ok(Cli {
         command: Some(Command::Metadata { ref command }),
