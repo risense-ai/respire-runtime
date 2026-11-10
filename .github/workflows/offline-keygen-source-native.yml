@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 44788797c5788ed01b3de8a944c3f5b14a24dd4d
+          ref: 59d98afc6ee95da5349efe43776d9649c080bfcb
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -179,7 +179,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='44788797c5788ed01b3de8a944c3f5b14a24dd4d'
+          $cliSha='59d98afc6ee95da5349efe43776d9649c080bfcb'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -188,7 +188,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 44788797c5788ed01b3de8a944c3f5b14a24dd4d
+          ref: 59d98afc6ee95da5349efe43776d9649c080bfcb
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -204,7 +204,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '44788797c5788ed01b3de8a944c3f5b14a24dd4d'
+          test "$(git -C .cli-source rev-parse HEAD)" = '59d98afc6ee95da5349efe43776d9649c080bfcb'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
