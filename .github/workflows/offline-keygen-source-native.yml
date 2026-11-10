@@ -480,6 +480,54 @@ jobs:
           try:
               r=json.loads((folder/'report.json').read_text(encoding='utf-8-sig'))
               n=json.loads((folder/'native-gui.json').read_text(encoding='utf-8-sig'))
+              # Existing cleanup report only. Categories/counts never satisfy acceptance.
+              import re
+              cleanup={'error_kind':'unknown','error_stage':'unknown','error_present':'unknown',
+                'exit_confirmed':'unknown','initial_process_count':'unknown','pre_cleanup_process_count':'unknown',
+                'pre_cleanup_inventory_recorded':False,'runtime_record_present':False}
+              cleanup_error=r.get('cleanup_error')
+              if cleanup_error is None:
+                  cleanup['error_present']=False
+                  cleanup['error_kind']='none'
+              elif type(cleanup_error) is str:
+                  cleanup['error_present']=len(cleanup_error)>0
+                  if cleanup_error=='': cleanup['error_kind']='none'
+                  cleanup_fixed={
+                      'No detached Runtime identity checkpoint; cleanup cannot be certified':('checkpoint_missing', 'checkpoint'),
+                      'Detached cleanup record is not the bound staged Runtime':('checkpoint_identity_mismatch', 'checkpoint'),
+                      'Detached cleanup requires exact creation ticks':('checkpoint_ticks_missing_or_invalid', 'checkpoint'),
+                      'Detached cleanup creation ticks out of range':('checkpoint_ticks_out_of_range', 'checkpoint'),
+                      'Detached actor predates the original desktop':('checkpoint_actor_predates_desktop', 'checkpoint'),
+                      'Offline Runtime identity not established; detached cleanup is not certified':('checkpoint_actor_unestablished', 'checkpoint'),
+                      'Cleanup process birth evidence is not typed':('process_birth_untyped', 'identity_validation'),
+                  }
+                  cleanup_dynamic={
+                      'Process identity changed before cleanup: [1-9][0-9]{0,9}':('process_identity_changed_before_stop', 'stop_owned'),
+                      'Process identity changed during cleanup: [1-9][0-9]{0,9}':('process_identity_changed_during_absence_check', 'absence_check'),
+                      'Owned process did not exit: [1-9][0-9]{0,9}':('process_exit_timeout', 'stop_owned'),
+                      'Owned process survived cleanup: [1-9][0-9]{0,9}':('process_survived_absence_check', 'absence_check'),
+                  }
+                  category=cleanup_fixed.get(cleanup_error)
+                  if category is None:
+                      for pattern,label in cleanup_dynamic.items():
+                          if re.fullmatch(pattern,cleanup_error) is not None:
+                              category=label
+                              break
+                  if category is not None:
+                      cleanup['error_kind'],cleanup['error_stage']=category
+              exit_confirmed=r.get('cleanup_exit_confirmed')
+              if type(exit_confirmed) is bool: cleanup['exit_confirmed']=exit_confirmed
+              # Counts only: never serialize records, PIDs, command lines or paths.
+              for source_key,target_key in [('processes','initial_process_count'),('processes_before_cleanup','pre_cleanup_process_count')]:
+                  records=r.get(source_key)
+                  if type(records) is list and len(records)<=1024:
+                      cleanup[target_key]=len(records)
+                      if source_key=='processes_before_cleanup': cleanup['pre_cleanup_inventory_recorded']=True
+              native_offline=n.get('offline')
+              if type(native_offline) is dict:
+                  runtime_record=native_offline.get('runtime_process')
+                  cleanup['runtime_record_present']=type(runtime_record) is dict and bool(runtime_record)
+              summary['cleanup_diagnostic']=cleanup
               # Optional diagnostics only: never used to satisfy any acceptance gate.
               native_initial={'phase':'unknown','ready':'unknown','attempt_count':'unknown',
                 'last_document_count':'unknown','last_focusable_count':'unknown',
