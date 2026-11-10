@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 961bca71cefc26c46e76c084e9f10bdeeb63017c
+          ref: 782e3b0c1fa117a2d3c6a5e5970f95267408634e
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '961bca71cefc26c46e76c084e9f10bdeeb63017c'
+          test "$(git -C .cli-source rev-parse HEAD)" = '782e3b0c1fa117a2d3c6a5e5970f95267408634e'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e954cf25ff07571a3d7d29e25d5709a57d9f9461'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -111,10 +111,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::migration_control::tests -- --list > "$RUNNER_TEMP/migration-consumer-tests.txt"
-          grep -F 'autostart::migration_control::tests::schema_rejection_requires_exact_operation_and_transport_binding: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
-          grep -F 'autostart::migration_control::tests::rejected_operation_persists_separately_from_success_receipts: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
-          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::migration_control::tests
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests -- --list > "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::schema_rejection_requires_exact_operation_and_transport_binding: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::rejected_operation_persists_separately_from_success_receipts: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests
           cargo test --locked -p respire_app migration::intent::tests -- --list > "$RUNNER_TEMP/migration-producer-tests.txt"
           grep -F 'migration::intent::tests::result_query_returns_durable_rejection_without_resnapshot_or_replay: test' "$RUNNER_TEMP/migration-producer-tests.txt"
           cargo test --locked -p respire_app migration::intent::tests
@@ -202,7 +202,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='961bca71cefc26c46e76c084e9f10bdeeb63017c'
+          $cliSha='782e3b0c1fa117a2d3c6a5e5970f95267408634e'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -211,7 +211,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 961bca71cefc26c46e76c084e9f10bdeeb63017c
+          ref: 782e3b0c1fa117a2d3c6a5e5970f95267408634e
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -227,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '961bca71cefc26c46e76c084e9f10bdeeb63017c'
+          test "$(git -C .cli-source rev-parse HEAD)" = '782e3b0c1fa117a2d3c6a5e5970f95267408634e'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e954cf25ff07571a3d7d29e25d5709a57d9f9461'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -312,10 +312,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::migration_control::tests -- --list > "$RUNNER_TEMP/migration-consumer-tests.txt"
-          grep -F 'autostart::migration_control::tests::schema_rejection_requires_exact_operation_and_transport_binding: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
-          grep -F 'autostart::migration_control::tests::rejected_operation_persists_separately_from_success_receipts: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
-          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::migration_control::tests
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests -- --list > "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::schema_rejection_requires_exact_operation_and_transport_binding: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::rejected_operation_persists_separately_from_success_receipts: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests
           cargo test --locked -p respire_app migration::intent::tests -- --list > "$RUNNER_TEMP/migration-producer-tests.txt"
           grep -F 'migration::intent::tests::result_query_returns_durable_rejection_without_resnapshot_or_replay: test' "$RUNNER_TEMP/migration-producer-tests.txt"
           cargo test --locked -p respire_app migration::intent::tests
