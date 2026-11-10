@@ -53,6 +53,25 @@ pub fn verify_local_session(session: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Durable, pre-effect rejection of this exact migration operation.
+#[derive(Debug)]
+pub struct SchemaRejected;
+impl std::fmt::Display for SchemaRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy database schema is incompatible; original rows were preserved")
+    }
+}
+impl std::error::Error for SchemaRejected {}
+
+#[derive(Debug)]
+struct InvalidSchema;
+impl std::fmt::Display for InvalidSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy database uses an incompatible pre-encrypted demo format; export with its original version and import into rsrs; original rows were preserved")
+    }
+}
+impl std::error::Error for InvalidSchema {}
+
 struct Profile {
     source: PathBuf,
     destination: PathBuf,
@@ -207,6 +226,11 @@ fn migrate_profile_inner(source_id: &str, account: &str,
 // The caller holds the migration lock for both admission and recovery.
 fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
     control: Option<&respire_protocol::migration_control::HostMigrationOperation>) -> Result<Value> {
+    if let Some(original) = control {
+        if intent::load(home, original)?.is_some_and(|record| record.phase == intent::Phase::RejectedSchema) {
+            return Err(SchemaRejected.into());
+        }
+    }
     let mut profiles = legacy_profiles(home)?;
     let selected = profiles.iter().position(|profile| profile.identity == source_id)
         .ok_or_else(|| anyhow!("legacy source is no longer available; list sources again"))?;
@@ -249,7 +273,7 @@ fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
         None => staging_root.join(uuid::Uuid::new_v4().to_string()),
     };
     if admitted.as_ref().is_none_or(|record| record.phase == intent::Phase::Copying) {
-        snapshot_profile_checkpoint(&profiles[selected], &stage, &profiles, true, || {
+        let snapshot = snapshot_profile_checkpoint(&profiles[selected], &stage, &profiles, true, || {
             if let Some(record) = admitted.as_mut() {
                 intent::verify_source(record, &profiles[selected])?;
                 // This durable boundary precedes all credential and database transformations.
@@ -257,7 +281,22 @@ fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
                 intent::save(home, record)?;
             }
             Ok(())
-        })?;
+        });
+        if let Err(error) = snapshot {
+            if error.downcast_ref::<InvalidSchema>().is_some() {
+                if let Some(record) = admitted.as_mut() {
+                    // Only the exact copied snapshot was checked, under the same migration lock.
+                    // A failed durable write remains uncertain and must not become a rejection.
+                    intent::verify_source(record, &profiles[selected])?;
+                    anyhow::ensure!(record.phase == intent::Phase::Copying,
+                        "schema rejection crossed the migration side-effect boundary");
+                    record.phase = intent::Phase::RejectedSchema;
+                    intent::save(home, record)?;
+                    return Err(SchemaRejected.into());
+                }
+            }
+            return Err(error);
+        }
         if let Some(control) = control {
             let path = stage.join(RECEIPT);
             let mut receipt: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
@@ -311,7 +350,7 @@ pub fn control_migrate_profile(
         && crate::service::accounts_root().parent().context("migration account root has no parent")?.canonicalize()?
             == original.installation_root, "migration selection changed");
     crate::login_transaction::verify_auth_identity(&original.installation_root, &original.profile, &original.identity)?;
-    let (outcome, details) = if query_only {
+    let result = (|| -> Result<_> { Ok(if query_only {
         let home = crate::service::home_dir()?;
         let lock_root = home.join(".rsrs-migration-lock");
         private_directory(&lock_root)?;
@@ -328,6 +367,7 @@ pub fn control_migrate_profile(
                         .context("migration recovery did not publish the original operation")?;
                     (Outcome::Completed, details)
                 }
+                Some(record) if record.phase == intent::Phase::RejectedSchema => return Err(SchemaRejected.into()),
                 _ => (Outcome::Unknown, Value::Null),
             },
         }
@@ -337,8 +377,9 @@ pub fn control_migrate_profile(
         let details = migrate_profile_inner(&original.source_id, &original.account, Some(original))?;
         let outcome = if details["state"] == "already_migrated" { Outcome::AlreadyMigrated } else { Outcome::Completed };
         (outcome, details)
-    };
+    }) })();
     crate::login_transaction::verify_auth_identity(&original.installation_root, &original.profile, &original.identity)?;
+    let (outcome, details) = result?;
     Ok(HostMigrationResult { operation_id: original.operation_id.clone(), fingerprint: original.fingerprint.clone(),
         identity: original.identity.clone(), outcome, details })
 }
@@ -644,9 +685,9 @@ fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Prof
         None
     };
     copy_tree(&profile.source, stage, true)?;
-    before_transform()?;
     let database = crate::service::database_path(stage)?;
     validate_schema(&database)?;
+    before_transform()?;
     if database.is_file() {
         private_file(&database)?;
     }
@@ -880,7 +921,7 @@ fn validate_schema(path: &Path) -> Result<()> {
             .iter()
             .any(|field| !columns.iter().any(|(name, _, _)| name == field))
     {
-        bail!("legacy database uses an incompatible pre-encrypted demo format; export with its original version and import into rsrs; original rows were preserved");
+        return Err(InvalidSchema.into());
     }
     Ok(())
 }
