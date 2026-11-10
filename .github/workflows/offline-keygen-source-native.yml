@@ -23,13 +23,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 21cfd84d3dc9467095f0fa857942dafe6ed91bd8
+          ref: 67f335bbf143c169ea4c9afbb97ab575b5321c01
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-client2
-          ref: 03f27c519d23877e7dfe82ef764ef2fbe1a2bfe0
+          ref: e50f877c92ea4ddcbbbc25a657aa046442b9ed90
           path: .client2-source
           persist-credentials: false
       - uses: actions/setup-go@v5
@@ -180,7 +180,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='21cfd84d3dc9467095f0fa857942dafe6ed91bd8'
+          $cliSha='67f335bbf143c169ea4c9afbb97ab575b5321c01'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -189,7 +189,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 21cfd84d3dc9467095f0fa857942dafe6ed91bd8
+          ref: 67f335bbf143c169ea4c9afbb97ab575b5321c01
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -205,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '21cfd84d3dc9467095f0fa857942dafe6ed91bd8'
+          test "$(git -C .cli-source rev-parse HEAD)" = '67f335bbf143c169ea4c9afbb97ab575b5321c01'
           test "$(git -C .client2-source rev-parse HEAD)" = 'e50f877c92ea4ddcbbbc25a657aa046442b9ed90'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -452,6 +452,7 @@ jobs:
               # Optional diagnostics only: never used to satisfy any acceptance gate.
               native_initial={'phase':'unknown','ready':'unknown','attempt_count':'unknown',
                 'last_document_count':'unknown','last_focusable_count':'unknown',
+                'last_unknown_control_type_count':'unknown','last_unknown_keyboard_focusable_count':'unknown','last_unknown_offscreen_count':'unknown',
                 'last_traversal_complete':'unknown','elapsed_ms':'unknown','error_kind':'unknown',
                 'pid_observation':'unknown','discarded_samples':'unknown'}
               phases={'target_guard','read_tree','verify_new_descendant','record_tree','ready','wait_document','budget_exhausted','discard_unavailable_sample'}
@@ -492,7 +493,7 @@ jobs:
                       native_initial['attempt_count']=len(attempts)
                       last=attempts[-1] if attempts else None
                       if type(last) is dict:
-                          for key in ['document_count','focusable_count']:
+                          for key in ['document_count','focusable_count','unknown_control_type_count','unknown_keyboard_focusable_count','unknown_offscreen_count']:
                               value=last.get(key)
                               if type(value) is int and 0<=value<=256: native_initial['last_'+key]=value
                           complete=last.get('traversal_complete')
