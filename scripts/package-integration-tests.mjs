@@ -117,6 +117,13 @@ function build(source, target, sourceSha, lockHash, output) {
   assert.equal(run('git', ['rev-parse', 'HEAD'], {cwd: source}).trim(), sourceSha);
   const native = targets.find(item => item.target === target);
   assert.ok(native && native.platform === platform() && native.arch === arch(), 'Native target hardware is required');
+  if (platform() === 'win32') {
+    // Preserve normal WinML license CRLF; only SDK identities require raw Git bytes.
+    for (const path of ['sdk/core-sdk.lock.json', 'crates/core-sdk/core-sdk.lock.json']) {
+      writeFileSync(join(source, path), run('git', ['cat-file', 'blob', `${sourceSha}:${path}`],
+        {cwd: source, encoding: null}));
+    }
+  }
   const lock = locks(source, sourceSha);
   assert.equal(hash(lock.bytes), lockHash, 'SDK lock differs from the trusted plan');
   const sdk = join(source, '.sdk', target);

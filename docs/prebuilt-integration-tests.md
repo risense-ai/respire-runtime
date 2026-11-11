@@ -46,8 +46,10 @@ Before building and after relocation checks, both checkout files must match
 their reviewed-source Git blobs byte for byte. Line-ending conversion fails
 explicitly; it never changes the identity used in the manifest.
 Windows retains its normal CRLF source checkout because the pinned WinML NuGet
-license is compared byte for byte. Only the two SDK locks are checked out with
-conversion disabled; the license check and raw Git blob identity checks remain.
+license is compared byte for byte. At the Windows build entry, trusted tools write
+only the two SDK locks from raw Git blob buffers, then immediately verify both
+files and the planned hash. The post-build check remains read-only.
+Artifact upload includes hidden files so every staged notice remains in the ZIP.
 `files` covers all payload files; the manifest is covered by the API artifact
 digest, rather than a recursive self-hash.
 
