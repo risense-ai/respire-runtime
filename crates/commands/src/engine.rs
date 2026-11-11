@@ -5174,8 +5174,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let (candidates,index_pending,resident)=if metadata_aware {
                 let rows:Vec<_>=source.memories().iter().filter(|row|!row.deleted).cloned().collect();
                 let pending=rows.iter().filter(|row|row.local_artifact.is_empty()).count();
-                let lease=respire_app::core_sdk::ResidentLease::publish(uuid::Uuid::new_v4().to_string(),None,
-                    &store.retrieval_model()?,source.snapshots(),&[])?;
+                let lease=respire_app::resident::recall_authorized_lease(&session,&store,&owner,&source)?;
                 (Arc::new(rows),pending,Some(lease))
             } else {
                 let (rows,pending,lease)=respire_app::resident::recall_catalog(&session,&store)?;
