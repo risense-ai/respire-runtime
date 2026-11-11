@@ -46,6 +46,12 @@ explicitly; it never changes the identity used in the manifest.
 `files` covers all payload files; the manifest is covered by the API artifact
 digest, rather than a recursive self-hash.
 
+`producer` records `source_sha`, numeric `run_id` and `run_attempt`,
+`workflow_sha`, and `workflow` (`.github/workflows/prebuilt-integration-tests.yml`).
+Trusted main tools obtain these from the Actions environment, explicitly
+forwarded into musl containers. These are claims to compare with the reviewed pin
+and authenticated GitHub API responses, never proof supplied by the artifact alone.
+
 Consumers pin the repository, producer workflow commit, artifact ID, API digest,
 source SHA, run ID/attempt, target and SDK lock digest. They must authenticate
 these against GitHub's API before executing a role, validate the manifest and

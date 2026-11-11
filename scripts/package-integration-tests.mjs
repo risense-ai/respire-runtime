@@ -50,6 +50,18 @@ const businessTests = [
   'snapshot_lifecycle::staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable',
 ];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+function producerReceipt(sourceSha) {
+  const workflow = '.github/workflows/prebuilt-integration-tests.yml';
+  assert.equal(process.env.GITHUB_WORKFLOW_REF, `${repository}/${workflow}@refs/heads/main`);
+  const receipt = {source_sha: sourceSha, workflow, workflow_sha: process.env.GITHUB_SHA};
+  assert.match(receipt.workflow_sha ?? '', /^[a-f0-9]{40}$/);
+  for (const [key, variable] of [['run_id', 'GITHUB_RUN_ID'], ['run_attempt', 'GITHUB_RUN_ATTEMPT']]) {
+    assert.match(process.env[variable] ?? '', /^[1-9][0-9]*$/);
+    receipt[key] = Number(process.env[variable]);
+    assert.ok(Number.isSafeInteger(receipt[key]), 'Producer IDs must be positive safe integers');
+  }
+  return receipt;
+}
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options});
   if (result.error) throw result.error;
@@ -98,6 +110,7 @@ function build(source, target, sourceSha, lockHash, output) {
   assert.equal(process.env.CORE_SDK_READ_TOKEN ?? '', '', 'Build must not hold private SDK credentials');
   assert.equal(process.env.GH_TOKEN ?? '', '', 'Build must not hold GitHub API credentials');
   assert.equal(process.env.GITHUB_TOKEN ?? '', '', 'Build must not hold GitHub API credentials');
+  const producer = producerReceipt(sourceSha);
   source = realpathSync(source);
   output = resolve(output);
   assert.equal(run('git', ['rev-parse', 'HEAD'], {cwd: source}).trim(), sourceSha);
@@ -176,7 +189,7 @@ function build(source, target, sourceSha, lockHash, output) {
   assert.equal(run('git', ['rev-parse', 'HEAD'], {cwd: source}).trim(), sourceSha);
   assert.equal(hash(locks(source, sourceSha).bytes), lockHash);
   const manifest = {schema_version: 1, repository, source_sha: sourceSha, target,
-    sdk_lock_sha256: lockHash, features, roles, tests: {business: businessTests, app, storage}, files};
+    sdk_lock_sha256: lockHash, features, producer, roles, tests: {business: businessTests, app, storage}, files};
   writeFileSync(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, {flag: 'wx'});
   console.log(`Packaged five roles for ${target}; relocated 31 business, ${app.length} snapshot, ${storage.length} diary tests listed; two existing model-free assertions passed. No business tests executed.`);
 }
