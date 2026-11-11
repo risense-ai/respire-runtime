@@ -14,6 +14,7 @@ const targets = [
   {target: 'aarch64-unknown-linux-gnu', os: 'ubuntu-24.04-arm', platform: 'linux', arch: 'arm64'},
   {target: 'aarch64-unknown-linux-musl', os: 'ubuntu-24.04-arm', platform: 'linux', arch: 'arm64'},
   {target: 'x86_64-pc-windows-msvc', os: 'windows-latest', platform: 'win32', arch: 'x64'},
+  {target: 'aarch64-pc-windows-msvc', os: 'windows-11-arm', platform: 'win32', arch: 'arm64'},
   {target: 'aarch64-apple-darwin', os: 'macos-latest', platform: 'darwin', arch: 'arm64'},
 ];
 const businessTests = [
