@@ -60,9 +60,16 @@ function run(command, args, options = {}) {
   }
   return result.stdout;
 }
-function locks(root) {
-  const bytes = readFileSync(join(root, 'sdk/core-sdk.lock.json'));
-  assert.deepEqual(bytes, readFileSync(join(root, 'crates/core-sdk/core-sdk.lock.json')), 'SDK lock bytes differ');
+function locks(root, sourceSha) {
+  const paths = ['sdk/core-sdk.lock.json', 'crates/core-sdk/core-sdk.lock.json'];
+  const blobs = paths.map(path => run('git', ['cat-file', 'blob', `${sourceSha}:${path}`],
+    {cwd: root, encoding: null}));
+  assert.deepEqual(blobs[0], blobs[1], 'SDK lock Git blobs differ');
+  for (const [index, path] of paths.entries()) {
+    assert.deepEqual(readFileSync(join(root, path)), blobs[index],
+      `SDK lock checkout bytes differ from the reviewed Git blob: ${path}; check line-ending conversion`);
+  }
+  const bytes = blobs[0];
   return {bytes, value: JSON.parse(bytes)};
 }
 function plan(rootLock, crateLock) {
@@ -96,7 +103,7 @@ function build(source, target, sourceSha, lockHash, output) {
   assert.equal(run('git', ['rev-parse', 'HEAD'], {cwd: source}).trim(), sourceSha);
   const native = targets.find(item => item.target === target);
   assert.ok(native && native.platform === platform() && native.arch === arch(), 'Native target hardware is required');
-  const lock = locks(source);
+  const lock = locks(source, sourceSha);
   assert.equal(hash(lock.bytes), lockHash, 'SDK lock differs from the trusted plan');
   const sdk = join(source, '.sdk', target);
   auditSdkDirectory(sdk, target, canonicalEntry(target, lock.value.targets[target]));
@@ -167,7 +174,7 @@ function build(source, target, sourceSha, lockHash, output) {
     rmSync(temporary, {recursive: true});
   }
   assert.equal(run('git', ['rev-parse', 'HEAD'], {cwd: source}).trim(), sourceSha);
-  assert.equal(hash(locks(source).bytes), lockHash);
+  assert.equal(hash(locks(source, sourceSha).bytes), lockHash);
   const manifest = {schema_version: 1, repository, source_sha: sourceSha, target,
     sdk_lock_sha256: lockHash, features, roles, tests: {business: businessTests, app, storage}, files};
   writeFileSync(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, {flag: 'wx'});

@@ -40,6 +40,9 @@ the identical Git blob bytes of both locks), `features`, `roles` (relative paths
 `tests` (`business`, `app`, `storage` exact names), and `files`
 (`path`, `size`, `sha256`). `features` preserves `cpu-owned-ort-experiment`;
 Cargo selects the corresponding owning-crate feature for each role.
+Before building and after relocation checks, both checkout files must match
+their reviewed-source Git blobs byte for byte. Line-ending conversion fails
+explicitly; it never changes the identity used in the manifest.
 `files` covers all payload files; the manifest is covered by the API artifact
 digest, rather than a recursive self-hash.
 
