@@ -93,6 +93,13 @@ jobs:
           # WinML's verified NuGet license requires the normal CRLF checkout;
           # only the SDK identities must retain the committed LF blob bytes.
           git -C .source -c core.autocrlf=false checkout-index --force -- sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
