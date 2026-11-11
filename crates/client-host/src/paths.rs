@@ -132,7 +132,16 @@ pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
         })
         .map(|v| expand_tilde(&v));
     match (env_root, from_config) {
-        (Some(root), Some(cfg)) if cfg.starts_with(&root) => cfg,
+        // Windows launch grants use canonical roots while configuration can retain drive paths.
+        (Some(root), Some(cfg))
+            if cfg.starts_with(&root)
+                || cfg.canonicalize().is_ok_and(|profile| {
+                    root.canonicalize()
+                        .is_ok_and(|root| profile.starts_with(root))
+                }) =>
+        {
+            cfg
+        }
         (Some(root), _) => root,
         (None, Some(cfg)) => cfg,
         (None, None) => default_data_dir(),
