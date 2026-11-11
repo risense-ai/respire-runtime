@@ -78,9 +78,15 @@ fn equivalent_path(left: &Path, right: &Path) -> bool {
     let left = normalize(absolute(left));
     let right = normalize(absolute(right));
     if cfg!(windows) {
-        left.to_string_lossy()
-            .replace('/', "\\")
-            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
+        let windows_spelling = |path: &Path| {
+            let value = path.to_string_lossy().replace('/', "\\");
+            if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{unc}")
+            } else {
+                value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+            }
+        };
+        windows_spelling(&left).eq_ignore_ascii_case(&windows_spelling(&right))
     } else {
         left == right
     }
@@ -132,13 +138,10 @@ pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
         })
         .map(|v| expand_tilde(&v));
     match (env_root, from_config) {
-        // Windows launch grants use canonical roots while configuration can retain drive paths.
+        // Compare Windows spellings without I/O so missing profiles cannot select the root.
         (Some(root), Some(cfg))
             if cfg.starts_with(&root)
-                || cfg.canonicalize().is_ok_and(|profile| {
-                    root.canonicalize()
-                        .is_ok_and(|root| profile.starts_with(root))
-                }) =>
+                || cfg.ancestors().any(|ancestor| equivalent_path(ancestor, &root)) =>
         {
             cfg
         }
