@@ -43,6 +43,9 @@ Cargo selects the corresponding owning-crate feature for each role.
 Before building and after relocation checks, both checkout files must match
 their reviewed-source Git blobs byte for byte. Line-ending conversion fails
 explicitly; it never changes the identity used in the manifest.
+Windows retains its normal CRLF source checkout because the pinned WinML NuGet
+license is compared byte for byte. Only the two SDK locks are checked out with
+conversion disabled; the license check and raw Git blob identity checks remain.
 `files` covers all payload files; the manifest is covered by the API artifact
 digest, rather than a recursive self-hash.
 
