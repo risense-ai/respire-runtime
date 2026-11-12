@@ -18,6 +18,24 @@ pub(super) struct KeyOperation {
     fivekeys: Option<fivekeys::FivekeysProgress>,
 }
 
+// Compare existing directory identities without changing persisted path spellings.
+fn same_directory(left: &Path, right: &Path) -> std::io::Result<bool> {
+    let canonical = |path: &Path| -> std::io::Result<Option<PathBuf>> {
+        match path.canonicalize() {
+            Ok(path) => {
+                if std::fs::metadata(&path)?.is_dir() { Ok(Some(path)) }
+                else { Err(std::io::Error::new(std::io::ErrorKind::NotADirectory, "key target is not a directory")) }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    Ok(match (canonical(left)?, canonical(right)?) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    })
+}
+
 fn operation(journal: &Journal, index: usize) -> Result<&KeyOperation> {
     journal.operations[index].key_operation.as_ref().context("key operation receipt is missing")
 }
@@ -49,8 +67,12 @@ fn owned_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &s
         record.operation_id == id || record.idempotency_key == key) else { return Ok(None); };
     let record = &journal.operations[index];
     let op = operation(journal, index)?;
+    let target_matches = match op.target.as_deref() {
+        Some(target) => same_directory(target, profile)?,
+        None => false,
+    };
     ensure!(record.operation_id == id && record.idempotency_key == key && record.root == root
-        && (record.profile == profile || op.target.as_deref() == Some(profile))
+        && (record.profile == profile || target_matches)
         && record.account.is_none() && record.identity.is_none()
         && record.fingerprint == fingerprint(root, &record.profile, &params.source_identity, &params.operation)?
         && record.fingerprint == fingerprint(root, &record.profile, &op.source_identity, &op.operation)?,
@@ -65,9 +87,9 @@ fn owned_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &s
     }
     let current = read_original(profile)?;
     let source_matches = record.profile == profile && current.as_deref().map(digest) == record.original_sha256;
-    let candidate_matches = op.target.as_deref() == Some(profile) && current.is_some() && current == record.candidate
+    let candidate_matches = target_matches && current.is_some() && current == record.candidate
         && matches!(record.phase, AuthPhase::Prepared | AuthPhase::AwaitingVerification | AuthPhase::Committed);
-    let restoring_target = record.phase == AuthPhase::RollingBack && op.target.as_deref() == Some(profile)
+    let restoring_target = record.phase == AuthPhase::RollingBack && target_matches
         && current.as_deref().map(digest) == op.target_original_sha256;
     ensure!(source_matches || candidate_matches || restoring_target, "key receipt no longer owns the selected session");
     Ok(Some(index))
@@ -127,14 +149,14 @@ pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, p
     let HostKeyOperation::Fivekeys { addr, user, kdf_salt, wrapped_urk, urk_nonce, use_super } = &op.operation
         else { anyhow::bail!("unbound recovery is not a fivekeys operation"); };
     ensure!(addr.trim().is_empty() && user.is_empty() && op.credential_ready
-        && op.target.as_deref() == Some(profile)
+        && same_directory(op.target.as_deref().context("offline recovery target missing")?, profile)?
         && record.fingerprint == fingerprint(&record.root, &record.profile, &op.source_identity, &op.operation)?,
         "offline recovery intent or target changed");
     if record.phase != AuthPhase::Committed {
         let active = journal.active.as_ref().context("offline recovery owner missing")?;
         ensure!(matches!(record.phase, AuthPhase::Prepared | AuthPhase::AwaitingVerification)
             && active.operation_id.as_deref() == Some(record.operation_id.as_str())
-            && active.directory == profile && active.alias == record.alias && active.owns_config
+            && same_directory(&active.directory, profile)? && active.alias == record.alias && active.owns_config
             && active.original.as_deref().map(digest) == op.target_original_sha256,
             "offline recovery no longer owns its candidate");
         verify_account_config(active)?;
@@ -325,7 +347,7 @@ fn apply_candidate(ownership: &AuthOwnership, journal: &mut Journal, index: usiz
     ensure!(op.credential_ready, "key candidate credential checkpoint incomplete");
     candidate_keys(record)?;
     let target = op.target.as_ref().context("key target missing")?.clone();
-    let _target_lock = if target == ownership.root || target == ownership.profile { None }
+    let _target_lock = if same_directory(&target, &ownership.root)? || same_directory(&target, &ownership.profile)? { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
     let active = journal.active.as_ref().context("key recovery missing")?;
     ensure!(active.operation_id.as_deref() == Some(record.operation_id.as_str()) && active.directory == target
@@ -362,11 +384,12 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
         }
     };
     verify_auth_identity(&record.root, &crate::service::data_dir().canonicalize()?, &identity)?;
-    if applied {
+    let target_profile = if applied {
         let target = op.target.as_ref().context("key result target missing")?;
         ensure!(read_original(target)? == record.candidate, "key result candidate changed");
         candidate_keys(record)?;
-    }
+        Some(target.canonicalize()?)
+    } else { op.target.clone() };
     let session = if applied { Some(candidate_session(record)?) } else { None };
     Ok(HostKeyResult { operation_id: record.operation_id.clone(), fingerprint: record.fingerprint.clone(), operation: op.operation.clone(),
         outcome: match record.phase {
@@ -375,7 +398,7 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
             AuthPhase::RemotePending | AuthPhase::RemoteUnknown => HostKeyOutcome::Unknown,
             _ if !op.required_inputs.is_empty() => HostKeyOutcome::AwaitingInput,
             _ => HostKeyOutcome::Pending,
-        }, source_profile: record.profile.clone(), target_profile: op.target.clone(),
+        }, source_profile: record.profile.clone(), target_profile,
         account_id: session.as_ref().and_then(|session| session["user"].as_str().filter(|user| !user.is_empty()).map(|user| digest(user.as_bytes()))),
         session_sha256: if applied { record.candidate_sha256.clone() } else { None }, identity,
         required_inputs: op.required_inputs.clone(), verification_required: record.phase == AuthPhase::AwaitingVerification,
@@ -429,11 +452,11 @@ pub fn control_key_complete(root: &Path, profile: &Path, id: &str, key: &str, pa
     let mut journal = load_journal()?;
     let index = owned_index(&journal, &root, &profile, id, key, params)?.context("key completion receipt missing")?;
     ensure!(matches!(operation(&journal, index)?.operation, HostKeyOperation::Fivekeys { .. })
-        && operation(&journal, index)?.target.as_deref() == Some(profile.as_path()), "key completion target mismatch");
+        && same_directory(operation(&journal, index)?.target.as_deref().context("key completion target missing")?, &profile)?, "key completion target mismatch");
     if journal.operations[index].phase == AuthPhase::Committed { return result(&journal, index); }
     ensure!(journal.operations[index].phase == AuthPhase::AwaitingVerification, "key candidate is not awaiting verification");
     let active = journal.active.as_ref().context("key completion recovery missing")?;
-    ensure!(active.owns_config && active.directory == profile, "key completion configuration owner changed");
+    ensure!(active.owns_config && same_directory(&active.directory, &profile)?, "key completion configuration owner changed");
     verify_account_config(active)?;
     verify_runtime(&result(&journal, index)?)?;
     journal.operations[index].phase = AuthPhase::Committed;
@@ -467,7 +490,8 @@ pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, p
                 | AuthPhase::Prepared | AuthPhase::AwaitingVerification), "published reset cannot be compensated");
     let active = journal.active.as_ref().context("key rollback recovery missing")?;
     let target = active.directory.clone();
-    let target_lock = if target == ownership.root || target == ownership.profile || !target.exists() { None }
+    let target_lock = if !target.try_exists()? || same_directory(&target, &ownership.root)?
+        || same_directory(&target, &ownership.profile)? { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
     let current = read_original(&target)?;
     ensure!(current == active.original || current == journal.operations[index].candidate, "key rollback target changed");
@@ -476,8 +500,10 @@ pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, p
     save_journal(&journal)?;
     rollback_record_inner(journal.active.as_ref().context("key recovery missing")?, false)?;
     drop(target_lock);
-    if journal.active.as_ref().is_some_and(|active| !active.directory_existed && active.directory == ownership.profile) {
-        drop(ownership._profile_lock.take());
+    if let Some(active) = journal.active.as_ref() {
+        if !active.directory_existed && same_directory(&active.directory, &ownership.profile)? {
+            drop(ownership._profile_lock.take());
+        }
     }
     quarantine_new_profile(journal.active.as_ref().context("key recovery missing")?)?;
     journal.operations[index].phase = AuthPhase::RolledBack;
