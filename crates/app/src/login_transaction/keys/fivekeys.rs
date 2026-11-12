@@ -124,7 +124,7 @@ fn stage(ownership: &AuthOwnership, journal: &mut Journal, index: usize, mut pre
     let active = journal.active.as_ref().context("fivekeys recovery missing")?;
     ensure!(active.directory == prepared.directory && active.original == prepared.original, "fivekeys target snapshot changed");
     let target = active.directory.clone();
-    let _target_lock = if target == ownership.root || target == ownership.profile { None }
+    let _target_lock = if same_directory(&target, &ownership.root)? || same_directory(&target, &ownership.profile)? { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
     ensure!(read_original(&target)? == prepared.original, "fivekeys target changed while acquiring ownership");
     verify_account_config(journal.active.as_ref().context("fivekeys recovery missing")?)?;
