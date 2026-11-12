@@ -2438,6 +2438,10 @@ fn stop_process(code: i32) -> ! {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
+        if let Err(error) = crate::runtime_http::shutdown() {
+            eprintln!("runtime could not drain HTTP responses before exit: {error:#}");
+            exit_code = 1;
+        }
         if let Some(operation_id) = STOP_OPERATION.get() {
             let receipt = final_stop_receipt(operation_id, exit_code == 0);
             let directory = respire_app::service::main_data_dir().join("runtime");
