@@ -278,6 +278,18 @@ fn checkpoint_secret(journal: &mut Journal, index: usize, slot: &str, secret: &s
 fn invite(journal: &mut Journal, index: usize) -> Result<()> {
     let HostSpaceOperation::Invite { note, readonly } = op(journal,index)?.intent.clone() else { anyhow::bail!("not invite"); };
     let session = source_session(&journal.operations[index])?;
+    let record = &journal.operations[index];
+    let name = if record.profile == record.root {
+        field(&session,"user")?.to_owned()
+    } else {
+        // Journal paths are canonical; resolve accounts under the admitted root before comparing.
+        let accounts = record.root.join("accounts");
+        safe_path(&accounts)?;
+        let accounts = accounts.canonicalize().context("cannot resolve space accounts root")?;
+        ensure!(record.profile.parent() == Some(accounts.as_path()), "space profile is not directly under its installation accounts root");
+        record.profile.file_name().and_then(|name| name.to_str())
+            .context("space profile name is not UTF-8")?.to_owned()
+    };
     let secret = source_super(&session)?;
     checkpoint_secret(journal,index,"super",&secret)?;
     let device = format!("member-{}",note.as_deref().unwrap_or("invited").trim());
@@ -296,8 +308,6 @@ fn invite(journal: &mut Journal, index: usize) -> Result<()> {
     };
     let sid = field(&reply,"session_id")?.to_owned();
     ensure!(uuid::Uuid::parse_str(&sid)?.to_string() == sid, "invalid member session identity");
-    let name = journal.operations[index].profile.strip_prefix(crate::service::accounts_root()).ok()
-        .and_then(|path| path.to_str()).filter(|name| !name.is_empty()).unwrap_or(field(&session,"user")?).to_owned();
     let code = format!("{PREFIX}{}",hex::encode(serde_json::to_vec(&json!({"space":name,"addr":field(&session,"addr")?,
         "user":field(&session,"user")?,"token":field(&reply,"token")?,"session_id":sid,"super":secret,
         "secret_key":session["secret_key"],"readonly":readonly,"control_operation_id":journal.operations[index].operation_id,

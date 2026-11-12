@@ -817,12 +817,23 @@ pub struct SessionInfo {
 /// Full recovery key (local only; UI must confirm twice).
 pub fn session_secret_full() -> Result<String> {
     let d = auth::read_session_json()?;
-    Ok(d["secret_key"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or_else(|| d["secret"].as_str())
-        .unwrap_or("")
-        .to_owned())
+    // Old v4 sessions kept inline keys; any credential claim must stay on its bound backend.
+    let bound = ["keyring_account", "keyring_backend", "auth_operation_id"]
+        .iter().any(|field| d.get(*field).is_some());
+    if d["vault_version"].as_i64().is_some_and(|version| version >= 4) && bound {
+        let alias = d["keyring_account"].as_str().filter(|value| !value.is_empty())
+            .context("session recovery credential alias is missing")?;
+        let backend = d["keyring_backend"].as_str().filter(|value| !value.is_empty())
+            .context("session recovery credential backend is missing")?;
+        let secret = crate::keystore::read_imported(alias, "super", backend)?;
+        auth::unlock_session_keys(&d, "", Some(&secret), alias)
+            .context("recovery credential does not unlock the selected session")?;
+        return Ok(secret);
+    }
+    d["secret_key"].as_str().filter(|value| !value.is_empty())
+        .or_else(|| d["secret"].as_str().filter(|value| !value.is_empty()))
+        .map(str::to_owned)
+        .context("session recovery secret is unavailable")
 }
 
 /// New-device five-piece kit (manual handoff across devices; local only).
