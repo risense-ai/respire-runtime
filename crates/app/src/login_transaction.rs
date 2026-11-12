@@ -1536,6 +1536,18 @@ pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIden
     if journal.operations[index].phase == AuthPhase::AwaitingVerification || journal.operations[index].phase == AuthPhase::Committed {
         verify_account_candidate(&journal.operations[index])?;
     }
+    let account = journal.operations[index].account.as_ref().context("account receipt is missing")?;
+    if journal.operations[index].phase == AuthPhase::AwaitingVerification
+        && account.register && account.vault_pending && !account.published_vault {
+        let authorized = account.authorization.as_ref().context("registration authorization is missing")?;
+        let vault = account.vault.as_ref().filter(|vault| vault.is_object())
+            .context("registration vault is missing")?;
+        // Observe the original publication only. Failed reads and mismatches retain Unknown.
+        if PreparedLogin::fetch_vault(&account.addr, authorized).is_ok_and(|current| current == *vault) {
+            journal.operations[index].account.as_mut().context("account receipt is missing")?.published_vault = true;
+            save_journal(&journal)?;
+        }
+    }
     login::resume_import(ownership, &mut journal, index)?;
     login::reconcile_publication(&mut journal, index)?;
     account_result(&journal.operations[index])
