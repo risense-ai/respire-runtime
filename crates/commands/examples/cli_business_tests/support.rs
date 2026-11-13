@@ -85,7 +85,7 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
         && selected["release"]["metadata_json"].is_string()
         && source_root.join("runtime").join(&version) == version_dir,
         "Runtime fixture must be a verified managed installation");
-    let mut pending = vec![(version_dir.to_path_buf(), root.join("runtime").join(&version))];
+    let mut pending = vec![(version_dir.to_path_buf(), root.join("bin/runtime").join(&version))];
     while let Some((source, target)) = pending.pop() {
         let metadata = std::fs::symlink_metadata(&source)?;
         anyhow::ensure!(!metadata.file_type().is_symlink(), "Runtime fixture contains a link");
@@ -107,7 +107,7 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
         }
     }
     anyhow::ensure!(std::fs::symlink_metadata(&receipt)?.is_file(), "Runtime fixture receipt missing");
-    std::fs::copy(receipt, root.join("runtime.json"))?;
+    std::fs::copy(receipt, root.join("bin/runtime.json"))?;
     stage_cli_fixture(&root.join("bin"))
 }
 
