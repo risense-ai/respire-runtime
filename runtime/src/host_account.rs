@@ -240,7 +240,21 @@ fn valid_hash(value: &str) -> bool {
 /// starts this host process. This does not assert a signed release provenance.
 fn installed_client2_runtime() -> Result<VerifiedRuntime> {
     let (root, _) = respire_client_host::config::control_roots()?;
-    let installation = if root.join("bin/runtime.json").try_exists()? {
+    let binary_name = if cfg!(windows) {
+        "rsrs-runtime.exe"
+    } else {
+        "rsrs-runtime"
+    };
+    let current_image = std::env::current_exe()?.canonicalize()?;
+    let shared_image = root
+        .join("bin/runtime")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join(binary_name);
+    // Older Client2 versions can still start their independently installed image.
+    let installation = if shared_image.try_exists()?
+        && respire_client_host::config::normalize_control_path(&shared_image)?.canonicalize()?
+            == current_image
+    {
         root.join("bin")
     } else {
         root.join("client2")
@@ -253,15 +267,10 @@ fn installed_client2_runtime() -> Result<VerifiedRuntime> {
         selection.version == env!("CARGO_PKG_VERSION") && valid_hash(&selection.sha256),
         "this Runtime is not the selected Client2 version"
     );
-    let binary_name = if cfg!(windows) {
-        "rsrs-runtime.exe"
-    } else {
-        "rsrs-runtime"
-    };
     let directory = installation.join("runtime").join(&selection.version);
     let image = respire_client_host::config::normalize_control_path(&directory.join(binary_name))?;
     anyhow::ensure!(
-        image.canonicalize()? == std::env::current_exe()?.canonicalize()?,
+        image.canonicalize()? == current_image,
         "account host is not the selected Client2 Runtime image"
     );
     let manifest_bytes = bounded_file(&directory.join("core-runtime.json"), 2 * 1024 * 1024)?;
