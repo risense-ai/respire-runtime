@@ -240,8 +240,13 @@ fn valid_hash(value: &str) -> bool {
 /// starts this host process. This does not assert a signed release provenance.
 fn installed_client2_runtime() -> Result<VerifiedRuntime> {
     let (root, _) = respire_client_host::config::control_roots()?;
-    let selected_path = root.join("client2/runtime.json");
-    let selection_bytes = bounded_file(&selected_path, 65536)?;
+    let installation = if root.join("bin/runtime.json").try_exists()? {
+        root.join("bin")
+    } else {
+        root.join("client2")
+    };
+    let selected_path = installation.join("runtime.json");
+    let selection_bytes = bounded_file(&selected_path, 13 * 1024 * 1024)?;
     let selection: Client2Selection = serde_json::from_slice(&selection_bytes)
         .map_err(|_| anyhow::anyhow!("invalid Client2 Runtime selection"))?;
     anyhow::ensure!(
@@ -253,7 +258,7 @@ fn installed_client2_runtime() -> Result<VerifiedRuntime> {
     } else {
         "rsrs-runtime"
     };
-    let directory = root.join("client2/runtime").join(&selection.version);
+    let directory = installation.join("runtime").join(&selection.version);
     let image = respire_client_host::config::normalize_control_path(&directory.join(binary_name))?;
     anyhow::ensure!(
         image.canonicalize()? == std::env::current_exe()?.canonicalize()?,
@@ -290,6 +295,10 @@ fn installed_client2_runtime() -> Result<VerifiedRuntime> {
                 && seen.insert(relative),
             "unsafe or duplicate installed Runtime inventory path"
         );
+        // Notices are optional documentation, never executable dependencies.
+        if relative.starts_with("core-notices/") && !directory.join(path).try_exists()? {
+            continue;
+        }
         anyhow::ensure!(
             file_hash(&directory.join(path))?.eq_ignore_ascii_case(digest),
             "installed Runtime payload digest mismatch"
@@ -302,7 +311,7 @@ fn installed_client2_runtime() -> Result<VerifiedRuntime> {
         respire_commands::net_rpc::rpc_port(),
     )?;
     anyhow::ensure!(
-        bounded_file(&selected_path, 65536)? == selection_bytes
+        bounded_file(&selected_path, 13 * 1024 * 1024)? == selection_bytes
             && hash(&bounded_file(
                 &directory.join("core-runtime.json"),
                 2 * 1024 * 1024
