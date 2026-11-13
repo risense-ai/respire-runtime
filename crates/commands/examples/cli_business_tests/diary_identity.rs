@@ -2095,8 +2095,8 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
     std::fs::write(root.join("classify.json"), br#"{"api_key":"synthetic-native-stop-key"}"#)?;
     checkpoint("runtime_install_requested");
     support::install_runtime_fixture(&root)?;
-    let selected: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
-    fixture.runtime = root.join("runtime").join(selected["version"].as_str().context("installed version missing")?)
+    let selected: Value = serde_json::from_slice(&std::fs::read(root.join("bin/runtime.json"))?)?;
+    fixture.runtime = root.join("bin/runtime").join(selected["version"].as_str().context("installed version missing")?)
         .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?;
     std::fs::create_dir_all(root.join("bin"))?;
     std::fs::copy(&fixture.cli, root.join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
@@ -2394,8 +2394,8 @@ fn prepare_client2_stop_fixture(case: &str) -> anyhow::Result<RegisteredStopFixt
     std::fs::write(root.join("classify.json"), br#"{"api_key":"synthetic-native-stop-key"}"#)?;
     checkpoint("runtime_install_requested");
     support::install_runtime_fixture(&root)?;
-    let selected: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
-    fixture.runtime = root.join("runtime").join(selected["version"].as_str().context("installed version missing")?)
+    let selected: Value = serde_json::from_slice(&std::fs::read(root.join("bin/runtime.json"))?)?;
+    fixture.runtime = root.join("bin/runtime").join(selected["version"].as_str().context("installed version missing")?)
         .join(if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" }).canonicalize()?;
     std::fs::create_dir_all(root.join("bin"))?;
     std::fs::copy(&fixture.cli, root.join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
@@ -2481,7 +2481,7 @@ impl Client2OwnedStopFixture {
         assert_eq!(modern["process_start_id"], format!("{prefix}{}", identity["birth"].as_str().context("Client2-owned OS birth missing")?));
         let root = self.owned()?.fixture()?.home.path().join("data");
         let selected: Value = serde_json::from_slice(&std::fs::read(root.join("client2/runtime.json"))?)?;
-        let installed: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
+        let installed: Value = serde_json::from_slice(&std::fs::read(root.join("bin/runtime.json"))?)?;
         assert_eq!(selected["version"], installed["version"]);
         assert_eq!(modern["runtime_version"], selected["version"]);
         let actual_hash = format!("{:x}", Sha256::digest(std::fs::read(&image)?));
@@ -2553,7 +2553,7 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
         let write = StopWriteEvidence::seed(owned.fixture()?)?;
         checkpoint("memory_seeded");
         let root = owned.fixture()?.home.path().join("data");
-        let selected: Value = serde_json::from_slice(&std::fs::read(root.join("runtime.json"))?)?;
+        let selected: Value = serde_json::from_slice(&std::fs::read(root.join("bin/runtime.json"))?)?;
         let version = selected["version"].as_str().context("installed Runtime version missing")?;
         let version_dir = owned.fixture()?.runtime.parent().context("Runtime bundle missing")?.to_path_buf();
         let target = root.join("client2/runtime").join(version);

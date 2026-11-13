@@ -143,7 +143,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let source_runtime = runtime_bin()?;
     let version = source_runtime.parent().and_then(std::path::Path::file_name)
         .ok_or("Runtime fixture version directory missing")?;
-    let installed_runtime = library.join("runtime").join(version)
+    let installed_runtime = library.join("bin/runtime").join(version)
         .join(source_runtime.file_name().ok_or("Runtime fixture file name missing")?);
     let config = library.join("client.json");
     std::fs::write(
@@ -1529,7 +1529,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         }
         let owner = runtime_health(runtime_port, "import-target")?;
         let official = runtime_bin()?;
-        let installed = root.join("runtime")
+        let installed = root.join("bin/runtime")
             .join(official.parent().and_then(std::path::Path::file_name).ok_or("official Runtime version missing")?)
             .join(official.file_name().ok_or("official Runtime filename missing")?).canonicalize()?;
         if owner["store_ready"] != true || owner["account_id"] != format!("{:x}", Sha256::digest(b"authorized"))
