@@ -147,7 +147,8 @@ function run() {
   const go = execFileSync('which', ['go'], {encoding: 'utf8'}).trim();
   const launcher = spawnSync('python3', [join(bound.cliSource, 'scripts/test-client2-launcher-compat.py'),
     '--cli', bound.cli, '--runtime-archive', archive, '--runtime-version', bound.metadata.runtime_version,
-    '--client2-source', bound.client2Source, '--go', go, '--desktop-executable', bound.desktop,
+    '--client2-source', bound.client2Source, '--client2-baseline', 'v0.2.56',
+    '--go', go, '--desktop-executable', bound.desktop,
     '--ordinary-cli-cold-start', '--report', launcherPath], {stdio: 'inherit'});
   assert.ifError(launcher.error);
   assert.equal(launcher.status, 0, 'Original Client2 execution failed');
