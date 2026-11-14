@@ -7,6 +7,10 @@ and by `respire-client2` (which shares the same managed layout and download rule
 
 Boundary in one sentence: **runtime = core capability + RPC; every install,
 download, registration and configuration entry point lives in the CLI.**
+Built-in model profiles (for example the Granite pins in
+`crates/app-domain/src/embedding.rs`) are host-owned configuration data inside
+the runtime: they describe where assets must live and which exact bytes are
+expected, but the runtime never fetches or installs them.
 
 ## Status
 
@@ -62,6 +66,9 @@ On PowerShell, set `$env:RSRS_CORE_SDK_DIR`. The staged runtime libraries and
 notices must ship next to the binary; release packaging does this automatically.
 The runtime binary never downloads models or assets on its own; missing assets
 are reported through `health` and `assets.status`, and the CLI installs them.
+Built-in model profiles (such as the Granite pins in
+`crates/app-domain/src/embedding.rs`) are host-owned configuration data that
+record expected paths, sizes and SHA-256 digests; they never trigger a download.
 
 ## Runtime surface (unchanged from the combined binary)
 

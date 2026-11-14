@@ -98,6 +98,22 @@ pub fn registry() -> Result<Registry> {
         weights: Some(resource(&mlx_root,"model.safetensors",1_135_554_209,"e8028acb2e77e0010d35ef75832d823edb5851c95682deef2bde86a45bd4441d","mlx-community/bge-m3-mlx-fp16",mlx_revision)),
         tokenizer: Some(resource(&mlx_root,"tokenizer.json",17_098_085,"5df1f55d60c9705a501ab9a75550728625740741fe4be308dac4806c16b7d51d","mlx-community/bge-m3-mlx-fp16",mlx_revision)),
     });
+    // Built-in profile pins only; the runtime never downloads or installs these assets.
+    // The Granite ONNX graphs expose input_ids/attention_mask only, so token_type_ids
+    // is deliberately absent from the onnx tensor map.
+    let granite_onnx = json!({"input_ids":"input_ids","attention_mask":"attention_mask","output":"last_hidden_state"});
+    for (id, repo, revision, dims, directory, weights_file, weights_size, weights_hash, tokenizer_size, tokenizer_hash, pad_token_id) in [
+        ("granite-97m-r2", "ibm-granite/granite-embedding-97m-multilingual-r2", "835ad14087e140460703cf0fae09f97d469d65c2", 384, root.join("granite-97m-r2"), "onnx/model.onnx", 390004608u64, "68e592b160673d30250824c1116bc6ab33f70efb22b97c9e1d7ce1e69c1c9d70", 25301672u64, "4f2842d568e2724370aec203652a42ac783c7937f8347a1a2cc7506d71f1582f", 179935),
+        ("granite-311m-r2", "ibm-granite/granite-embedding-311m-multilingual-r2", "44399559930365213510b1ee2eb15ded83374f0e", 768, root.join("granite-311m-r2"), "onnx/model_quint8_avx2.onnx", 313421909u64, "f1fdd44e7e1ac51f12ab7957c7bd092e064d596c288513bf9d326842f669edee", 33384821u64, "0087c868b33bad550a78a08d19798cfd7f713cde4f020803b8f51f405503e15f", 0),
+    ] {
+        registry.models.insert(id.to_owned(), ModelProfile {
+            id: id.to_owned(),
+            embedding: json!({"model_id":repo,"revision":revision,"dimensions":dims,"max_tokens":32768,"pooling":"cls","normalize":true,"query_prefix":"","document_prefix":"","pad_token_id":pad_token_id,"pad_to_max_tokens":false}),
+            onnx: granite_onnx.clone(),
+            weights: Some(resource(&directory, weights_file, weights_size, weights_hash, repo, revision)),
+            tokenizer: Some(resource(&directory, "tokenizer.json", tokenizer_size, tokenizer_hash, repo, revision)),
+        });
+    }
     registry.backends.insert(
         "onnx".to_owned(),
         BackendProfile {
@@ -427,4 +443,45 @@ pub fn prepare(
         std::fs::rename(&partial, &resource.path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn granite_builtin_profiles_are_registered_and_valid() -> Result<()> {
+        let _isolate = crate::test_lock::Isolate::new()?;
+        let registry = registry()?;
+        for id in ["granite-97m-r2", "granite-311m-r2"] {
+            let profile = registry
+                .models
+                .get(id)
+                .with_context(|| format!("missing built-in profile {id}"))?;
+            assert_eq!(profile.id, id);
+            // The Granite graphs have no token_type_ids input.
+            assert!(profile.onnx.get("token_type_ids").is_none());
+            let selection = Selection {
+                model: id.to_owned(),
+                backend: "onnx".to_owned(),
+                engine: crate::core_sdk::onnx::Engine::Cpu,
+                variant: None,
+                profile: profile.clone(),
+                backend_profile: registry
+                    .backends
+                    .get("onnx")
+                    .context("missing built-in onnx backend")?
+                    .clone(),
+                generation: String::new(),
+            };
+            selection.validate()?;
+        }
+        let nine = &registry.models["granite-97m-r2"];
+        assert_eq!(nine.embedding["dimensions"], 384);
+        assert_eq!(nine.embedding["pad_token_id"], 179935);
+        let large = &registry.models["granite-311m-r2"];
+        assert_eq!(large.embedding["dimensions"], 768);
+        assert_eq!(large.embedding["pad_token_id"], 0);
+        Ok(())
+    }
 }
