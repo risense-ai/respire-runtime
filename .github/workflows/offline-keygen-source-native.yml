@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: b72d6797eeb639a2419b29a6fe9312cc5d79129b
+          ref: ebe28826531176fa37982706e4cfbab191e3e0c5
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'b72d6797eeb639a2419b29a6fe9312cc5d79129b'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'ebe28826531176fa37982706e4cfbab191e3e0c5'
           test "$(git -C .client2-source rev-parse HEAD)" = '1734322b6c6dd543441a753f07a3517bee5e1231'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -204,7 +204,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='b72d6797eeb639a2419b29a6fe9312cc5d79129b'
+          $cliSha='ebe28826531176fa37982706e4cfbab191e3e0c5'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -213,7 +213,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: b72d6797eeb639a2419b29a6fe9312cc5d79129b
+          ref: ebe28826531176fa37982706e4cfbab191e3e0c5
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -229,7 +229,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'b72d6797eeb639a2419b29a6fe9312cc5d79129b'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'ebe28826531176fa37982706e4cfbab191e3e0c5'
           test "$(git -C .client2-source rev-parse HEAD)" = '1734322b6c6dd543441a753f07a3517bee5e1231'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -690,6 +690,9 @@ jobs:
                       and type(samples) is int and 0<=samples<=256):
                       summary['runtime_start_stop_selector']={'state':state,'complete_samples':samples}
               o=n.get('offline',{}); focus=o.get('account_focus_stability',{})
+              binding_stage=o.get('runtime_binding_stage')
+              summary['runtime_binding_stage']=binding_stage if type(binding_stage) is str and binding_stage in {
+                'start_control','stop_control','health','process','cim','identity','bound'} else 'unknown'
               allowed_stages={'account_navigation','offline_initialization','key_generation',
                 'recovery_dismiss','overview_navigation','runtime_start','account_verification',
                 'credential_persistence','important_editor_open','important_save','important_created_reader',
