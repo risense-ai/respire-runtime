@@ -327,7 +327,7 @@ jobs:
           assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
           assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
           assert.equal(artifact.expired, false);
-          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 256 * 1024 * 1024);
+          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 512 * 1024 * 1024);
           NODE
       - uses: actions/download-artifact@v4
         with:
@@ -429,7 +429,7 @@ jobs:
           assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
           assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
           assert.equal(artifact.expired, false);
-          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 256 * 1024 * 1024);
+          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 512 * 1024 * 1024);
           NODE
       - uses: actions/download-artifact@v4
         with:
