@@ -332,6 +332,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ inputs.required_candidate_artifact_id }}
+          merge-multiple: true
           run-id: ${{ inputs.required_candidate_run_id }}
           github-token: ${{ github.token }}
           path: g1-input
@@ -434,6 +435,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ inputs.required_candidate_artifact_id }}
+          merge-multiple: true
           run-id: ${{ inputs.required_candidate_run_id }}
           github-token: ${{ github.token }}
           path: g1-input

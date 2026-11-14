@@ -1203,6 +1203,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             )
             .into());
         }
+        eprintln!("account-checkpoint oauth_completed");
         let envelope: Value = serde_json::from_slice(&authorized.stdout)?;
         if envelope["status"] != "ok" || envelope["summary"]["user"] != "authorized" {
             return Err("OAuth login did not report the verified account".into());
@@ -1263,10 +1264,12 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         {
             return Err("login session does not match its committed credential receipt".into());
         }
+        eprintln!("account-checkpoint receipt_verified");
         let stopped = execute(&["--runtime-internal", "--stop"])?;
         if !stopped.status.success() {
             return Err("could not stop the isolated OAuth runtime".into());
         }
+        eprintln!("account-checkpoint oauth_runtime_stopped");
 
         // Seed an encrypted cloud-only record, absent from this target's local store.
         assert!(execute(&[
@@ -1281,7 +1284,9 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         ])?
         .status
         .success());
+        eprintln!("account-checkpoint cloud_memory_seeded");
         let peer_store = LocalStore::open(&target.join("rsrs.db"))?;
+        eprintln!("account-checkpoint cloud_store_opened");
         let peers = peer_store.all(false)?;
         let peer = peers.first().ok_or("cloud fixture row missing")?;
         remote_blobs
@@ -1297,6 +1302,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             }
         }
 
+        eprintln!("account-checkpoint cloud_fixture_staged");
         // The source owns its recovery code; target --super is never a source factor.
         let source_urk = [43_u8; 32];
         let source_secret = crypto::generate_secret_key();
