@@ -56,6 +56,9 @@ fn main() -> ExitCode {
         Err(error) => {
             respire_logging::error(format_args!("rsrs-runtime failed"));
             eprintln!("rsrs-runtime: {error:#}");
+            if std::env::args_os().any(|arg| arg == "--runtime-background-internal") {
+                println!("{}", serde_json::json!({"startup_complete":false, "error":format!("{error:#}")}));
+            }
             ExitCode::from(2)
         }
     }
@@ -122,6 +125,22 @@ fn usage() -> &'static str {
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--keychain-authorize-internal") {
+        anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
+            "Keychain authorization accepts no boot token or arguments");
+        startup_identity::authorize_keychain()?;
+        return Ok(0);
+    }
+    // Background and RPC processes must return an authorization error instead of waiting for UI.
+    #[cfg(target_os = "macos")]
+    let _keychain_interaction = if !uses_host_frontend(std::env::args_os().skip(1))
+        || std::env::args_os().skip(1).any(|arg| arg == "--host-rpc-stdio" || arg == "--host-control-internal") {
+        Some(security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
+            .context("could not disable background Keychain interaction")?)
+    } else {
+        None
+    };
     #[cfg(target_os = "macos")]
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "--runtime-exit-observer-internal") {
         anyhow::ensure!(boot_token.is_none(), "exit observer cannot consume boot authorization");

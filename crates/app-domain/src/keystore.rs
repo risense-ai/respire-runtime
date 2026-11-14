@@ -222,7 +222,11 @@ fn read_imported_inner(account: &str, slot: &str, backend_name: &str, allow_empt
     let backend = backends().iter().find(|backend| backend.name() == backend_name)
         .ok_or_else(|| anyhow!("credential backend is unavailable during recovery"))?;
     let value = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?
-        .get_password().map_err(|_| anyhow!("recovery credential is unavailable"))?;
+        .get_password().map_err(|_| anyhow!(if cfg!(target_os = "macos") {
+            "recovery credential is unavailable; unlock the login Keychain and run rsrs runtime authorize-keychain in a terminal, then retry; retain recovery state"
+        } else {
+            "recovery credential is unavailable"
+        }))?;
     anyhow::ensure!(!value.is_empty() || allow_empty_v1 && slot == "pass", "recovery credential is empty");
     Ok(value)
 }
