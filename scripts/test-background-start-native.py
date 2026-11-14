@@ -82,7 +82,13 @@ def main():
         reply = json.loads(value['stdout'])
         assert reply['ok'] is True, reply
         if action == 'start':
-            assert reply['reply']['ok'] is True, reply
+            status = reply['reply']
+            assert status['ok'] is False and status['exit'] == 2, reply
+            summary = status['envelope']['summary']
+            assert summary['credential_state'] == 'required' and summary['store_ready'] is False, reply
+            assert summary['unlocked'] is False, reply
+            assert summary['sync_scheduler']['phase'] == 'paused', reply
+            assert summary['retrieval_index']['state'] == 'paused', reply
 
     def command(action):
         result = subprocess.run([str(executable), '--json', 'runtime', action], env=env,
@@ -116,9 +122,12 @@ def main():
         evidence['legacy_cli'] = {'version': '1.0.21-dev.6', 'binary_sha256': digest(legacy),
             'exit': result.returncode, 'stdout': result.stdout.decode('utf-8'),
             'stderr': result.stderr.decode('utf-8')}
-        assert result.returncode == 0, evidence['legacy_cli']
+        assert result.returncode == 2, evidence['legacy_cli']
         status = json.loads(evidence['legacy_cli']['stdout'])
-        assert status['command'] == 'status' and status['status'] == 'ok' and status['errors'] == [], status
+        assert status['command'] == 'status' and status['status'] == 'warn' and status['errors'] == [], status
+        assert status['summary']['credential_state'] == 'required', status
+        assert status['summary']['store_ready'] is False and status['summary']['unlocked'] is False, status
+        passed_case('legacy-client-observes-locked-runtime-without-host-credentials')
         assert command('start')['result'] == 'already_running'
         assert command('status')['pid'] == health['pid']
         passed_case('client2-owned-repeated-start-reuses-verified-runtime')
