@@ -56,8 +56,8 @@ jobs:
           gh release download v2.0.0-dev.3 --repo risense-ai/respire-cli \
             --pattern rsrs-aarch64-apple-darwin --pattern cli-build-aarch64-apple-darwin.json --dir "$RUNNER_TEMP/dev3"
           chmod +x "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin"
-          curl --fail --location https://raw.githubusercontent.com/risense-ai/respire-cli/5859bdcea36bf70bcf4b5d3fc423d5acc96a1406/scripts/test-dev3-in-place-upgrade.py --output "$RUNNER_TEMP/test-upgrade.py"
-      - name: Require unauthorized startup to fail within ten seconds without changing recovery state
+          curl --fail --location https://raw.githubusercontent.com/risense-ai/respire-cli/4f74b229582b9ea7319020c645e94a8e32419b61/scripts/test-dev3-in-place-upgrade.py --output "$RUNNER_TEMP/test-upgrade.py"
+      - name: Require bounded denial and read-only foreground credential verification
         run: |
           python "$RUNNER_TEMP/test-upgrade.py" \
             --old-cli "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin" \
