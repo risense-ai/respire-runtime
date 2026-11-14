@@ -96,7 +96,7 @@ export function context() {
     const packaged = metadata.files.filter(item => item.path === path);
     assert.equal(packaged.length, 1, 'SDK runtime payload missing or duplicated in native package');
     assert.equal(packaged[0].sha256, file.sha256);
-    assert.equal(packaged[0].size, read(join(sdkDirectory, file.path)).length);
+    assert.equal(packaged[0].size, lstatSync(join(sdkDirectory, file.path)).size);
   }
   return {bytes, candidate, metadata, observed, target};
 }
