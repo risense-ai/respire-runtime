@@ -42,7 +42,8 @@ def main():
    for entry in inventory["files"]:
     if entry["path"]==source_binary: entry["path"]=binary
    (install/"core-runtime.json").write_text(json.dumps(inventory))
-  (root/"client2/runtime.json").write_text(json.dumps({"version":args.version,"sha256":digest(install/binary)}))
+  # Exercise the installer-owned field; this source fixture asserts no release provenance.
+  (root/"client2/runtime.json").write_text(json.dumps({"version":args.version,"sha256":digest(install/binary),"release":{}}))
   models=root/"models/bge-m3"
   for name in MODELS:
    destination=models/name; destination.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(args.models/name,destination)
