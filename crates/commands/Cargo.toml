@@ -39,6 +39,8 @@ tokio = { version = "=1.52.3", features = ["rt-multi-thread", "net", "time", "sy
 signal-hook = "0.3"
 
 [dev-dependencies]
+# Native business fixtures act as synthetic hosts; serving Runtime keeps this disabled.
+respire_app_domain = { path = "../app-domain", features = ["test-support"] }
 url = "2.5"
 tempfile = "3.15"
 tiny_http = "0.12"

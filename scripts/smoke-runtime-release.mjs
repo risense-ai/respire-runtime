@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {createHash} from 'node:crypto';
+import {createCipheriv, createHash, hkdfSync, randomBytes} from 'node:crypto';
 import {spawn, execFileSync} from 'node:child_process';
 import {createConnection} from 'node:net';
 import {chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
@@ -8,6 +8,16 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {runRuntimeMcpProbe} from './runtime-mcp-probe.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+function syntheticSession() {
+  // The smoke host owns this disposable v4 key; Runtime receives it only after locked startup.
+  const entropy = randomBytes(18), salt = randomBytes(16), nonce = randomBytes(12);
+  const superPassword = `A3-${entropy.toString('hex')}`;
+  const kek = hkdfSync('sha256', entropy, salt, Buffer.from('onememory:kek:v4'), 32);
+  const cipher = createCipheriv('aes-256-gcm', kek, nonce);
+  const wrapped = Buffer.concat([cipher.update(randomBytes(32)), cipher.final(), cipher.getAuthTag()]);
+  return {superPassword, session: {user: 'runtime-smoke', addr: 'https://smoke.invalid', vault_version: 4,
+    kdf_salt: salt.toString('hex'), urk_nonce: nonce.toString('hex'), wrapped_urk: wrapped.toString('hex')}};
+}
 function normalizedPath(value, platform = process.platform) {
   if (platform !== 'win32') return value;
   // Node may retain the extended prefix even after resolving the same file.
@@ -148,6 +158,12 @@ if (process.argv.includes('--self-check')) {
   assert.throws(() => assertDrained({...receipt, protocol_version: 2}, {...health, v: 2}, 'o'));
   assert.throws(() => assertDrained({...receipt, protocol_version: undefined}, {...health, v: undefined}, 'o'));
   assert.throws(() => assertProtocol({...health, protocol_range: {minimum: 1, maximum: 2}}));
+  const fixture = syntheticSession();
+  assert.match(fixture.superPassword, /^A3-[a-f0-9]{36}$/);
+  assert.equal(fixture.session.vault_version, 4);
+  assert.equal(fixture.session.wrapped_urk.length, 96);
+  assert.ok(!JSON.stringify(fixture.session).includes(fixture.superPassword));
+  assert.notDeepEqual(syntheticSession(), fixture);
   const request = modelRequest(health, 'save', ['cpu', '--model', 'quantized']);
   assert.deepEqual(request, {v: 1, id: 'smoke-model-save', operation_id: 'smoke-model-save-operation',
     idempotency_key: 'smoke-model-save-key', scope: {account_id: 'a', instance_id: 'n', generation: 1},
@@ -215,6 +231,12 @@ const payload = join(root, 'payload'), dataDir = join(root, 'data'), modelDir = 
 mkdirSync(payload);
 mkdirSync(dataDir);
 mkdirSync(modelDir);
+const fixture = syntheticSession();
+const sessionBytes = Buffer.from(JSON.stringify(fixture.session));
+const hostToken = randomBytes(32).toString('hex');
+writeFileSync(join(dataDir, 'session.json'), sessionBytes, {mode: 0o600});
+mkdirSync(join(dataDir, 'runtime'));
+writeFileSync(join(dataDir, 'runtime', 'token'), hostToken, {mode: 0o600});
 let child, exitState, spawnError;
 const reportPath = resolve('smoke-report', `runtime-smoke-${target}.json`);
 const report = {schema: 1, evidence_class: 'native-raw', gate: 'not-evaluated', candidate_sha256: null,
@@ -277,7 +299,7 @@ try {
   const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^RSRS_/i.test(key) && !/^(GH_TOKEN|GITHUB_TOKEN|RSRS_CORE_SDK_DIR|ONEMEMORY_CORE_SDK_DIR|RESPIRE_CORE_SDK_DIR)$/i.test(key)));
   Object.assign(environment, {RSRS_DATA_DIR: dataDir, RSRS_M3_DIR: modelDir, RSRS_BIN_DIR: payload,
-    RSRS_CLIENT_ONLY: '0', RSRS_NO_AUTOSTART: '0'});
+    RSRS_CLIENT_ONLY: '0', RSRS_NO_AUTOSTART: '0', RSRS_NO_AUTOSYNC: '1'});
   const port = 15000 + (process.pid % 20000), endpoint = `http://127.0.0.1:${port}`;
   child = spawn(executable, ['serve', '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir],
     {cwd: payload, env: environment, stdio: ['ignore', 'ignore', 'inherit']});
@@ -286,7 +308,7 @@ try {
     resolveExit(exitState);
   }));
   child.once('error', error => { spawnError = error; });
-  let health;
+  let health, unlockSent = false;
   const deadline = Date.now() + 90000;
   while (Date.now() < deadline) {
     if (spawnError) throw spawnError;
@@ -310,8 +332,27 @@ try {
       ['business_executor', 'mcp_server'].every(capability => candidate.capabilities.includes(capability)));
     assert.equal(candidate.runtime?.runtime_compat?.min_cli, process.env.EXPECTED_MIN_CLI);
     assert.equal(candidate.runtime?.runtime_compat?.max_cli, process.env.EXPECTED_MAX_CLI);
-    if (candidate.store_ready === true && candidate.state === 'ready') { health = candidate; break; }
-    assert.ok(['starting', 'ready'].includes(candidate.state));
+    if (candidate.store_ready === true && candidate.state === 'ready') {
+      assert.ok(unlockSent, 'Runtime opened the store before host key delivery');
+      health = candidate;
+      break;
+    }
+    assert.ok(['starting', 'locked'].includes(candidate.state));
+    if (candidate.startup_complete && candidate.credential_state === 'required' && !unlockSent) {
+      assert.equal(candidate.state, 'locked');
+      assert.equal(candidate.store_ready, false);
+      assertSamePath(realpathSync(candidate.data_dir), realpathSync(dataDir));
+      unlockSent = true;
+      const unlocked = await fetch(`${endpoint}/api/runtime/unlock`, {method: 'POST',
+        headers: {'Content-Type': 'application/json', Authorization: `Bearer ${hostToken}`},
+        body: JSON.stringify({schema_version: 1, profile: realpathSync(dataDir),
+          session_sha256: digest(sessionBytes), instance_id: candidate.instance_id,
+          generation: candidate.generation, super_password: fixture.superPassword, login_password: null}),
+        signal: AbortSignal.timeout(15000)});
+      assert.equal(unlocked.status, 200, 'Host key delivery failed');
+      assert.deepEqual(await unlocked.json(), {store_ready: true});
+      report.host_unlock = {initially_locked: true, authenticated: true};
+    }
     await delay(250);
   }
   assert.ok(health, 'Runtime did not become ready');
