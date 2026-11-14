@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "2.0.0-dev.17"
+version = "2.0.0-dev.18"
 dependencies = [
  "anyhow",
  "respire_app",
@@ -1792,6 +1792,7 @@ dependencies = [
  "respire_logging",
  "respire_protocol",
  "respire_spawn",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "sha2",

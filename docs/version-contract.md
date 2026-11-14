@@ -98,6 +98,18 @@ When a change touches the RPC contract:
 
 ## Current stage-one DEV scope
 
+On macOS, background serving and private RPC/control processes disable Keychain
+interaction before reading credentials. An inaccessible credential fails startup
+without discarding the session or recovery journal. The CLI owns the bounded
+foreground `runtime authorize-keychain` flow: it invokes the verified installed
+Runtime with `--keychain-authorize-internal`. That read-only process permits the
+system prompt and verifies the existing credential without starting a listener.
+Users must review the new Runtime path and grant persistent access for subsequent
+background reads. Denial, a locked Keychain, and an unanswered prompt are failures,
+not successful upgrades. The native startup workflow separately checks a denied
+read against an official dev.3/dev.14 home; it does not establish successful
+interactive authorization or complete in-place upgrade acceptance.
+
 Runtime 1.0.21-dev.3 and later provide a standalone doctor that
 executes Runtime-owned store, asset/backend, index and optional bounded remote
 health diagnostics. Asset readiness uses the existing supervised fresh-session

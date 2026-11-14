@@ -592,6 +592,25 @@ fn current_context(port: u16) -> Result<LaunchContext> {
     })
 }
 
+/// Authorize this verified image without starting a listener or changing recovery state.
+#[cfg(target_os = "macos")]
+pub(crate) fn authorize_keychain() -> Result<()> {
+    let root = respire_app::service::main_data_dir().canonicalize()?;
+    let profile = respire_app::service::data_dir().canonicalize()?;
+    verify_migrated_local_session(&profile)?;
+    if let Some(identity) = serving_unbound_identity(&profile)? {
+        respire_app::login_transaction::verify_auth_identity(&root, &profile, &identity)
+            .context("Keychain authorization failed; keep the session and recovery journal")?;
+    } else {
+        let account = respire_app::service::session_user_of_dir(&profile);
+        if !account.is_empty() {
+            anyhow::ensure!(respire_app::keystore::load_super(&account).is_some(),
+                "Keychain credential unavailable; unlock the login Keychain and authorize this Runtime");
+        }
+    }
+    Ok(())
+}
+
 fn validate_nonce(nonce: &str) -> Result<()> {
     let uuid = uuid::Uuid::parse_str(nonce)
         .map_err(|_| anyhow::anyhow!("invalid runtime launch nonce"))?;

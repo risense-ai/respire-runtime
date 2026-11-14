@@ -1,0 +1,70 @@
+name: Native Keychain startup
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/src/main.rs'
+      - 'runtime/src/startup_identity.rs'
+      - 'runtime/Cargo.toml'
+      - 'crates/app-domain/src/keystore.rs'
+      - '.github/workflows/keychain-startup.yml'
+permissions:
+  contents: read
+jobs:
+  unauthorized-startup:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require native macOS arm64
+        run: test "$(uname -s)/$(uname -m)" = Darwin/arm64
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: sdk
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key aarch64-apple-darwin)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: .sdk/aarch64-apple-darwin
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact pinned SDK cache
+        env:
+          EXPECTED: ${{ steps.sdk.outputs.key }}
+          ACTUAL: ${{ steps.cache.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED" && test "$EXPECTED" = "$ACTUAL"
+      - name: Build and stage the candidate Runtime
+        run: |
+          node scripts/fetch-core-sdk.mjs aarch64-apple-darwin
+          cargo build --locked -p respire_runtime --bin rsrs-runtime
+          RSRS_CORE_SDK_DIR="$GITHUB_WORKSPACE/.sdk/aarch64-apple-darwin" node scripts/stage-core-runtime.mjs target/debug
+      - name: Download the official dev.3 fixture and its pinned acceptance script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v2.0.0-dev.3 --repo risense-ai/respire-cli \
+            --pattern rsrs-aarch64-apple-darwin --pattern cli-build-aarch64-apple-darwin.json --dir "$RUNNER_TEMP/dev3"
+          chmod +x "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin"
+          curl --fail --location https://raw.githubusercontent.com/risense-ai/respire-cli/5859bdcea36bf70bcf4b5d3fc423d5acc96a1406/scripts/test-dev3-in-place-upgrade.py --output "$RUNNER_TEMP/test-upgrade.py"
+      - name: Require unauthorized startup to fail within ten seconds without changing recovery state
+        run: |
+          python "$RUNNER_TEMP/test-upgrade.py" \
+            --old-cli "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin" \
+            --old-metadata "$RUNNER_TEMP/dev3/cli-build-aarch64-apple-darwin.json" \
+            --candidate "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin" \
+            --probe-runtime target/debug/rsrs-runtime --root "$RUNNER_TEMP/keychain-startup"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: keychain-startup-report
+          path: ${{ runner.temp }}/keychain-startup/upgrade-report.json
+          retention-days: 1

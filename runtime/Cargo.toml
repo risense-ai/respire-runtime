@@ -1,6 +1,6 @@
 [package]
 name = "respire_runtime"
-version = "2.0.0-dev.17"
+version = "2.0.0-dev.18"
 edition = "2021"
 rust-version = "1.88"
 description = "standalone respire runtime binary (rsrs-runtime): loopback RPC host for the CLI and client2"
@@ -35,3 +35,6 @@ uuid = { version = "1.0", features = ["v4"] }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
