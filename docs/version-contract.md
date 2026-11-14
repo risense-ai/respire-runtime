@@ -106,9 +106,10 @@ injection targets or check CLI updates. Repair and CLI-update flags remain
 host-owned; callers must coordinate them through the CLI and request Runtime
 verification afterwards. Request-scoped progress stays observable during work.
 
-Intel macOS is explicitly deferred from the current release. The seven remaining
-targets retain their native release gates and complete payload/digest checks.
-Previously published eight-target assets and the SDK pin inventory are retained;
-a deferred target is not a passed acceptance item. Stable release planning stays
-closed until full G1 evidence is verified and promotion is separately authorized.
-None of these source changes or native smoke checks establishes full G1.
+The Runtime 2.0.0-dev.17 candidate restores Intel macOS to the eight-target release
+matrix. Intel builds cross-compile on Apple silicon; native smoke runs on
+`macos-15-intel` with the existing hardware guard that rejects ARM64 and Rosetta.
+All targets retain their native release gates and complete payload/digest checks.
+Source changes and native lifecycle/MCP smoke do not establish model inference or
+full G1. Stable release planning stays closed until full G1 evidence is verified
+and promotion is separately authorized.
