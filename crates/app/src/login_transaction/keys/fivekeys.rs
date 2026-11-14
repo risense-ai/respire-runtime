@@ -357,6 +357,7 @@ mod tests {
             let secret = if version == 1 { crate::keystore::read_imported_v1_password(&alias, backend)? }
                 else { crate::keystore::read_imported(&alias, slot, backend)? };
             crate::keystore::remove_imported(&alias, slot, backend)?;
+            verify_locked_auth_identity(&root, &root, &receipt.identity)?;
             assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());
             crate::keystore::import_credential(&alias, slot, "synthetic-wrong-credential")?;
             assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());

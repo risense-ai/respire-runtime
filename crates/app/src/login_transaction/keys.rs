@@ -144,7 +144,7 @@ fn candidate_keys(record: &AuthRecord) -> Result<crate::memory::SessionKeys> {
         Some(if version == 1 { "" } else { &secret }), &record.alias)
 }
 
-pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, profile: &Path) -> Result<()> {
+pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, profile: &Path, credentials: bool) -> Result<()> {
     let op = record.key_operation.as_ref().context("offline recovery receipt missing")?;
     let HostKeyOperation::Fivekeys { addr, user, kdf_salt, wrapped_urk, urk_nonce, use_super } = &op.operation
         else { anyhow::bail!("unbound recovery is not a fivekeys operation"); };
@@ -175,7 +175,8 @@ pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, p
         && object.keys().all(|field| matches!(field.as_str(), "user" | "addr" | "vault_version"
             | "kdf_salt" | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "auth_operation_id")
             || (version == 1 && field == "secret")), "offline recovery contains unexpected identity material");
-    candidate_keys(record).map(|_| ())
+    if credentials { candidate_keys(record)?; }
+    Ok(())
 }
 
 pub(super) fn verify_boot_candidate(record: &AuthRecord, active: &Recovery) -> Result<()> {

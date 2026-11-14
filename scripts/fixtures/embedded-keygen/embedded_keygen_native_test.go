@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"os/exec"
@@ -71,6 +72,7 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 		}
 	}
 	if job.State != "done" || job.ID != requestID || job.Finished == nil || envelopeError(job.Envelope) != nil {
+		logEmbeddedStartFailure(t, m, errors.New(job.Error))
 		t.Fatal("managed keygen receipt failed")
 	}
 	repeated, err := m.Submit("keygen", requestID, nil, true, "")

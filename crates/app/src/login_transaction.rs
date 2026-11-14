@@ -1077,7 +1077,7 @@ impl AuthOwnership {
                 verify_auth_identity(&self.root, &self.profile, identity)?;
                 return Ok(());
             }
-            verify_auth_identity_inner(&self.root, &self.profile, identity, true)?;
+            verify_auth_identity_inner(&self.root, &self.profile, identity, true, true)?;
             if !journal.operations.iter().any(|record| record.account.is_some()
                 && journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(record.operation_id.as_str())) {
                 recover_keygen(&mut journal, &self.root, &self.profile)?;
@@ -1105,7 +1105,7 @@ fn canonical_operation_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_candidate(record: &AuthRecord) -> Result<String> {
+fn validate_candidate(record: &AuthRecord) -> Result<Value> {
     let bytes = record.candidate.as_deref().context("auth candidate is missing")?;
     ensure!(record.candidate_sha256.as_deref() == Some(digest(bytes).as_str()), "auth candidate digest mismatch");
     let session: Value = serde_json::from_slice(bytes)?;
@@ -1116,6 +1116,12 @@ fn verify_candidate(record: &AuthRecord) -> Result<String> {
         && session["keyring_backend"].as_str() == record.backend.as_deref(), "invalid unbound auth candidate");
     let backend = record.backend.as_deref().context("auth credential backend is missing")?;
     require_persistent_auth_backend(backend)?;
+    Ok(session)
+}
+
+fn verify_candidate(record: &AuthRecord) -> Result<String> {
+    let session = validate_candidate(record)?;
+    let backend = record.backend.as_deref().context("auth credential backend is missing")?;
     let secret = crate::keystore::read_imported(&record.alias, "super", backend)?;
     crate::memory::SessionKeys::unlock_v4(&secret,
         session["kdf_salt"].as_str().context("candidate salt is missing")?,
@@ -1127,10 +1133,16 @@ fn verify_candidate(record: &AuthRecord) -> Result<String> {
 
 /// This reader is exclusive to private auth control; business identity stays strict.
 pub fn verify_auth_identity(root: &Path, profile: &Path, expected: &HostAuthIdentity) -> Result<()> {
-    verify_auth_identity_inner(root, profile, expected, false)
+    verify_auth_identity_inner(root, profile, expected, false, true)
 }
 
-fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthIdentity, recovering: bool) -> Result<()> {
+/// Validate the locked serving profile's receipt without reading credentials.
+/// Host-supplied material must still authenticate the vault before it can open.
+pub fn verify_locked_auth_identity(root: &Path, profile: &Path, expected: &HostAuthIdentity) -> Result<()> {
+    verify_auth_identity_inner(root, profile, expected, false, false)
+}
+
+fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthIdentity, recovering: bool, credentials: bool) -> Result<()> {
     let original = read_original(profile)?;
     match (original.as_deref(), expected) {
         (None, HostAuthIdentity::Absent) => Ok(()),
@@ -1150,13 +1162,13 @@ fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthId
             if record.key_operation.is_some() {
                 ensure!(record.root == root && record.candidate.as_deref() == Some(bytes),
                     "offline recovery receipt does not own this session");
-                return keys::verify_unbound_candidate(&journal, record, profile);
+                return keys::verify_unbound_candidate(&journal, record, profile, credentials);
             }
             let prepared = recovering && record.phase == AuthPhase::Prepared
                 && journal.active.as_ref().is_some_and(|active| active.operation_id.as_deref() == Some(operation_id.as_str()));
             ensure!(record.root == root && record.profile == profile && (record.phase == AuthPhase::Committed || prepared)
                 && record.candidate.as_deref() == Some(bytes), "unbound auth receipt does not own this session");
-            verify_candidate(record)?;
+            if credentials { verify_candidate(record)?; } else { validate_candidate(record)?; }
             Ok(())
         }
         _ => anyhow::bail!("auth session identity mismatch; malformed sessions are not anonymous"),

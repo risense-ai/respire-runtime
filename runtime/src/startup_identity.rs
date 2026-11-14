@@ -46,7 +46,7 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     let migrated_identity = verify_migrated_local_session(&context.profile)?;
     let unbound_identity = serving_unbound_identity(&context.profile)?;
     if let Some(identity) = unbound_identity.as_ref() {
-        respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, identity)?;
+        respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, identity)?;
     }
     let (grant, instance_id) = if let Some(token) = boot_token {
         let nonce = token
@@ -275,7 +275,7 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     let unbound_identity = if auth { None } else { serving_unbound_identity(&context.profile)? };
     let migrated_identity = if auth { None } else { verify_migrated_local_session(&context.profile)? };
     if let Some(identity) = unbound_identity.as_ref() {
-        respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, identity)?;
+        respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, identity)?;
     }
     STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth, paused_control: paused, unbound_identity, migrated_identity })
         .map_err(|_| anyhow::anyhow!("runtime control grant was already consumed"))?;
@@ -527,17 +527,16 @@ fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
             "offline serving session changed before opening the store"
         );
         if let Some(identity) = startup.unbound_identity.as_ref() {
-            respire_app::login_transaction::verify_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+            respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
         }
     }
     verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.paused_control)
 }
 
 fn verify_migrated_local_session(profile: &Path) -> Result<Option<[String; 2]>> {
-    let Some((session, identity)) = respire_client_host::identity::read_migrated_local_session(profile, hash)? else {
+    let Some((_, identity)) = respire_client_host::identity::read_migrated_local_session(profile, hash)? else {
         return Ok(None);
     };
-    respire_app::migration::verify_local_session(&session)?;
     anyhow::ensure!(respire_client_host::identity::read_migrated_local_session(profile, hash)?
         .map(|(_, identity)| identity)
         == Some(identity.clone()), "migrated local session changed during credential verification");

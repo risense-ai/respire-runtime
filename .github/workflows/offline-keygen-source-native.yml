@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 6c99ee215f0f8cc3dfe7985085085265176e2420
+          ref: ae9f470a0ed03db021ec617e94f44750ad96be37
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '6c99ee215f0f8cc3dfe7985085085265176e2420'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'ae9f470a0ed03db021ec617e94f44750ad96be37'
           test "$(git -C .client2-source rev-parse HEAD)" = '1734322b6c6dd543441a753f07a3517bee5e1231'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
@@ -204,7 +204,7 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='6c99ee215f0f8cc3dfe7985085085265176e2420'
+          $cliSha='ae9f470a0ed03db021ec617e94f44750ad96be37'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
@@ -213,7 +213,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 6c99ee215f0f8cc3dfe7985085085265176e2420
+          ref: ae9f470a0ed03db021ec617e94f44750ad96be37
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -229,7 +229,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '6c99ee215f0f8cc3dfe7985085085265176e2420'
+          test "$(git -C .cli-source rev-parse HEAD)" = 'ae9f470a0ed03db021ec617e94f44750ad96be37'
           test "$(git -C .client2-source rev-parse HEAD)" = '1734322b6c6dd543441a753f07a3517bee5e1231'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
