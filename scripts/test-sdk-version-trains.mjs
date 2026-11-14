@@ -11,7 +11,7 @@ function entry(version,t=target) {
  const base=`https://github.com/risense-ai/respire-core/releases/download/sdk-v${version}/respire-core-sdk-${t}`;
  return {sdk_version:version,private_repository:'risense-ai/respire-core',release_tag:`sdk-v${version}`,url:base+'.manifest.json',archive_url:base+'.tar.gz',manifest_sha256:digest,archive_sha256:digest,redistribution:'approved'};
 }
-for (const version of ['1.0.2-dev.24','1.1.0-dev.1']) {
+for (const version of ['1.0.2-dev.24','1.1.0-dev.1','2.0.0-dev.1']) {
  test(`${version} keeps distinct canonical cache keys for all targets`,()=>{
   const keys=TARGETS.map(t=>cacheKey(t,canonicalEntry(t,entry(version,t))));
   assert.equal(new Set(keys).size,TARGETS.length);
@@ -63,7 +63,7 @@ test('SDK evidence cannot substitute lock values for different embedded SDK byte
  const {archive,pinned}=archiveFixture(undefined,'other.json');
  assert.throws(()=>observeSdkArchive(archive,target,pinned),/no manifest/);
 });
-for(const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1','2.0.0-dev.1']) {
+for(const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1','2.0.0','2.0.0-dev.0','2.0.0-dev.01','2.0.0-rc.1','2.0.0-dev.1+metadata','2.0.1-dev.1']) {
  test(`unsupported SDK ${version} cannot reach cache or network`,async()=>{
   assert.throws(()=>canonicalEntry(target,entry(version)),/tag\/version/);
   for(const download of [standalone,packaged]) {

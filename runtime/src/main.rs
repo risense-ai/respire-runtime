@@ -45,7 +45,7 @@ use respire_protocol::{RuntimeCompat, RuntimeIdentity};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// CLI compatibility window for this runtime train (runtime-pin.json aligns).
-const MIN_CLI: &str = "1.0.22-dev.1";
+const MIN_CLI: &str = "2.0.0-dev.11";
 const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
@@ -56,10 +56,23 @@ fn main() -> ExitCode {
     match consume_boot_token().and_then(run) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
+            respire_logging::error(format_args!("rsrs-runtime failed"));
             eprintln!("rsrs-runtime: {error:#}");
             ExitCode::from(2)
         }
     }
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| location.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        respire_logging::log_panic(info.payload(), &location);
+        previous(info);
+    }));
 }
 
 fn consume_boot_token() -> Result<Option<String>> {
@@ -181,6 +194,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         return Err(error).context("Runtime client configuration is invalid");
     }
     if flags.start {
+        require_explicit_start_endpoint(&flags)?;
         return background_start::start(&flags);
     }
     if flags.status {
@@ -191,6 +205,12 @@ fn run(boot_token: Option<String>) -> Result<i32> {
     }
     // Bare invocation defaults to serving, mirroring `--runtime-internal`.
     serve_command(&flags, boot_token.as_deref())
+}
+
+fn require_explicit_start_endpoint(flags: &Flags) -> Result<()> {
+    anyhow::ensure!(flags.host == "127.0.0.1",
+        "background startup currently requires the existing 127.0.0.1 client endpoint");
+    Ok(())
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags> {
@@ -248,6 +268,17 @@ mod frontend_route_tests {
         parse_flags(args.iter().map(|arg| (*arg).to_owned()))
     }
     #[test]
+    fn pending_start_preserves_parsed_endpoint_and_root_parameters() -> anyhow::Result<()> {
+        let flags = parse(&["runtime", "start", "--port", "15321", "--data-dir", "synthetic-root"])?;
+        super::require_explicit_start_endpoint(&flags)?;
+        assert_eq!(flags.port, Some(15321));
+        assert_eq!(flags.data_dir, Some(std::path::PathBuf::from("synthetic-root")));
+        let flags = parse(&["runtime", "start", "--host", "0.0.0.0"])?;
+        assert!(super::require_explicit_start_endpoint(&flags).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn original_client2_host_commands_require_an_external_host() {
         for command in ["config", "logout", "grant", "account", "space", "migrate", "login",
             "keygen", "keys-export", "inject", "inject-status", "inject-remove", "classify-config", "model"] {
@@ -291,6 +322,12 @@ fn publish_identity() {
 }
 
 fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
+    // Serving errors must survive detached stderr without persisting request data.
+    let log_path = respire_app::service::main_data_dir()
+        .join("logs")
+        .join("runtime.log");
+    let _ = respire_logging::init(respire_logging::LoggingConfig::new(log_path));
+    install_panic_hook();
     if flags.background_child {
         anyhow::ensure!(flags.host == "127.0.0.1",
             "legacy host mode only accepts the existing loopback endpoint");

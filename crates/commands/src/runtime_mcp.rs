@@ -95,9 +95,10 @@ impl ToolPolicy {
         if self.deny_all || self.deny.contains(tool) {
             return Err("MCP tool disabled by RSRS_MCP_DENY".to_owned());
         }
+        let explicit_only = matches!(tool, "memory_forget" | "memory_restore");
         Ok(match &self.allow {
-            None => true,
-            Some(names) => names.contains(tool) || self.allow_all,
+            None => !explicit_only,
+            Some(names) => names.contains(tool) || (self.allow_all && !explicit_only),
         })
     }
 }
@@ -197,6 +198,24 @@ fn tools() -> Vec<(&'static str, &'static str, serde_json::Value)> {
                 "type":"object",
                 "properties":{"id":{"type":"string"},"parent":{"type":"string"}},
                 "required":["id","parent"]
+            }),
+        ),
+        (
+            "memory_forget",
+            "Tombstone a memory (propagates with sync)",
+            serde_json::json!({
+                "type":"object",
+                "properties":{"id":{"type":"string"}},
+                "required":["id"]
+            }),
+        ),
+        (
+            "memory_restore",
+            "Restore a tombstoned memory by full id",
+            serde_json::json!({
+                "type":"object",
+                "properties":{"id":{"type":"string"}},
+                "required":["id"]
             }),
         ),
         (
@@ -446,6 +465,15 @@ fn tool_argv(tool: &str, args: &serde_json::Value) -> Result<Vec<String>, String
         "memory_show" => {
             let id = str_field("id").ok_or("missing id")?;
             vec!["show".to_owned(), "--".to_owned(), id]
+        }
+        "memory_forget" | "memory_restore" => {
+            let id = str_field("id").ok_or("missing id")?;
+            let command = if tool == "memory_forget" {
+                "forget"
+            } else {
+                "restore"
+            };
+            vec![command.to_owned(), "--".to_owned(), id]
         }
         "memory_update" => {
             let id = str_field("id").ok_or("missing id")?;

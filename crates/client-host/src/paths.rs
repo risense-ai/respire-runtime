@@ -120,6 +120,42 @@ pub fn client_config_path() -> PathBuf {
         .join("client.json")
 }
 
+// Resolve existing parents before appending absent names; never guess filesystem identity.
+fn canonical_profile_path(path: &Path) -> Option<PathBuf> {
+    if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return None;
+    }
+    let mut current = path;
+    let mut missing = Vec::new();
+    loop {
+        match current.canonicalize() {
+            Ok(mut resolved) => {
+                for name in missing.iter().rev() {
+                    resolved.push(name);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(current) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return None,
+                }
+                let name = current.file_name()?;
+                #[cfg(windows)]
+                {
+                    let spelling = name.to_str()?;
+                    if spelling.ends_with('.') || spelling.ends_with(' ') {
+                        return None;
+                    }
+                }
+                missing.push(name);
+                current = current.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Preserve account selection within an explicit installation root.
 pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
     let env_root = env_root_dir();
@@ -132,7 +168,13 @@ pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
         })
         .map(|v| expand_tilde(&v));
     match (env_root, from_config) {
-        (Some(root), Some(cfg)) if cfg.starts_with(&root) => cfg,
+        (Some(root), Some(cfg))
+            if canonical_profile_path(&cfg).is_some_and(|profile| {
+                canonical_profile_path(&root).is_some_and(|root| profile.starts_with(root))
+            }) =>
+        {
+            cfg
+        }
         (Some(root), _) => root,
         (None, Some(cfg)) => cfg,
         (None, None) => default_data_dir(),

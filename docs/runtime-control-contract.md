@@ -587,3 +587,34 @@ observations. Schema/consumer success does not prove a consumed grant, parent
 revocation, credential durability, remote idempotency, filesystem publication,
 no network replay or native execution. Those still need exact-source CI and
 private-control integration evidence. No localaccount/profile draft is included.
+
+
+### Explicit offline-keygen serving handoff
+
+Offline keygen uses the existing protocol without a new completion RPC or auth
+outcome. Before launch, the host queries `control.auth.result` while Paused and
+Runtime holds exclusive auth/library ownership. That query binds the original
+operation, idempotency key, force fingerprint, installation, profile and committed
+session. Unknown or noncommitted outcomes cannot authorize a launch or replay.
+
+Explicit Start retains takeover and the durable continuation record, then uses
+the existing one-shot launch grant. Runtime verifies the Unbound operation and
+session at authorization and again after acquiring the profile library lock,
+before publishing an endpoint. The same serving actor retains that lock. The
+host binds the existing consumed launch claim and endpoint digest to that exact
+Starting controller, then checks existing Health plus independently inspected OS process identity,
+including PID/birth, instance, generation, image path/digest, installation,
+profile, account, version and store readiness. It retains the exact actor and OS
+identity snapshot across local maintenance completion and checks them again.
+The original continuation, session, consumed claim and endpoint must remain
+unchanged throughout. Registration may only clear its maintenance flag. No second
+library owner or `control.auth.account_complete` request is introduced.
+
+Only the local coordinator completes maintenance. `HostAuthResult` remains an
+authentication receipt, not a maintenance terminal; the existing
+`host-auth-keygen-finished` negative fixture remains invalid. Failure before
+completion retains maintenance. A crash or failed check after completion retains
+the original continuation in a non-replayable stage for independent recovery.
+The existing embedded successor handoff remains separately verified and durable.
+Before any keygen effect, the host still verifies the selected binary's
+release-bound metadata capability `offline_keygen_handoff: "1"`.

@@ -1,0 +1,167 @@
+name: Prebuild reviewed integration test bundles
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_source_sha:
+        description: Exact reviewed Runtime commit to compile as test runners, not a product build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  plan:
+    if: github.repository == 'risense-ai/respire-runtime' && github.ref == 'refs/heads/main'
+    cache-mode: none
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Read reviewed source locks as data with trusted main tools
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.reviewed_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          gh api "repos/risense-ai/respire-runtime/compare/$SOURCE_SHA...$GITHUB_SHA" > "$RUNNER_TEMP/source-ancestry.json"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const comparison = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/source-ancestry.json`));
+          assert.ok(['ahead', 'identical'].includes(comparison.status));
+          assert.equal(comparison.merge_base_commit.sha, process.env.SOURCE_SHA, 'Reviewed source must be in trusted main history');
+          NODE
+          mkdir "$RUNNER_TEMP/test-sdk-locks"
+          gh api "repos/risense-ai/respire-runtime/contents/sdk/core-sdk.lock.json?ref=$SOURCE_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/test-sdk-locks/root.json"
+          gh api "repos/risense-ai/respire-runtime/contents/crates/core-sdk/core-sdk.lock.json?ref=$SOURCE_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/test-sdk-locks/crate.json"
+          matrix="$(node scripts/package-integration-tests.mjs plan "$RUNNER_TEMP/test-sdk-locks/root.json" "$RUNNER_TEMP/test-sdk-locks/crate.json")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    name: Test bundle (${{ matrix.target }})
+    needs: plan
+    cache-mode: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '0'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .tools
+          persist-credentials: false
+      - name: Preserve normal Windows checkout text contracts
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.reviewed_source_sha }}
+          path: .source
+          persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache/restore@v4
+        id: sdk
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ matrix.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: archive
+        with:
+          path: .sdk-archives/${{ matrix.target }}
+          key: ${{ matrix.archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify exact cached SDK bytes without private credentials
+        env:
+          EXPECTED_KEY: ${{ matrix.key }}
+          MATCHED_KEY: ${{ steps.sdk.outputs.cache-matched-key }}
+          EXPECTED_ARCHIVE_KEY: ${{ matrix.archive_key }}
+          MATCHED_ARCHIVE_KEY: ${{ steps.archive.outputs.cache-matched-key }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -n "$EXPECTED_ARCHIVE_KEY" && test "$EXPECTED_ARCHIVE_KEY" = "$MATCHED_ARCHIVE_KEY"
+          # Cache version includes its original paths; restore before moving into source.
+          test ! -e .source/.sdk && test ! -e .source/.sdk-archives
+          mv .sdk .source/.sdk
+          mv .sdk-archives .source/.sdk-archives
+          (cd .source && node ../.tools/scripts/sdk-ci-cache.mjs observe "$TARGET")
+      - name: Build and package only the existing five test roles
+        env:
+          TARGET: ${{ matrix.target }}
+          SOURCE_SHA: ${{ inputs.reviewed_source_sha }}
+          LOCK_SHA: ${{ matrix.sdk_lock_sha256 }}
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          bash .tools/scripts/require-native-linux-arm64.sh "$TARGET"
+          if [[ "$TARGET" == *-musl ]]; then
+            docker run --rm -v "$PWD/.source:/source" -v "$PWD/.tools:/tools:ro" -w /source \
+              -e TARGET -e SOURCE_SHA -e LOCK_SHA -e RUST_MIN_STACK -e RUST_TEST_THREADS \
+              -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SHA -e GITHUB_WORKFLOW_REF \
+              rust:1.95.0-alpine3.23 sh -ec '
+                apk add --no-cache build-base nodejs pkgconf openssl-dev openssl-libs-static git
+                export OPENSSL_STATIC=1 RSRS_CORE_SDK_DIR="/source/.sdk/$TARGET"
+                export CARGO_HOME="/source/target/musl-cache/$TARGET/cargo"
+                export RUSTFLAGS="-C target-feature=+crt-static"
+                if [ "$TARGET" = aarch64-unknown-linux-musl ]; then export CFLAGS_aarch64_unknown_linux_musl="-mno-outline-atomics"; fi
+                git config --global --add safe.directory /source
+                node /tools/scripts/package-integration-tests.mjs build /source "$TARGET" "$SOURCE_SHA" "$LOCK_SHA" /source/test-bundle
+              '
+          else
+            if [[ "$TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+            node .tools/scripts/package-integration-tests.mjs build .source "$TARGET" "$SOURCE_SHA" "$LOCK_SHA" .source/test-bundle
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-test-bundle-${{ matrix.target }}
+          path: .source/test-bundle
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90

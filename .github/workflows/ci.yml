@@ -38,10 +38,34 @@ jobs:
       contents: read
     outputs:
       workspace_present: ${{ steps.detect.outputs.workspace_present }}
+      candidate_requested: ${{ steps.candidate-mode.outputs.candidate_requested }}
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - id: candidate-mode
+        name: Validate explicit candidate inputs without changing source checks
+        env:
+          REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+          REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+          REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync} from 'node:fs';
+          const values = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].map(key => process.env[key] ?? '');
+          const requested = values.some(value => value !== '');
+          if (requested) {
+            assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'Candidate inputs require a manual run');
+            assert.ok(values.every(value => value !== ''), 'Supply all three candidate inputs together');
+            for (const id of values.slice(0, 2)) {
+              assert.match(id, /^[1-9][0-9]*$/, 'Candidate IDs must be positive integers');
+              assert.ok(BigInt(id) <= BigInt(Number.MAX_SAFE_INTEGER), 'Candidate ID exceeds exact JSON integer range');
+            }
+            assert.match(values[2], /^[a-f0-9]{64}$/, 'Candidate digest must be lowercase SHA-256');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `candidate_requested=${requested}\n`);
+          NODE
       - id: detect
         run: |
           set -euo pipefail
@@ -252,7 +276,7 @@ jobs:
           if-no-files-found: error
 
   g1-native-smoke:
-    # Absence of inputs does not exempt the unconditional required-tests gate below.
+    # Explicit candidates retain the strict required-tests gate below.
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     name: g1-native-smoke (${{ matrix.target }})
     needs: [control-contract, detect]
@@ -366,7 +390,7 @@ jobs:
           retention-days: 7
 
   g1-native-business:
-    # Missing inputs still leave the unconditional required-tests gate failing.
+    # Explicit candidates retain the strict required-tests gate.
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     needs: [control-contract, detect]
     runs-on: ubuntu-24.04
@@ -551,7 +575,7 @@ jobs:
           retention-days: 7
 
   required-tests:
-    if: always()
+    if: ${{ always() && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     needs: [control-contract, detect, workspace-tests, g1-report]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -559,6 +583,11 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Require a successfully validated candidate mode
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          CANDIDATE_REQUESTED: ${{ needs.detect.outputs.candidate_requested }}
+        run: test "$DETECT_RESULT" = success && test "$CANDIDATE_REQUESTED" = true
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -586,12 +615,26 @@ jobs:
     steps:
       - name: Require all source gates
         env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          CANDIDATE_REQUESTED: ${{ needs.detect.outputs.candidate_requested }}
+          REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+          REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+          REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
           WORKSPACE_PRESENT: ${{ needs.detect.outputs.workspace_present }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
           CONTRACT_RESULT: ${{ needs.control-contract.result }}
           REQUIRED_RESULT: ${{ needs.required-tests.result }}
         run: |
-          test "$CONTRACT_RESULT" = success || { echo "::error::Runtime control contract did not pass"; exit 1; }
-          test "$REQUIRED_RESULT" = success || { echo "::error::Required Stage 1 tests did not pass"; exit 1; }
-          test "$WORKSPACE_PRESENT" = true || { echo "::error::Required workspace is missing"; exit 1; }
-          test "$TESTS_RESULT" = success || { echo "::error::Source tests did not pass"; exit 1; }
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync} from 'node:fs';
+          const env = process.env;
+          for (const key of ['DETECT_RESULT', 'CONTRACT_RESULT', 'TESTS_RESULT']) {
+            assert.equal(env[key], 'success', `${key} did not pass`);
+          }
+          assert.equal(env.WORKSPACE_PRESENT, 'true', 'Required workspace is missing');
+          const requested = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].some(key => (env[key] ?? '') !== '');
+          assert.equal(env.CANDIDATE_REQUESTED, String(requested), 'Candidate mode changed between jobs');
+          assert.equal(env.REQUIRED_RESULT, requested ? 'success' : 'skipped', requested ? 'Required G1 verification did not pass' : 'Non-candidate run must skip G1 verification');
+          appendFileSync(env.GITHUB_STEP_SUMMARY, requested ? 'Source checks and frozen candidate G1 verification passed.\n' : 'Source checks passed. G1 not evaluated; this run is not release acceptance.\n');
+          NODE

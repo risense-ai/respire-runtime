@@ -1,0 +1,745 @@
+name: Extra offline keygen source regression (not release acceptance)
+on:
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - 'crates/app/**'
+      - 'crates/app-domain/**'
+      - 'crates/protocol/**'
+      - 'crates/host-control/**'
+      - '.github/workflows/offline-keygen-source-native.yml'
+permissions:
+  contents: read
+jobs:
+  windows-source:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      RUNTIME_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-cli
+          ref: 1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb
+          path: .cli-source
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-client2
+          ref: b41808737e2ae8bd55c1c309dfbdb41222cdf77d
+          path: .client2-source
+          persist-credentials: false
+      - name: Verify exact paired source before any build
+        shell: bash
+        env:
+          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
+          test "$(git -C .cli-source rev-parse HEAD)" = '1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb'
+          test "$(git -C .client2-source rev-parse HEAD)" = 'b41808737e2ae8bd55c1c309dfbdb41222cdf77d'
+          for repo in . .cli-source .client2-source; do
+            git -C "$repo" diff --exit-code
+            git -C "$repo" diff --cached --exit-code
+          done
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .client2-source/go.mod
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Select exact existing public SDK cache
+        id: sdk
+        shell: bash
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache
+        with:
+          path: .sdk/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify SDK bytes without exposing a private download credential
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+      - name: Test shared host control and protocol on native Windows
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p respire_app_domain service::tests::data_dir_config_roundtrip -- --exact --test-threads=1
+          cargo test --locked -p respire_host_control
+          cargo test --locked -p respire_runtime keygen_handoff_request_tests
+          cargo test --locked -p respire_app keygen_existing_protocol
+          cargo test --locked -p respire_host_frontend --lib offline_keygen
+          cargo test --locked -p respire_host_frontend --lib embedding::tests
+          cargo test --locked -p respire_host_frontend --lib snapshot_control
+          cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
+          cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
+          cargo test --locked -p respire_commands clean_stop
+          cargo test --locked -p respire_commands endpoint_cleanup
+      - name: GUI fixture policy under Windows PowerShell 5 and PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($engine in @('powershell.exe','pwsh')) {
+            foreach ($test in @('test-client2-focus-readiness.ps1','test-client2-diary-readback.ps1','test-client2-cleanup-identity.ps1','test-client2-gui-exit-code.ps1','test-client2-document-readiness.ps1','test-client2-document-descendants.ps1','test-client2-focus-replacement.ps1')) {
+              & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
+              if ($LASTEXITCODE -ne 0) { throw "GUI fixture policy failed: $engine / $test" }
+            }
+          }
+      - name: Build exact Runtime source (not a published asset)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Build exact CLI source (not a published asset)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests -- --list > "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::schema_rejection_requires_exact_operation_and_transport_binding: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::rejected_operation_persists_separately_from_success_receipts: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests
+          cargo test --locked -p respire_app migration::intent::tests -- --list > "$RUNNER_TEMP/migration-producer-tests.txt"
+          grep -F 'migration::intent::tests::result_query_returns_durable_rejection_without_resnapshot_or_replay: test' "$RUNNER_TEMP/migration-producer-tests.txt"
+          cargo test --locked -p respire_app migration::intent::tests
+          cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
+      - name: Package temporary candidate with bound hashes (never a release artifact)
+        shell: bash
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/offline-keygen-source-payload"
+          mkdir "$payload"
+          cp target/debug/rsrs-runtime.exe "$payload/rsrs-runtime-$RUNTIME_TARGET.exe"
+          node scripts/stage-core-runtime.mjs "$payload"
+          (cd "$RUNNER_TEMP" && tar --format=ustar -czf "rsrs-runtime-$RUNTIME_TARGET.tar.gz" -C "$payload" .)
+          python - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,tomllib
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); payload=root/'offline-keygen-source-payload'
+          target=os.environ['RUNTIME_TARGET']; binary=f'rsrs-runtime-{target}.exe'
+          archive=root/f'rsrs-runtime-{target}.tar.gz'
+          version=tomllib.loads(pathlib.Path('runtime/Cargo.toml').read_text())['package']['version']
+          digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+          files=[]
+          for path in sorted(payload.rglob('*')):
+              assert not path.is_symlink()
+              if path.is_file(): files.append({'path':path.relative_to(payload).as_posix(),'size':path.stat().st_size,'sha256':digest(path)})
+          build=dict(schema_version=2,runtime_version=version,tag=f'v{version}',channel='dev',target_triple=target,
+              archive_file=archive.name,archive_sha256=digest(archive),binary_file=binary,binary_sha256=digest(payload/binary),
+              source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+              compat={'min_cli':'1.0.21-dev.5','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
+              capabilities={'business_executor':'1','mcp_server':'1','offline_keygen_handoff':'1'},files=files)
+          (root/f'runtime-build-{target}.json').write_text(json.dumps(build)+'\n')
+          with open(os.environ['GITHUB_ENV'],'a') as output: output.write(f'RUNTIME_VERSION={version}\n')
+          PY
+      - name: Fetch only three pinned public GUI model inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          models="$RUNNER_TEMP/offline-keygen-models"
+          mkdir -p "$models/onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/tokenizer.json' --output "$models/tokenizer.json"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' --output "$models/onnx/model_quantized.onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort' --output "$models/onnx/model_quantized.cpu-v1.ort"
+          python - <<'PYMODEL'
+          import hashlib,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'offline-keygen-models'
+          files={'tokenizer.json':'6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
+            'onnx/model_quantized.onnx':'0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
+            'onnx/model_quantized.cpu-v1.ort':'7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff'}
+          for name,expected in files.items():
+              path=root/name
+              assert path.is_file() and not path.is_symlink() and not path.is_junction()
+              with path.open('rb') as source:
+                  assert hashlib.file_digest(source,'sha256').hexdigest()==expected, name
+          assert (root/'onnx/model_quantized.cpu-v1.ort').stat().st_size==569654128
+          PYMODEL
+      - name: Exact current Client2 manager against real embedded Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/fixtures/embedded-keygen/run.py --client2 .client2-source --payload "$RUNNER_TEMP/offline-keygen-source-payload" --binary-file "rsrs-runtime-$RUNTIME_TARGET.exe" --models "$RUNNER_TEMP/offline-keygen-models" --version "$RUNTIME_VERSION"
+      - name: Original Windows GUI fixture against isolated source candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./.cli-source/scripts/probe-client2-gui.ps1 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/offline-keygen-source-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/offline-keygen-models"
+          if ($LASTEXITCODE -ne 0) { throw 'Source-only GUI regression failed; release acceptance remains unproven' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-only-offline-keygen-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/offline-keygen-source-gui/report.json
+            ${{ runner.temp }}/offline-keygen-source-gui/native-gui.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  windows-client2-candidate-ui:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUNTIME_TARGET: x86_64-pc-windows-msvc
+    steps:
+      # Require the independently reviewed exact CLI source commit.
+      - name: Require reviewed exact candidate CLI
+        shell: pwsh
+        run: |
+          $cliSha='b4054510b250bbadc8a020bc9c3427ba6a13f89a'
+          if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-cli
+          ref: b4054510b250bbadc8a020bc9c3427ba6a13f89a
+          path: .cli-source
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-client2
+          ref: b41808737e2ae8bd55c1c309dfbdb41222cdf77d
+          path: .client2-source
+          persist-credentials: false
+      - name: Verify exact clean source and reviewed Client2 inputs before any build
+        shell: bash
+        env:
+          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
+          test "$(git -C .cli-source rev-parse HEAD)" = 'b4054510b250bbadc8a020bc9c3427ba6a13f89a'
+          test "$(git -C .client2-source rev-parse HEAD)" = 'b41808737e2ae8bd55c1c309dfbdb41222cdf77d'
+          for repo in . .cli-source .client2-source; do
+            git -C "$repo" diff --exit-code
+            git -C "$repo" diff --cached --exit-code
+          done
+          test -z "$(git -C .client2-source status --porcelain)"
+          python - <<'PYBLOBS'
+          import subprocess
+          expected={'scripts/build.ps1':'cf5e618b42fda4ce46234e842335144d979ce740',
+            'go.mod':'c21140b15042790efc753995d59db4d65acceeb2',
+            'go.sum':'c7a7a55b97c9b19537f831125b6d97fdd5dc36ce',
+            'build/winres.json':'ac9b250f621a5129e55be046ca8301893404a478',
+            'internal/desktop/build/icon-light.png':'e12a9fc997b4c324dd05050508c0ad3a0192b6fd',
+            'main.go':'5eda26849c0a9844e18c275b374cf8edba0e51da'}
+          for path,blob in expected.items():
+              actual=subprocess.check_output(['git','-C','.client2-source','hash-object','--path='+path,path],text=True).strip()
+              assert actual==blob,path
+          PYBLOBS
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .client2-source/go.mod
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Select exact existing public SDK cache
+        id: sdk
+        shell: bash
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache
+        with:
+          path: .sdk/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Reverify SDK bytes without exposing a private download credential
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
+      - name: Test shared host control and protocol on native Windows
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p respire_host_control
+          cargo test --locked -p respire_runtime keygen_handoff_request_tests
+          cargo test --locked -p respire_app keygen_existing_protocol
+          cargo test --locked -p respire_host_frontend --lib offline_keygen
+          cargo test --locked -p respire_host_frontend --lib embedding::tests
+          cargo test --locked -p respire_host_frontend --lib snapshot_control
+          cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
+          cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
+          cargo test --locked -p respire_commands clean_stop
+          cargo test --locked -p respire_commands endpoint_cleanup
+      - name: GUI fixture policy under Windows PowerShell 5 and PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($engine in @('powershell.exe','pwsh')) {
+            foreach ($test in @('test-client2-focus-readiness.ps1','test-client2-diary-readback.ps1','test-client2-cleanup-identity.ps1','test-client2-gui-exit-code.ps1','test-client2-document-readiness.ps1','test-client2-document-descendants.ps1','test-client2-focus-replacement.ps1')) {
+              & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
+              if ($LASTEXITCODE -ne 0) { throw "GUI fixture policy failed: $engine / $test" }
+            }
+          }
+      - name: Build exact Runtime source (not a published asset)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: cargo build --locked -p respire_runtime --bin rsrs-runtime
+      - name: Build exact CLI source (not a published asset)
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests -- --list > "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::schema_rejection_requires_exact_operation_and_transport_binding: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          grep -F 'autostart::supervise::launch_authorization::migration_control::tests::rejected_operation_persists_separately_from_success_receipts: test' "$RUNNER_TEMP/migration-consumer-tests.txt"
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --features client2-host-prototype --target-dir .cli-source/target autostart::supervise::launch_authorization::migration_control::tests
+          cargo test --locked -p respire_app migration::intent::tests -- --list > "$RUNNER_TEMP/migration-producer-tests.txt"
+          grep -F 'migration::intent::tests::result_query_returns_durable_rejection_without_resnapshot_or_replay: test' "$RUNNER_TEMP/migration-producer-tests.txt"
+          cargo test --locked -p respire_app migration::intent::tests
+          cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
+      - name: Package temporary candidate with bound hashes (never a release artifact)
+        shell: bash
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/client2-candidate-ui-payload"
+          mkdir "$payload"
+          cp target/debug/rsrs-runtime.exe "$payload/rsrs-runtime-$RUNTIME_TARGET.exe"
+          node scripts/stage-core-runtime.mjs "$payload"
+          (cd "$RUNNER_TEMP" && tar --format=ustar -czf "rsrs-runtime-$RUNTIME_TARGET.tar.gz" -C "$payload" .)
+          python - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,tomllib
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); payload=root/'client2-candidate-ui-payload'
+          target=os.environ['RUNTIME_TARGET']; binary=f'rsrs-runtime-{target}.exe'
+          archive=root/f'rsrs-runtime-{target}.tar.gz'
+          version=tomllib.loads(pathlib.Path('runtime/Cargo.toml').read_text())['package']['version']
+          digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+          files=[]
+          for path in sorted(payload.rglob('*')):
+              assert not path.is_symlink()
+              if path.is_file(): files.append({'path':path.relative_to(payload).as_posix(),'size':path.stat().st_size,'sha256':digest(path)})
+          build=dict(schema_version=2,runtime_version=version,tag=f'v{version}',channel='dev',target_triple=target,
+              archive_file=archive.name,archive_sha256=digest(archive),binary_file=binary,binary_sha256=digest(payload/binary),
+              source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+              compat={'min_cli':'1.0.21-dev.5','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
+              capabilities={'business_executor':'1','mcp_server':'1','offline_keygen_handoff':'1'},files=files)
+          (root/f'runtime-build-{target}.json').write_text(json.dumps(build)+'\n')
+          with open(os.environ['GITHUB_ENV'],'a') as output: output.write(f'RUNTIME_VERSION={version}\n')
+          PY
+      - name: Fetch only three pinned public GUI model inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          models="$RUNNER_TEMP/client2-candidate-ui-models"
+          mkdir -p "$models/onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/tokenizer.json' --output "$models/tokenizer.json"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' --output "$models/onnx/model_quantized.onnx"
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort' --output "$models/onnx/model_quantized.cpu-v1.ort"
+          python - <<'PYMODEL'
+          import hashlib,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'client2-candidate-ui-models'
+          files={'tokenizer.json':'6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
+            'onnx/model_quantized.onnx':'0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
+            'onnx/model_quantized.cpu-v1.ort':'7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff'}
+          for name,expected in files.items():
+              path=root/name
+              assert path.is_file() and not path.is_symlink() and not path.is_junction()
+              with path.open('rb') as source:
+                  assert hashlib.file_digest(source,'sha256').hexdigest()==expected, name
+          assert (root/'onnx/model_quantized.cpu-v1.ort').stat().st_size==569654128
+          PYMODEL
+      - name: Build exact Client2 candidate without publication
+        shell: pwsh
+        working-directory: .client2-source
+        run: |
+          $ErrorActionPreference='Stop'
+          # Exact build.ps1 blob cf5e618b42fda4ce46234e842335144d979ce740 reviewed locally; resource, lock and entry-point blobs verified before build.
+          $version = '0.2.56-dev.${{ github.run_number }}'
+          ./scripts/build.ps1 -Version $version -Arch amd64
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate Client2 source build failed' }
+          if (-not (Test-Path -LiteralPath './dist/respire-windows-amd64.exe' -PathType Leaf)) { throw 'Candidate EXE missing' }
+          $versionFile = Join-Path $env:RUNNER_TEMP 'client2-candidate-ui-version.json'
+          $process = Start-Process -FilePath "$PWD/dist/respire-windows-amd64.exe" -ArgumentList '--version' -RedirectStandardOutput $versionFile -WindowStyle Hidden -PassThru
+          try {
+            if (-not $process.WaitForExit(10000)) {
+              # The retained owned Process handle identifies this child, not a rediscovered PID.
+              $process.Kill()
+              if (-not $process.WaitForExit(5000)) { throw 'Candidate version probe cleanup unconfirmed' }
+              throw 'Candidate version probe timed out'
+            }
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) { throw 'Candidate version probe failed' }
+            $info = Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json
+            if ($info.version -ne $version -or $info.platform -ne 'windows-amd64') { throw 'Candidate executable identity mismatch' }
+          } finally { $process.Dispose() }
+      - name: Require tracked source unchanged after builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repo in . .cli-source .client2-source; do
+            git -C "$repo" diff --exit-code
+            git -C "$repo" diff --cached --exit-code
+          done
+      - name: Record public source and byte provenance only
+        shell: bash
+        env:
+          JOB_NAME: windows-client2-candidate-ui
+        run: |
+          set -euo pipefail
+          python - <<'PYMANIFEST'
+          import hashlib,json,os,pathlib,subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); workspace=pathlib.Path.cwd()
+          sha=lambda p: hashlib.file_digest(p.open('rb'),'sha256').hexdigest()
+          commit=lambda p: subprocess.check_output(['git','-C',str(p),'rev-parse','HEAD'],text=True).strip()
+          target=os.environ['RUNTIME_TARGET']
+          report={
+            'schema_version':1,'scope':'Client2 source-candidate Windows x64 UI only',
+            'official_client2_asset':False,'release_acceptance':False,'g1_passed':False,
+            'client2_build_version':'0.2.56-dev.'+os.environ['GITHUB_RUN_NUMBER'],
+            'runtime_cli_version_execution':'not-evaluated','ui_result':'not-evaluated',
+            'client2_git_blobs':{name:subprocess.check_output(['git','-C','.client2-source','hash-object','--path='+name,name],text=True).strip() for name in ['scripts/build.ps1','go.mod','go.sum','build/winres.json','internal/desktop/build/icon-light.png','main.go']},
+            'repository':os.environ['GITHUB_REPOSITORY'],'run_id':os.environ['GITHUB_RUN_ID'],
+            'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],'job':os.environ['JOB_NAME'],
+            'source':{'runtime':commit(workspace),'cli':commit(workspace/'.cli-source'),
+              'client2':commit(workspace/'.client2-source')},
+            'commands':[
+              'cargo build --locked -p respire_runtime --bin rsrs-runtime',
+              'cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target',
+              './scripts/build.ps1 -Version 0.2.56-dev.'+os.environ['GITHUB_RUN_NUMBER']+' -Arch amd64'],
+            'sha256':{
+              'client2_exe':sha(workspace/'.client2-source/dist/respire-windows-amd64.exe'),
+              'cli_exe':sha(workspace/'.cli-source/target/debug/rsrs.exe'),
+              'runtime_exe':sha(root/'client2-candidate-ui-payload'/('rsrs-runtime-'+target+'.exe')),
+              'runtime_archive':sha(root/('rsrs-runtime-'+target+'.tar.gz')),
+              'runtime_build_metadata':sha(root/('runtime-build-'+target+'.json')),
+              'core_runtime_manifest':sha(root/'client2-candidate-ui-payload/core-runtime.json'),
+              'sdk_lock':sha(workspace/'sdk/core-sdk.lock.json'),
+              'crate_sdk_lock':sha(workspace/'crates/core-sdk/core-sdk.lock.json')},
+            'models':{name:sha(root/'client2-candidate-ui-models'/name) for name in
+              ['tokenizer.json','onnx/model_quantized.onnx','onnx/model_quantized.cpu-v1.ort']}}
+          (root/'client2-candidate-ui-source-manifest.json').write_text(json.dumps(report,indent=2)+'\n')
+          manifest={'schema_version':1,'mode':'source-client2-ui-candidate',
+            'repository':'risense-ai/respire-client2','source_commit':report['source']['client2'],
+            'platform':'windows-amd64','exe_file':'respire-windows-amd64.exe',
+            'exe_sha256':report['sha256']['client2_exe'],'build_version':report['client2_build_version'],
+            'build_command':report['commands'][2],'run_id':str(os.environ['GITHUB_RUN_ID']),
+            'run_attempt':str(os.environ['GITHUB_RUN_ATTEMPT']),'job':str(os.environ['GITHUB_JOB'])}
+          (root/'client2-candidate-ui-input.json').write_text(json.dumps(manifest)+'\n')
+          PYMANIFEST
+      - name: Candidate launcher policy in both Windows shells
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($engine in @('powershell.exe','pwsh')) {
+            foreach ($test in @('test-client2-source-candidate-binding.ps1','test-client2-account-focus-stability.ps1')) {
+              & $engine -NoProfile -NonInteractive -File "./.cli-source/scripts/$test"
+              if ($LASTEXITCODE -ne 0) { throw "Candidate policy failed: $engine / $test" }
+            }
+          }
+      - name: Candidate native UI against isolated exact source payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-candidate-ui-input.json" -SourceClient2Commit b41808737e2ae8bd55c1c309dfbdb41222cdf77d -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/client2-candidate-ui-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-candidate-ui-models"
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate UI subset failed; release acceptance remains unproven' }
+      - name: Produce allowlisted UI result and independently require subset success
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PYRESULT'
+          import json,math,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); folder=root/'client2-candidate-ui-gui'
+          summary={'schema_version':1,'scope':'source candidate UI subset only','passed':False,
+            'pending_error_cancel':'not-evaluated','completed_poll_count':'not-observed',
+            'full_gui_acceptance':'not-evaluated','g1_passed':False,'reports_readable':False,'action_stage':'unknown','failure_kind':'unknown'}
+          checks={}
+          try:
+              r=json.loads((folder/'report.json').read_text(encoding='utf-8-sig'))
+              n=json.loads((folder/'native-gui.json').read_text(encoding='utf-8-sig'))
+              # Existing cleanup report only. Categories/counts never satisfy acceptance.
+              import re
+              cleanup={'error_kind':'unknown','error_stage':'unknown','error_present':'unknown',
+                'exit_confirmed':'unknown','initial_process_count':'unknown','pre_cleanup_process_count':'unknown',
+                'pre_cleanup_inventory_recorded':False,'runtime_record_present':False}
+              cleanup_error=r.get('cleanup_error')
+              if cleanup_error is None:
+                  cleanup['error_present']=False
+                  cleanup['error_kind']='none'
+              elif type(cleanup_error) is str:
+                  cleanup['error_present']=len(cleanup_error)>0
+                  if cleanup_error=='': cleanup['error_kind']='none'
+                  cleanup_fixed={
+                      'No detached Runtime identity checkpoint; cleanup cannot be certified':('checkpoint_missing', 'checkpoint'),
+                      'Detached cleanup record is not the bound staged Runtime':('checkpoint_identity_mismatch', 'checkpoint'),
+                      'Detached cleanup requires exact creation ticks':('checkpoint_ticks_missing_or_invalid', 'checkpoint'),
+                      'Detached cleanup creation ticks out of range':('checkpoint_ticks_out_of_range', 'checkpoint'),
+                      'Detached actor predates the original desktop':('checkpoint_actor_predates_desktop', 'checkpoint'),
+                      'Offline Runtime identity not established; detached cleanup is not certified':('checkpoint_actor_unestablished', 'checkpoint'),
+                      'Cleanup process birth evidence is not typed':('process_birth_untyped', 'identity_validation'),
+                  }
+                  cleanup_dynamic={
+                      'Process identity changed before cleanup: [1-9][0-9]{0,9}':('process_identity_changed_before_stop', 'stop_owned'),
+                      'Process identity changed during cleanup: [1-9][0-9]{0,9}':('process_identity_changed_during_absence_check', 'absence_check'),
+                      'Owned process did not exit: [1-9][0-9]{0,9}':('process_exit_timeout', 'stop_owned'),
+                      'Owned process survived cleanup: [1-9][0-9]{0,9}':('process_survived_absence_check', 'absence_check'),
+                  }
+                  category=cleanup_fixed.get(cleanup_error)
+                  if category is None:
+                      for pattern,label in cleanup_dynamic.items():
+                          if re.fullmatch(pattern,cleanup_error) is not None:
+                              category=label
+                              break
+                  if category is not None:
+                      cleanup['error_kind'],cleanup['error_stage']=category
+              exit_confirmed=r.get('cleanup_exit_confirmed')
+              if type(exit_confirmed) is bool: cleanup['exit_confirmed']=exit_confirmed
+              # Counts only: never serialize records, PIDs, command lines or paths.
+              for source_key,target_key in [('processes','initial_process_count'),('processes_before_cleanup','pre_cleanup_process_count')]:
+                  records=r.get(source_key)
+                  if type(records) is list and len(records)<=1024:
+                      cleanup[target_key]=len(records)
+                      if source_key=='processes_before_cleanup': cleanup['pre_cleanup_inventory_recorded']=True
+              native_offline=n.get('offline')
+              if type(native_offline) is dict:
+                  runtime_record=native_offline.get('runtime_process')
+                  cleanup['runtime_record_present']=type(runtime_record) is dict and bool(runtime_record)
+              summary['cleanup_diagnostic']=cleanup
+              # Optional diagnostics only: never used to satisfy any acceptance gate.
+              native_initial={'phase':'unknown','ready':'unknown','attempt_count':'unknown',
+                'last_document_count':'unknown','last_focusable_count':'unknown',
+                'last_unknown_control_type_count':'unknown','last_unknown_keyboard_focusable_count':'unknown','last_unknown_offscreen_count':'unknown',
+                'last_traversal_complete':'unknown','elapsed_ms':'unknown','error_kind':'unknown',
+                'pid_observation':'unknown','discarded_samples':'unknown'}
+              phases={'target_guard','read_tree','verify_new_descendant','record_tree','ready','wait_document','budget_exhausted','discard_unavailable_sample'}
+              # Historical observation may precede successful rescan; not a root-cause claim.
+              pid_observation=n.get('document_pid_diagnostic')
+              if type(pid_observation) is str and pid_observation in {'unavailable','invalid_type','nonpositive','unbound_positive','element_unavailable'}:
+                  native_initial['pid_observation']=pid_observation
+              # Historical samples only; invalid or excessive counts do not become evidence.
+              discarded=n.get('document_discarded_samples')
+              if type(discarded) is int and 0<=discarded<=256:
+                  native_initial['discarded_samples']=discarded
+              phase=n.get('document_readiness_phase')
+              if type(phase) is str and phase in phases: native_initial['phase']=phase
+              error_kinds={
+                'UIA node belongs to an unbound process':'unbound_uia_process',
+                'UIA node belongs to an unbound process after one verified refresh':'unbound_uia_process_after_refresh',
+                'UIA node process changed during inspection':'uia_process_changed',
+                'UIA document property method failed':'uia_property_method_failed',
+                'UIA document runtime identity method failed':'uia_runtime_identity_method_failed',
+                'UIA node password state is unknown':'uia_password_state_unknown',
+                'UIA node name type is unknown':'uia_name_type_unknown',
+                'UIA node runtime identity is unknown':'uia_runtime_identity_unknown',
+                'UIA node diagnostic property type is unknown':'uia_diagnostic_property_type_unknown',
+                'Initial document process ancestry changed':'initial_ancestry_changed',
+                'Document readiness budget exhausted during identity acquisition':'identity_acquisition_budget',
+                'Original WebView UIA Document/focusable controls not observed within readiness budget; inspect traversal truncation reasons':'document_budget_exhausted'}
+              error=n.get('error')
+              if type(error) is str: native_initial['error_kind']=error_kinds.get(error,'unknown')
+              readiness=n.get('document_readiness')
+              if type(readiness) is dict:
+                  ready=readiness.get('ready')
+                  if type(ready) is bool: native_initial['ready']=ready
+                  elapsed=readiness.get('elapsed_ms')
+                  if type(elapsed) in (int,float) and 0<=elapsed<=15000 and math.isfinite(elapsed):
+                      native_initial['elapsed_ms']=elapsed
+                  attempts=readiness.get('attempts')
+                  if type(attempts) is list and len(attempts)<=256:
+                      native_initial['attempt_count']=len(attempts)
+                      last=attempts[-1] if attempts else None
+                      if type(last) is dict:
+                          for key in ['document_count','focusable_count','unknown_control_type_count','unknown_keyboard_focusable_count','unknown_offscreen_count']:
+                              value=last.get(key)
+                              if type(value) is int and 0<=value<=256: native_initial['last_'+key]=value
+                          complete=last.get('traversal_complete')
+                          if type(complete) is bool: native_initial['last_traversal_complete']=complete
+              summary['native_initial']=native_initial
+              # Closed historical preparation evidence; never used by acceptance checks.
+              def preparation(value):
+                  if type(value) is not dict or set(value)!={'route','attempt','kind','proof'}: return 'unknown'
+                  route=value.get('route'); attempt=value.get('attempt'); kind=value.get('kind'); proof=value.get('proof')
+                  if type(route) is not str or route not in {'bounded_attempt','candidate_window'}: return 'unknown'
+                  if type(attempt) is not int: return 'unknown'
+                  if not ((route=='bounded_attempt' and 1<=attempt<=5) or (route=='candidate_window' and attempt==0)): return 'unknown'
+                  if type(kind) is not str or kind not in {'not_reached','unknown','invalid_focus_fields','invalid_focused_id','invalid_requested_id','outside_target','outside_document','offscreen','id_mismatch','verified'}: return 'unknown'
+                  if type(proof) is not str or proof not in {'not_eligible','attempts_exhausted','budget_exhausted','false','exception','verified'}: return 'unknown'
+                  return {'route':route,'attempt':attempt,'kind':kind,'proof':proof}
+              summary['final_preparation']='unknown'
+              summary['final_preparation_history']='unknown'
+              offline_diagnostic=n.get('offline')
+              if type(offline_diagnostic) is dict:
+                  summary['final_preparation']=preparation(offline_diagnostic.get('final_preparation'))
+                  history=offline_diagnostic.get('final_preparation_history')
+                  if type(history) is list and len(history)<=5:
+                      projected=[preparation(item) for item in history]
+                      if all(type(item) is dict for item in projected): summary['final_preparation_history']=projected
+              summary['recovery_dismiss_detail']='unknown'
+              if type(offline_diagnostic) is dict:
+                  detail=offline_diagnostic.get('recovery_dismiss_detail')
+                  if type(detail) is str and detail in {'before_guard','before_focus','escape_send','after_guard','observe_absence','complete'}:
+                      summary['recovery_dismiss_detail']=detail
+              # Last exact native error category, not an initial-document cause or root cause.
+              last_errors={
+                'Offline button focus changed before UIA Invoke':'pre_invoke_focus_rejected',
+                'Offline button preparation exceeded its existing attempt budget':'preparation_budget_exhausted',
+                'Offline button focus failed without a retryable UIA readiness condition':'focus_readiness_rejected',
+                'Offline button did not become focus-ready within the bounded attempts':'focus_attempts_exhausted',
+                'Synthetic text was not observed in the original visible control':'synthetic_text_readback_mismatch',
+                'Visible text focus changed before SendInput':'text_focus_rejected',
+                'Offline Unicode SendInput was incomplete':'text_input_incomplete',
+                'Original recovery dialog controls did not disappear within the bounded checks':'recovery_controls_still_present',
+                'Offline input focus escaped the original visible document':'key_focus_outside_document',
+                'Offline button focus changed before key dispatch':'key_focus_changed',
+                'Offline SendInput key was rejected':'key_input_rejected',
+                'UIA has no focused element':'focused_element_absent',
+                'Offline selector is ambiguous':'offline_selector_ambiguous'}
+              last_error=n.get('error')
+              summary['last_native_error_kind']=last_errors.get(last_error,'unknown') if type(last_error) is str else 'unknown'
+              # Closed diagnostic projection only; never participates in acceptance checks.
+              candidate_focus={'error_kind':'unknown','stability_status':'unknown','observations':'unknown',
+                'enabled':'unknown','focusable':'unknown','offscreen':'unknown'}
+              candidate_errors={
+                  'Candidate account button was replaced during stability window':'candidate_account_button_was_replaced_during_stability_window',
+                  'Candidate account focus changed during stability window':'candidate_account_focus_changed_during_stability_window',
+                  'Candidate initial RuntimeId unavailable':'candidate_initial_runtimeid_unavailable',
+                  'Candidate stability RuntimeId unavailable':'candidate_stability_runtimeid_unavailable',
+                  'Candidate stability button is not focus-ready':'candidate_stability_button_is_not_focus_ready',
+                  'Candidate stability button name unavailable':'candidate_stability_button_name_unavailable',
+                  'Candidate stability control type unavailable':'candidate_stability_control_type_unavailable',
+                  'Candidate stability depth bound reached':'candidate_stability_depth_bound_reached',
+                  'Candidate stability focus is outside the original document':'candidate_stability_focus_is_outside_the_original_document',
+                  'Candidate stability focus observation exceeded its bound':'candidate_stability_focus_observation_exceeded_its_bound',
+                  'Candidate stability focused ancestry is foreign':'candidate_stability_focused_ancestry_is_foreign',
+                  'Candidate stability focused control type unavailable':'candidate_stability_focused_control_type_unavailable',
+                  'Candidate stability focused identity unavailable':'candidate_stability_focused_identity_unavailable',
+                  'Candidate stability focused visibility unavailable':'candidate_stability_focused_visibility_unavailable',
+                  'Candidate stability has no focused element':'candidate_stability_has_no_focused_element',
+                  'Candidate stability identity acquisition exceeded its bound':'candidate_stability_identity_acquisition_exceeded_its_bound',
+                  'Candidate stability initial ancestry changed':'candidate_stability_initial_ancestry_changed',
+                  'Candidate stability observation exceeded its bound':'candidate_stability_observation_exceeded_its_bound',
+                  'Candidate stability process left the bound tree':'candidate_stability_process_left_the_bound_tree',
+                  'Candidate stability requires an explicit source binding and offline subset':'candidate_stability_requires_an_explicit_source_binding_and_offline_subset',
+                  'Candidate stability root identity unavailable':'candidate_stability_root_identity_unavailable',
+                  'Candidate stability root is foreign':'candidate_stability_root_is_foreign',
+                  'Candidate stability selector is ambiguous':'candidate_stability_selector_is_ambiguous',
+                  'Candidate stability traversal exceeded its bound':'candidate_stability_traversal_exceeded_its_bound',
+                  'Candidate stability unique button unavailable':'candidate_stability_unique_button_unavailable',
+              }
+              error=n.get('error')
+              if type(error) is str: candidate_focus['error_kind']=candidate_errors.get(error,'unknown')
+              candidate_offline=n.get('offline')
+              if type(candidate_offline) is dict:
+                  stability=candidate_offline.get('account_focus_stability')
+                  if type(stability) is dict:
+                      status=stability.get('status')
+                      if type(status) is str and status in {'observing','timed-window-passed'}: candidate_focus['stability_status']=status
+                      count=stability.get('observations')
+                      if type(count) is int and 0<=count<=4096: candidate_focus['observations']=count
+                  readiness=candidate_offline.get('focus_readiness')
+                  if type(readiness) is dict:
+                      for key in ['enabled','focusable','offscreen']:
+                          value=readiness.get(key)
+                          if type(value) is bool: candidate_focus[key]=value
+              summary['candidate_focus_diagnostic']=candidate_focus
+              # Existing failed-node context only; no identifiers or acceptance evidence.
+              candidate_pid={'pid_kind':'unknown','held_member':'unknown','depth':'unknown','ancestor_document':'unknown','in_same_snapshot':'unknown'}
+              if type(candidate_offline) is dict:
+                  failed_pid=candidate_offline.get('account_stability_pid')
+                  if type(failed_pid) is dict:
+                      kind=failed_pid.get('pid_kind')
+                      if type(kind) is str and kind in {'null','non_int','nonpositive','positive_not_in_tree'}: candidate_pid['pid_kind']=kind
+                      depth=failed_pid.get('depth')
+                      if type(depth) is int and 0<=depth<=32: candidate_pid['depth']=depth
+                      for key in ['held_member','ancestor_document','in_same_snapshot']:
+                          value=failed_pid.get(key)
+                          if type(value) is bool: candidate_pid[key]=value
+              summary['candidate_stability_pid']=candidate_pid
+              # Diagnostic only. Saturated count is a lower bound on complete traversals, not polls.
+              summary['runtime_start_stop_selector']={'state':'unknown','complete_samples':'unknown'}
+              selector_offline=n.get('offline')
+              selector=selector_offline.get('runtime_start_stop_selector') if type(selector_offline) is dict else None
+              if type(selector) is dict and set(selector)=={'state','complete_samples'}:
+                  state=selector.get('state'); samples=selector.get('complete_samples')
+                  if (type(state) is str and state in {'absent','disabled','enabled','ambiguous','unobservable'}
+                      and type(samples) is int and 0<=samples<=256):
+                      summary['runtime_start_stop_selector']={'state':state,'complete_samples':samples}
+              o=n.get('offline',{}); focus=o.get('account_focus_stability',{})
+              allowed_stages={'account_navigation','offline_initialization','key_generation',
+                'recovery_dismiss','overview_navigation','runtime_start','account_verification',
+                'credential_persistence','important_editor_open','important_save','important_created_reader',
+                'diary_editor_open','diary_save','diary_created_reader','diary_runtime_readback',
+                'diary_navigation','diary_select_saved_day','diary_saved_reader','diary_close_reader',
+                'settings_navigation','settings_locate','settings_initial_state','settings_enable',
+                'settings_enable_persist','settings_disable','settings_disable_persist','runtime_pre_stop_check',
+                'normal_stop_select','normal_stop_pattern','normal_stop_focus_guard','normal_stop_invoke',
+                'normal_stop_post_invoke_guard','normal_stop_process_lookup','normal_stop_birth_check',
+                'normal_stop_wait_exit','normal_stop_cim_first','normal_stop_cim_second','normal_stop_confirmed'}
+              stage=o.get('action_stage')
+              summary['action_stage']=stage if type(stage) is str and stage in allowed_stages else 'unknown'
+              allowed_failures={'unknown','pid_reused','exit_timeout','pid_present_after_stop'}
+              failure=o.get('failure_kind')
+              summary['failure_kind']=failure if type(failure) is str and failure in allowed_failures else 'unknown'
+              def finite_number(value):
+                  return type(value) in (int,float) and math.isfinite(value)
+              observations=focus.get('observations'); observed=focus.get('observed_window_ms'); elapsed=focus.get('elapsed_ms')
+              timed_receipt=(type(focus.get('requested_seconds')) is int and focus['requested_seconds']==10
+                and type(observations) is int and observations>=2
+                and finite_number(observed) and observed>=10000
+                and finite_number(elapsed) and elapsed>=observed and elapsed<15000)
+              checks={'candidate_mode':r.get('fixture_mode')=='source-client2-ui-candidate' and n.get('fixture_mode')=='source-client2-ui-candidate',
+                'source_candidate_verified':r.get('source_candidate_verified') is True,
+                'connectivity_passed':r.get('status')=='connectivity-passed' and n.get('status')=='native-connectivity-passed',
+                'cleanup_confirmed':r.get('cleanup_exit_confirmed') is True and not r.get('cleanup_error'),
+                'native_identity_verified':n.get('identity_verified') is True,
+                'accessibility_verified':r.get('native_accessibility_read') is True,
+                'foreground_verified':r.get('foreground_verified') is True,
+                'input_observed':r.get('gui_input_observed') is True,
+                'timed_focus_window':focus.get('status')=='timed-window-passed' and focus.get('completed_poll_count')=='not-observed' and timed_receipt,
+                'offline_subset_passed':o.get('status')=='offline-subset-passed',
+                'scope_not_overclaimed':all(x.get('full_gui_acceptance')=='not-evaluated' and x.get('g1_passed') is False for x in [r,n,o])}
+              for key in ['onboarding_completed','runtime_bound','local_keys_initialized','important_memory_readback','diary_readback','settings_persisted','runtime_normal_stop_confirmed']:
+                  checks[key]=o.get(key) is True
+              summary['reports_readable']=True
+          except (OSError,ValueError,TypeError,AttributeError):
+              pass
+          summary['checks']=checks; summary['passed']=summary['reports_readable'] and bool(checks) and all(checks.values())
+          (root/'client2-candidate-ui-result.json').write_text(json.dumps(summary,indent=2)+'\n')
+          if not summary['passed']: raise SystemExit('Candidate UI result missing or failed; see allowlisted booleans')
+          PYRESULT
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-only-client2-candidate-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/client2-candidate-ui-source-manifest.json
+            ${{ runner.temp }}/client2-candidate-ui-input.json
+            ${{ runner.temp }}/client2-candidate-ui-result.json
+          # No raw report, tree, profile, environment, recovery material or bindings.
+          if-no-files-found: warn
+          retention-days: 1

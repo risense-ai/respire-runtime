@@ -36,7 +36,7 @@ impl Fixture {
         );
         let root = tempfile::tempdir()?;
         support::install_runtime_fixture(root.path())?;
-        let runtime_bin = root.path().join("runtime")
+        let runtime_bin = root.path().join("bin/runtime")
             .join(runtime_bin.parent().and_then(std::path::Path::file_name)
                 .context("Runtime fixture version directory missing")?)
             .join(runtime_bin.file_name().context("Runtime fixture binary name missing")?)

@@ -16,19 +16,61 @@ struct Cache {
     pending: usize,
 }
 
+struct AuthorizedCache {
+    identity: Vec<u8>,
+    snapshot: Vec<u8>,
+    ids: HashSet<String>,
+    lease: Arc<respire_core_sdk::ResidentLease>,
+}
+
 #[cfg(test)]
 #[path = "resident_tests.rs"]
 mod tests;
 
 static CACHE: Mutex<Option<Arc<Cache>>> = Mutex::new(None);
+static AUTHORIZED_CACHE: Mutex<Option<Arc<AuthorizedCache>>> = Mutex::new(None);
 static REFRESH: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub fn clear() -> Result<()> {
     let mut slot = CACHE.lock().map_err(|_| anyhow::anyhow!("resident catalog cache poisoned"))?;
+    let mut authorized = AUTHORIZED_CACHE.lock().map_err(|_| anyhow::anyhow!("authorized resident cache poisoned"))?;
     EPOCH.fetch_add(1, Ordering::AcqRel);
     *slot = None;
+    *authorized = None;
     Ok(())
+}
+
+/// Retain only a Core lease; every request still obtains its own authorized source and proofs.
+pub fn recall_authorized_lease(keys: &SessionKeys, store: &LocalStore, owner: &str,
+    source: &crate::review::AuthorizedRecallSource) -> Result<Arc<respire_core_sdk::ResidentLease>> {
+    let epoch = EPOCH.load(Ordering::Acquire);
+    let model = store.retrieval_model()?;
+    let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&(store.library_identity()?, store.active_generation_key()?, owner, &model))?);
+    hash.update(keys.urk);
+    let identity = hash.finalize().to_vec();
+    // Include the complete authorized snapshot, including artifacts and heat. Content
+    // revision alone deliberately excludes those fields and cannot identify a Core view.
+    let snapshot = Sha256::digest(serde_json::to_vec(source.snapshots())?).to_vec();
+    let _refresh = REFRESH.lock().map_err(|_| anyhow::anyhow!("resident refresh poisoned"))?;
+    let cached = AUTHORIZED_CACHE.lock().map_err(|_| anyhow::anyhow!("authorized resident cache poisoned"))?.clone();
+    let matching = cached.as_ref().filter(|cached| cached.identity == identity && cached.lease.current());
+    if let Some(cached) = matching.filter(|cached| cached.snapshot == snapshot) {
+        return Ok(Arc::clone(&cached.lease));
+    }
+    let source_current = store.memory_revision()? == source.memory_revision();
+    let ids: HashSet<String> = source.memories().iter().map(|memory| memory.id.clone()).collect();
+    let removed: Vec<String> = matching.map(|cached| cached.ids.difference(&ids).cloned().collect()).unwrap_or_default();
+    let lease = respire_core_sdk::ResidentLease::publish(uuid::Uuid::new_v4().to_string(),
+        matching.map(|cached| cached.lease.as_ref()), &model, source.snapshots(), &removed)?;
+    let mut slot = AUTHORIZED_CACHE.lock().map_err(|_| anyhow::anyhow!("authorized resident cache poisoned"))?;
+    // A cleared context cannot be repopulated by an earlier in-flight publication.
+    if source_current && store.memory_revision()? == source.memory_revision()
+        && EPOCH.load(Ordering::Acquire) == epoch && lease.current() {
+        *slot = Some(Arc::new(AuthorizedCache { identity, snapshot, ids, lease: Arc::clone(&lease) }));
+    }
+    Ok(lease)
 }
 
 pub fn recall_catalog(keys: &SessionKeys, store: &LocalStore)

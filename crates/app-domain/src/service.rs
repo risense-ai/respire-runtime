@@ -817,12 +817,23 @@ pub struct SessionInfo {
 /// Full recovery key (local only; UI must confirm twice).
 pub fn session_secret_full() -> Result<String> {
     let d = auth::read_session_json()?;
-    Ok(d["secret_key"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or_else(|| d["secret"].as_str())
-        .unwrap_or("")
-        .to_owned())
+    // Old v4 sessions kept inline keys; any credential claim must stay on its bound backend.
+    let bound = ["keyring_account", "keyring_backend", "auth_operation_id"]
+        .iter().any(|field| d.get(*field).is_some());
+    if d["vault_version"].as_i64().is_some_and(|version| version >= 4) && bound {
+        let alias = d["keyring_account"].as_str().filter(|value| !value.is_empty())
+            .context("session recovery credential alias is missing")?;
+        let backend = d["keyring_backend"].as_str().filter(|value| !value.is_empty())
+            .context("session recovery credential backend is missing")?;
+        let secret = crate::keystore::read_imported(alias, "super", backend)?;
+        auth::unlock_session_keys(&d, "", Some(&secret), alias)
+            .context("recovery credential does not unlock the selected session")?;
+        return Ok(secret);
+    }
+    d["secret_key"].as_str().filter(|value| !value.is_empty())
+        .or_else(|| d["secret"].as_str().filter(|value| !value.is_empty()))
+        .map(str::to_owned)
+        .context("session recovery secret is unavailable")
 }
 
 /// New-device five-piece kit (manual handoff across devices; local only).
@@ -1110,6 +1121,42 @@ pub fn data_dir() -> PathBuf {
     data_dir_from_config(read_client_config().as_ref())
 }
 
+// Resolve existing parents before appending absent names; never guess filesystem identity.
+fn canonical_profile_path(path: &Path) -> Option<PathBuf> {
+    if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return None;
+    }
+    let mut current = path;
+    let mut missing = Vec::new();
+    loop {
+        match current.canonicalize() {
+            Ok(mut resolved) => {
+                for name in missing.iter().rev() {
+                    resolved.push(name);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(current) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return None,
+                }
+                let name = current.file_name()?;
+                #[cfg(windows)]
+                {
+                    let spelling = name.to_str()?;
+                    if spelling.ends_with('.') || spelling.ends_with(' ') {
+                        return None;
+                    }
+                }
+                missing.push(name);
+                current = current.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
     let env_root = env_root_dir();
     let from_config = config
@@ -1121,7 +1168,13 @@ pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
         })
         .map(|v| expand_tilde(&v));
     match (env_root, from_config) {
-        (Some(root), Some(cfg)) if cfg.starts_with(&root) => cfg,
+        (Some(root), Some(cfg))
+            if canonical_profile_path(&cfg).is_some_and(|profile| {
+                canonical_profile_path(&root).is_some_and(|root| profile.starts_with(root))
+            }) =>
+        {
+            cfg
+        }
         (Some(root), _) => root,
         (None, Some(cfg)) => cfg,
         (None, None) => default_data_dir(),
@@ -3755,6 +3808,52 @@ mod tests {
             for name in ["RSRS_M3_DIR", "ONEMEMORY_M3_DIR", "RESPIRE_M3_DIR"] {
                 std::env::remove_var(name);
             }
+            let canonical_root = iso.path().canonicalize()?;
+            #[cfg(windows)]
+            let ordinary_root = {
+                let spelling = canonical_root.to_str().context("isolated root is not UTF-8")?;
+                if let Some(rest) = spelling.strip_prefix(r"\\?\UNC\") {
+                    PathBuf::from(format!(r"\\{rest}"))
+                } else {
+                    PathBuf::from(spelling.strip_prefix(r"\\?\")
+                        .context("canonical Windows root lacks a verbatim prefix")?)
+                }
+            };
+            #[cfg(not(windows))]
+            let ordinary_root = iso.path().to_path_buf();
+            let ordinary_profile = ordinary_root.join("accounts/second");
+            std::fs::create_dir_all(&ordinary_profile)?;
+            let canonical_profile = ordinary_profile.canonicalize()?;
+            std::env::set_var("RSRS_DATA_DIR", &ordinary_root);
+            set_data_dir(&ordinary_profile.to_string_lossy())?;
+            for root in [&ordinary_root, &canonical_root] {
+                std::env::set_var("RSRS_DATA_DIR", root);
+                assert_eq!(data_dir(), ordinary_profile);
+                for profile in [ordinary_profile.clone(), canonical_profile.clone(),
+                    ordinary_profile.join("absent/child"), canonical_profile.join("absent/child")] {
+                    let config = serde_json::json!({"data_dir":profile.to_string_lossy()});
+                    assert_eq!(data_dir_from_config(Some(&config)), profile);
+                }
+                for profile in [ordinary_root.with_extension("outside-profile"),
+                    ordinary_profile.join("../second")] {
+                    let config = serde_json::json!({"data_dir":profile.to_string_lossy()});
+                    assert_eq!(data_dir_from_config(Some(&config)), *root);
+                }
+                #[cfg(windows)]
+                for name in ["absent.", "absent "] {
+                    let config = serde_json::json!({"data_dir":ordinary_profile.join(name)});
+                    assert_eq!(data_dir_from_config(Some(&config)), *root);
+                }
+            }
+            #[cfg(unix)]
+            {
+                let link = ordinary_profile.join("dangling");
+                std::os::unix::fs::symlink(ordinary_root.with_extension("missing-target"), &link)?;
+                let config = serde_json::json!({"data_dir":link.join("child")});
+                assert_eq!(data_dir_from_config(Some(&config)), canonical_root);
+            }
+            std::env::set_var("RSRS_DATA_DIR", iso.path());
+            set_data_dir("")?;
             let models = iso.path().join("models/bge-m3");
             let roots = resolved_roots()?;
             assert!(roots.legacy_whole_isolation);

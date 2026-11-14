@@ -51,8 +51,8 @@ for (const [id, cases] of Object.entries(expected)) {
     assert.equal(item.evidence.matrix, undefined, 'A plain job must not claim matrix job-name syntax');
   }
 }
-assert.match(job('required-tests'), /\n    if: always\(\)\n/);
-assert.ok(job('ci-complete').includes('test "$REQUIRED_RESULT" = success'));
+assert.ok(job('required-tests').includes("    if: ${{ always() && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}\n"));
+assert.ok(job('ci-complete').includes("assert.equal(env.REQUIRED_RESULT, requested ? 'success' : 'skipped',"));
 assert.ok(job('g1-report').includes('needs: [g1-native-smoke, g1-native-business]'));
 assert.ok(job('g1-native-business').includes('G1_RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}'));
 assert.ok(job('g1-native-business').includes('G1_RAW_ARTIFACT_SHA256: ${{ steps.raw.outputs.artifact-digest }}'));

@@ -212,6 +212,27 @@ impl EndpointPublication {
     }
 }
 
+/// Revoke only the live publisher's current generation after admission is shut
+/// down. Unlike failed startup, normal serving may have republished its scope.
+/// Never derive authority from the bytes found in the endpoint file.
+pub(crate) fn revoke_current_endpoint(
+    owner: &respire_app::lock::LibraryLock,
+    url: &str,
+) -> Result<()> {
+    let path = endpoint_path();
+    let (identity, receipt, receipt_bytes) = endpoint_body(url)?;
+    let expected = current_publication(path.clone(), identity, receipt, receipt_bytes)?;
+    // Re-read actual identity and the claimed receipt before the final byte CAS.
+    let (identity, receipt, receipt_bytes) = endpoint_body(url)?;
+    expected.revoke_matching(owner, &path, &identity, &receipt, &receipt_bytes)
+}
+
+fn current_publication(path: PathBuf, identity: Value, receipt: PathBuf,
+    receipt_bytes: Option<Vec<u8>>) -> Result<EndpointPublication> {
+    let bytes = serde_json::to_vec_pretty(&identity)?;
+    Ok(EndpointPublication { path, bytes, identity, receipt, receipt_bytes })
+}
+
 fn endpoint_body(url: &str) -> Result<(Value, PathBuf, Option<Vec<u8>>)> {
     let dir = runtime_dir();
     let mut body = crate::rpc_serve::endpoint_identity(url)?;
@@ -272,6 +293,69 @@ pub fn endpoint_pid() -> Option<u32> {
 #[cfg(test)]
 mod endpoint_publication_tests {
     use super::*;
+
+    #[test]
+    fn clean_stop_uses_current_generation_and_rejects_changed_evidence() -> Result<()> {
+        for change in ["none", "old-generation", "foreign-instance", "bytes", "claim", "owner"] {
+            let directory = tempfile::tempdir()?;
+            let other = tempfile::tempdir()?;
+            let owner = respire_app::lock::LibraryLock::acquire(directory.path(), Duration::from_secs(1))?;
+            let wrong_owner = respire_app::lock::LibraryLock::acquire(other.path(), Duration::from_secs(1))?;
+            let path = directory.path().join("endpoint.json");
+            let receipt = directory.path().join("launch.claimed");
+            // These expected values model current process state, not parsed disk input.
+            let current = json!({"pid":std::process::id(),"instance_id":"same-live-publisher","generation":2});
+            let claimed = Some(b"original claimed receipt".to_vec());
+            std::fs::write(&receipt, claimed.as_ref().context("synthetic claim absent")?)?;
+            std::fs::write(&path, serde_json::to_vec_pretty(&current)?)?;
+            let expected = current_publication(path.clone(),current.clone(),receipt.clone(),claimed.clone())?;
+            match change {
+                "old-generation" => {
+                    let mut old=current.clone(); old["generation"]=json!(1);
+                    std::fs::write(&path,serde_json::to_vec_pretty(&old)?)?;
+                }
+                "foreign-instance" => {
+                    let mut foreign=current.clone(); foreign["instance_id"]=json!("foreign");
+                    std::fs::write(&path,serde_json::to_vec_pretty(&foreign)?)?;
+                }
+                "bytes" => std::fs::write(&path,b"foreign bytes")?,
+                "claim" => std::fs::write(&receipt,b"changed claim")?,
+                _ => {}
+            }
+            let before=endpoint_record_bytes(&path)?;
+            let before_claim=endpoint_record_bytes(&receipt)?;
+            let result=expected.revoke_matching(if change == "owner" { &wrong_owner } else { &owner },
+                &path,&current,&receipt,&claimed);
+            if change == "none" {
+                result?;
+                assert!(!path.try_exists()?);
+            } else {
+                assert!(result.is_err(),"accepted changed {change}");
+                assert_eq!(endpoint_record_bytes(&path)?,before);
+            }
+            assert_eq!(endpoint_record_bytes(&receipt)?,before_claim);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_stop_does_not_follow_endpoint_symlink() -> Result<()> {
+        let directory=tempfile::tempdir()?;
+        let owner=respire_app::lock::LibraryLock::acquire(directory.path(),Duration::from_secs(1))?;
+        let target=directory.path().join("foreign.json");
+        let path=directory.path().join("endpoint.json");
+        let receipt=directory.path().join("launch.claimed");
+        let identity=json!({"generation":2});
+        let bytes=serde_json::to_vec_pretty(&identity)?;
+        std::fs::write(&target,&bytes)?;
+        std::os::unix::fs::symlink(&target,&path)?;
+        let expected=current_publication(path.clone(),identity.clone(),receipt.clone(),None)?;
+        assert!(expected.revoke_matching(&owner,&path,&identity,&receipt,&None).is_err());
+        assert_eq!(std::fs::read(target)?,bytes);
+        assert!(std::fs::symlink_metadata(path)?.file_type().is_symlink());
+        Ok(())
+    }
 
     #[test]
     fn failed_start_revokes_only_unchanged_owned_publication() -> Result<()> {

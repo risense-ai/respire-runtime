@@ -2426,6 +2426,20 @@ fn final_stop_receipt(operation_id: &str, success: bool) -> RuntimeStopReceipt {
     }
 }
 
+fn should_revoke_clean_stop(clean: bool, forced: bool) -> bool {
+    clean && !forced
+}
+
+#[cfg(test)]
+#[test]
+fn endpoint_cleanup_is_only_for_clean_unforced_shutdown() {
+    assert!(should_revoke_clean_stop(true, false));
+    assert!(!should_revoke_clean_stop(false, false));
+    assert!(!should_revoke_clean_stop(true, true));
+    assert!(!should_revoke_clean_stop(false, true));
+    assert_eq!(stop_outcome(false, false, true), RuntimeStopOutcome::Failed);
+}
+
 fn stop_outcome(clean: bool, forced: bool, unfinished_empty: bool) -> RuntimeStopOutcome {
     if !clean {
         RuntimeStopOutcome::Failed
@@ -2457,6 +2471,10 @@ fn stop_process(code: i32) -> ! {
             while respire_app::core_sdk::worker::shutdown().is_err() {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
+        }
+        if let Err(error) = crate::runtime_http::shutdown() {
+            eprintln!("runtime could not drain HTTP responses before exit: {error:#}");
+            exit_code = 1;
         }
         if let Some(operation_id) = STOP_OPERATION.get() {
             let receipt = final_stop_receipt(operation_id, exit_code == 0);
@@ -2644,6 +2662,12 @@ struct StartupEndpoint {
 }
 
 impl StartupEndpoint {
+    fn revoke_clean_stop(&self) -> Result<()> {
+        let owner = self.owner.lock()
+            .map_err(|_| anyhow::anyhow!("installation ownership lock poisoned"))?;
+        crate::rpc_worker::revoke_current_endpoint(&owner, &current_url())
+    }
+
     fn revoke(&self) {
         let result = self.owner.lock()
             .map_err(|_| anyhow::anyhow!("installation ownership lock poisoned"))
@@ -2688,6 +2712,7 @@ fn dispatch_loop_inner(
                 store
             }
             Err(error) => {
+                respire_logging::error(format_args!("runtime failed to initialize the library"));
                 eprintln!("runtime failed to initialize the library: {error:#}");
                 if let Some(startup) = startup.as_ref() {
                     startup.revoke();
@@ -2698,6 +2723,7 @@ fn dispatch_loop_inner(
     };
     respire_app::service::install_runtime_profile(respire_app::service::data_dir());
     if let Err(error) = respire_app::read_heat::reload() {
+        respire_logging::error(format_args!("runtime failed to load read_heat configuration"));
         eprintln!("runtime failed to load read_heat configuration: {error:#}");
         stop_process(1);
     }
@@ -2736,12 +2762,14 @@ fn dispatch_loop_inner(
             }
         });
     if classifier.is_err() {
+        respire_logging::error(format_args!("runtime failed to start the classifier worker"));
         stop_process(1);
     }
     let (write_tx, write_rx) = mpsc::sync_channel::<WriteJob>(256);
     if let Ok(mut installed) = WRITE_TX.lock() {
         *installed = Some(write_tx.clone());
     } else {
+        respire_logging::error(format_args!("runtime failed to install the write queue"));
         eprintln!("runtime failed to install the write queue");
         stop_process(1);
     }
@@ -2779,6 +2807,7 @@ fn dispatch_loop_inner(
                             }
                             Err(error) => {
                                 STATS_FAILED.fetch_add(1, Ordering::AcqRel);
+                                respire_logging::error(format_args!("recall statistics writeback failed"));
                                 eprintln!("recall statistics writeback failed: {error:#}");
                             }
                         }
@@ -2850,6 +2879,7 @@ fn dispatch_loop_inner(
             }
         });
     if writer.is_err() {
+        respire_logging::error(format_args!("runtime failed to start the writer worker"));
         stop_process(1);
     }
     respire_app::service::install_autosync_notifier(kick_autosync);
@@ -2860,6 +2890,7 @@ fn dispatch_loop_inner(
         .stack_size(16 * 1024 * 1024)
         .spawn(index_loop);
     if let Err(error) = indexer.as_ref() {
+        respire_logging::error(format_args!("runtime failed to start the index worker"));
         eprintln!("runtime failed to start the index worker: {error}");
         stop_process(1);
     }
@@ -3142,6 +3173,7 @@ fn dispatch_loop_inner(
     }
     if let Ok(indexer) = indexer {
         if indexer.join().is_err() {
+            respire_logging::error(format_args!("background index worker panicked during shutdown"));
             eprintln!("background index worker panicked during shutdown");
             clean = false;
         }
@@ -3162,12 +3194,23 @@ fn dispatch_loop_inner(
         clean = false;
     }
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+        respire_logging::error(format_args!("Core worker shutdown failed"));
         eprintln!("Core worker shutdown failed: {error:#}");
         set_control_state("failed");
         // Keep ownership until stop_process confirms native-child cleanup.
         stop_process(1);
     }
     drop(_store);
+    // Retain both library and installation ownership through endpoint CAS.
+    // Failed/forced exits keep their evidence for exact-owner recovery.
+    if should_revoke_clean_stop(clean, STOP_FORCE_TRIGGERED.load(Ordering::Acquire)) {
+        if let Some(startup) = startup.as_ref() {
+            if let Err(error) = startup.revoke_clean_stop() {
+                eprintln!("runtime failed to revoke its final endpoint: {error:#}");
+                clean = false;
+            }
+        }
+    }
     drop(_lock);
     if !STOP_FORCE_TRIGGERED.load(Ordering::Acquire) {
         mark_stop_unfinished(Vec::new());

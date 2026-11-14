@@ -53,6 +53,84 @@ pub enum AuthSessionIdentity {
     Bound { account_id: String, session_sha256: String },
 }
 
+/// Host identity projection only. Runtime verifies local receipts and credentials;
+/// malformed sessions must never be treated as an absent cloud account.
+pub fn host_session_user_of_dir(dir: &Path, sha256: impl Fn(&[u8]) -> String) -> Result<Option<String>> {
+    if read_migrated_local_session(dir, &sha256)?.is_some() { return Ok(None); }
+    match auth_session_identity(dir, &sha256)? {
+        AuthSessionIdentity::Absent | AuthSessionIdentity::Unbound { .. } => Ok(None),
+        AuthSessionIdentity::Bound { account_id, .. } => {
+            let user = session_user_of_dir(dir)?.context("host account session disappeared")?;
+            anyhow::ensure!(sha256(user.as_bytes()) == account_id, "host account session changed");
+            Ok(Some(user))
+        }
+    }
+}
+
+/// A migrated local claim is not an auth transaction. Runtime must independently
+/// unlock its checkpointed credential before accepting this profile identity.
+pub fn read_migrated_local_session(
+    dir: &Path,
+    sha256: impl Fn(&[u8]) -> String,
+) -> Result<Option<(Value, [String; 2])>> {
+    let directory = crate::config::normalize_control_path(dir)?;
+    let path = directory.join("session.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("migration session is unavailable"),
+        Ok(_) => {}
+    }
+    let bytes = read_identity_record(&path)?;
+    let session: Value = serde_json::from_slice(&bytes).context("invalid migration session JSON")?;
+    let object = session.as_object().context("migration session must be an object")?;
+    // Auth transaction claims and named accounts never enter the legacy lane.
+    if object.contains_key("auth_operation_id") || session.get("user").is_some_and(|user| user != "") {
+        return Ok(None);
+    }
+    let claimed = session["keyring_account"].as_str().is_some_and(|alias| alias.starts_with("legacy-"));
+    if !claimed { return Ok(None); }
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_i64().context("invalid migration vault version")?,
+    };
+    anyhow::ensure!(matches!(version, 1..=4)
+        && object.keys().all(|field| matches!(field.as_str(), "vault_version" | "kdf_salt"
+            | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "crypto_namespace")
+            || (field == "user" && session[field] == "")
+            || (field == "addr" && session[field] == "")
+            // Old copy-only migration retained these fields; neither is authority.
+            || (matches!(field.as_str(), "pass" | "super") && session[field].is_string())
+            || (version == 1 && field == "secret")
+            || (version == 3 && field == "secret_key")), "invalid migrated local session fields");
+    for field in ["kdf_salt", "wrapped_urk", "urk_nonce", "keyring_account", "keyring_backend"] {
+        anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
+            "migrated local session material is missing");
+    }
+    let current_namespace = session.get("crypto_namespace").is_some();
+    anyhow::ensure!((!current_namespace || session["crypto_namespace"] == "rsrs:v1:")
+        && session["wrapped_urk"].as_str().is_some_and(|value| value.starts_with("rsrs:v1:") == current_namespace)
+        && session["keyring_backend"] != "kernel", "invalid migrated local namespace or backend");
+    if let Some(field) = match version { 1 => Some("secret"), 3 => Some("secret_key"), _ => None } {
+        anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
+            "original migration factor is missing");
+    }
+    let receipt_bytes = read_identity_record(&directory.join(".rsrs-migration.json"))?;
+    let receipt: Value = serde_json::from_slice(&receipt_bytes).context("invalid migration receipt JSON")?;
+    let source_id = receipt["source_identity"].as_str().context("migration source identity is missing")?;
+    anyhow::ensure!(source_id.len() == 64 && source_id.bytes().all(|byte|
+        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), "invalid migration source identity");
+    let destination = receipt["destination"].as_str().context("migration destination is missing")?;
+    anyhow::ensure!(Path::new(destination).is_absolute()
+        && crate::config::normalize_control_path(Path::new(destination))? == directory
+        && receipt["schema"] == 2 && receipt["complete"] == true
+        && receipt["namespace_migrated"].as_bool().is_some() && receipt["original_preserved"] == true
+        && receipt["source"].as_str().is_some_and(|source| Path::new(source).is_absolute())
+        && receipt["keyring_backend"] == session["keyring_backend"]
+        && session["keyring_account"] == format!("legacy-{}", &source_id[..16]),
+        "migration receipt does not match the selected local session");
+    Ok(Some((session, [sha256(&bytes), sha256(&receipt_bytes)])))
+}
+
 /// Hash the original file bytes, not a reserialized session. No keys are unlocked.
 pub fn auth_session_identity(
     dir: &Path,
@@ -127,6 +205,7 @@ mod tests {
             auth_session_identity(root.path(), |_| "synthetic-digest".to_owned())
         };
         assert!(matches!(read(&session)?, AuthSessionIdentity::Unbound { .. }));
+        assert!(host_session_user_of_dir(root.path(), |_| "synthetic-digest".to_owned())?.is_none());
         let mut changed = session.clone();
         changed["vault_version"] = serde_json::json!(2);
         assert!(read(&changed).is_err());
@@ -141,6 +220,58 @@ mod tests {
             invalid[field] = serde_json::json!(value);
             assert!(read(&invalid).is_err());
         }
+        let receipt_path = root.path().join(".rsrs-migration.json");
+        let receipt = serde_json::json!({"schema":2, "complete":true,
+            "source_identity":"0".repeat(64), "source":root.path().canonicalize()?,
+            "destination":root.path().canonicalize()?, "keyring_backend":"native",
+            "namespace_migrated":true, "original_preserved":true});
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+        for version in 1..=4 {
+            let mut migrated = serde_json::json!({"vault_version":version, "kdf_salt":"salt",
+                "wrapped_urk":"rsrs:v1:wrapped", "urk_nonce":"nonce",
+                "keyring_account":"legacy-0000000000000000", "keyring_backend":"native",
+                "crypto_namespace":"rsrs:v1:"});
+            if version == 1 { migrated["secret"] = serde_json::json!("original-account-secret"); }
+            if version == 3 { migrated["secret_key"] = serde_json::json!("original-secret-key"); }
+            assert!(read(&migrated).is_err());
+            assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_some());
+            assert!(host_session_user_of_dir(root.path(), |_| "digest".to_owned())?.is_none());
+            assert!(session_user_of_dir(root.path()).is_err());
+            let mut prior_namespace = migrated.clone();
+            prior_namespace.as_object_mut().context("migration fixture is not an object")?.remove("crypto_namespace");
+            prior_namespace["wrapped_urk"] = serde_json::json!("original-wrapped");
+            prior_namespace["pass"] = serde_json::json!("ignored-inline-password");
+            prior_namespace["super"] = serde_json::json!("ignored-inline-super");
+            std::fs::write(&path, serde_json::to_vec(&prior_namespace)?)?;
+            let mut copied_receipt = receipt.clone();
+            copied_receipt["namespace_migrated"] = serde_json::json!(false);
+            std::fs::write(&receipt_path, serde_json::to_vec(&copied_receipt)?)?;
+            assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_some());
+            std::fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+            for field in ["token", "session_id"] {
+                let mut invalid = migrated.clone();
+                invalid[field] = serde_json::json!("unexpected");
+                std::fs::write(&path, serde_json::to_vec(&invalid)?)?;
+                assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned()).is_err());
+            }
+            for field in ["pass", "super"] {
+                let mut invalid = migrated.clone();
+                invalid[field] = serde_json::json!(true);
+                std::fs::write(&path, serde_json::to_vec(&invalid)?)?;
+                assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned()).is_err());
+            }
+            migrated["auth_operation_id"] = serde_json::json!("foreign-operation");
+            std::fs::write(&path, serde_json::to_vec(&migrated)?)?;
+            assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_none());
+            assert!(auth_session_identity(root.path(), |_| "digest".to_owned()).is_err());
+        }
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "vault_version":4, "crypto_namespace":"rsrs:v1:", "keyring_account":"local"
+        }))?)?;
+        assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_none());
+        assert!(host_session_user_of_dir(root.path(), |_| "digest".to_owned()).is_err());
+        std::fs::write(&path, br#"{"user":"original-raw-user"}"#)?;
+        assert_eq!(host_session_user_of_dir(root.path(), |_| "digest".to_owned())?, Some("original-raw-user".to_owned()));
         Ok(())
     }
 

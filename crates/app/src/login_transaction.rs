@@ -12,6 +12,8 @@ use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResu
 mod login;
 mod identity;
 pub use identity::{control_identity_write, control_identity_write_result};
+#[cfg(test)]
+mod keygen_existing_protocol;
 mod keys;
 pub use keys::{control_key, control_key_result, control_key_rollback, control_key_complete, verify_key_receipt};
 mod space;
@@ -453,6 +455,31 @@ mod tests {
         database.execute_batch("CREATE TABLE memories(deleted INTEGER); INSERT INTO memories VALUES(0);")?;
         drop(database);
         assert!(keygen_overwrite_guard(&root, None, false).is_err());
+        let original_database = std::fs::read(&database_path)?;
+        assert!(!root.join("session.json").exists());
+        let ownership = AuthOwnership::acquire(&root, &root)?;
+        let refusal_id = uuid::Uuid::new_v4().to_string();
+        let previous_receipts = load_journal()?.operations.len();
+        let refused = control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, false)?;
+        assert_eq!(refused.outcome, HostAuthOutcome::RolledBack);
+        assert!(refused.super_password.is_none());
+        assert!(refused.session_sha256.is_none());
+        let refused_journal = load_journal()?;
+        assert!(refused_journal.active.is_none());
+        assert_eq!(refused_journal.operations.len(), previous_receipts + 1);
+        let record = &refused_journal.operations[previous_receipts];
+        assert!(record.phase == AuthPhase::RolledBack);
+        assert!(record.candidate.is_none() && record.candidate_sha256.is_none() && record.backend.is_none());
+        let receipt_bytes = std::fs::read(recovery_path())?;
+        assert_eq!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, true)?.outcome,
+            HostAuthOutcome::RolledBack);
+        assert_eq!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, false)?.outcome,
+            HostAuthOutcome::RolledBack);
+        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, true, false).is_err());
+        assert_eq!(std::fs::read(recovery_path())?, receipt_bytes);
+        assert_eq!(std::fs::read(&database_path)?, original_database);
+        assert!(!root.join("session.json").exists());
+        drop(ownership);
         keygen_overwrite_guard(&root, None, true)?;
         std::fs::remove_file(&database_path)?;
         std::fs::write(&database_path, b"invalid database")?;
@@ -1244,7 +1271,6 @@ pub fn control_keygen(
     // Retaining receipts is necessary to prevent an old operation ID from rotating keys again.
     ensure!(journal.operations.len() < 4096, "auth receipt capacity reached; existing results remain queryable");
     let original = read_original(&ownership.profile)?;
-    keygen_overwrite_guard(&ownership.profile, original.as_deref(), force)?;
     let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
     let config = match std::fs::read(crate::service::client_config_path()) {
         Ok(bytes) => Some(bytes),
@@ -1259,6 +1285,10 @@ pub fn control_keygen(
         fingerprint, root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
         candidate: None, candidate_sha256: None, alias: alias.clone(), backend: None, phase: AuthPhase::Admitted, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None });
     save_journal(&journal)?;
+    if keygen_overwrite_guard(&ownership.profile, original.as_deref(), force).is_err() {
+        recover_keygen(&mut journal, &ownership.root, &ownership.profile)?;
+        return auth_result(&journal.operations[index]);
+    }
     let mutation = (|| -> Result<()> {
         let (secret, _urk, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
         let mut session = json!({"vault_version":4,"kdf_salt":salt,"wrapped_urk":wrapped,
@@ -1468,6 +1498,7 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
     journal.operations[index].phase = AuthPhase::Authorized;
     save_journal(&journal)?;
     let mut prepared = PreparedLogin::prepare_with_vault_inner(addr, &authorized, secret, vault, None, use_source)?;
+    prepared.login_password = Some(params.password.clone());
     commit_account(ownership, &mut journal, index, &mut prepared)
 }
 
@@ -1504,6 +1535,18 @@ pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIden
     }
     if journal.operations[index].phase == AuthPhase::AwaitingVerification || journal.operations[index].phase == AuthPhase::Committed {
         verify_account_candidate(&journal.operations[index])?;
+    }
+    let account = journal.operations[index].account.as_ref().context("account receipt is missing")?;
+    if journal.operations[index].phase == AuthPhase::AwaitingVerification
+        && account.register && account.vault_pending && !account.published_vault {
+        let authorized = account.authorization.as_ref().context("registration authorization is missing")?;
+        let vault = account.vault.as_ref().filter(|vault| vault.is_object())
+            .context("registration vault is missing")?;
+        // Observe the original publication only. Failed reads and mismatches retain Unknown.
+        if PreparedLogin::fetch_vault(&account.addr, authorized).is_ok_and(|current| current == *vault) {
+            journal.operations[index].account.as_mut().context("account receipt is missing")?.published_vault = true;
+            save_journal(&journal)?;
+        }
     }
     login::resume_import(ownership, &mut journal, index)?;
     login::reconcile_publication(&mut journal, index)?;

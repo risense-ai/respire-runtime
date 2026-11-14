@@ -1407,6 +1407,7 @@ dependencies = [
  "ureq",
  "uuid",
  "whoami",
+ "winsafe",
 ]
 
 [[package]]
@@ -1463,6 +1464,7 @@ dependencies = [
  "clap",
  "hex",
  "respire_app",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "rusqlite",
@@ -1517,6 +1519,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_logging"
+version = "0.1.0-dev.1"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "respire_protocol"
 version = "2.0.0-dev.8"
 dependencies = [
@@ -1527,13 +1536,14 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "1.1.1-dev.1"
+version = "2.0.0-dev.18"
 dependencies = [
  "anyhow",
  "respire_app",
  "respire_client_host",
  "respire_commands",
  "respire_core_sdk",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "serde",
@@ -2513,6 +2523,12 @@ name = "windows_x86_64_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+
+[[package]]
+name = "winsafe"
+version = "0.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d3922ac07e168376bc6799e7896fc737ddb9538be7533ca44bc3463091db1ad"
 
 [[package]]
 name = "wit-bindgen"

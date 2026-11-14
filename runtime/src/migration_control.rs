@@ -38,6 +38,7 @@ impl MigrationRequest {
 
     pub(crate) fn binding(&self) -> &ControlBinding { &self.params.binding }
     pub(crate) fn identity(&self) -> &HostAuthIdentity { &self.params.identity }
+    pub(crate) fn original(&self) -> &HostMigrationOperation { &self.params.original }
 
     pub(crate) fn execute(&self, ownership: &respire_app::login_transaction::AuthOwnership)
         -> Result<HostMigrationResult> {

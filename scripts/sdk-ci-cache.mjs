@@ -12,7 +12,7 @@ export const TARGETS=['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch6
 const required=(ok,message)=>{if(!ok)throw Error(message);};
 export function canonicalEntry(target,input){
  required(TARGETS.includes(target)&&input&&input.private_repository==='risense-ai/respire-core','Only approved private Core SDK targets are accepted');
- const v=input.sdk_version;required(/^(?:1\.0\.2|1\.1\.0)-dev\.[1-9][0-9]*$/.test(v||'')&&input.release_tag===`sdk-v${v}`,'Invalid private SDK tag/version');
+ const v=input.sdk_version;required(/^(?:1\.0\.2|1\.1\.0|2\.0\.0)-dev\.[1-9][0-9]*$/.test(v||'')&&input.release_tag===`sdk-v${v}`,'Invalid private SDK tag/version');
  const base=`https://github.com/risense-ai/respire-core/releases/download/sdk-v${v}/respire-core-sdk-${target}`;
  required(input.url===base+'.manifest.json'&&input.archive_url===base+'.tar.gz'&&/^[a-f0-9]{64}$/.test(input.manifest_sha256||'')&&/^[a-f0-9]{64}$/.test(input.archive_sha256||'')&&input.redistribution==='approved','Invalid SDK cache identity/hash/license');
  // Never forward unknown source-controlled fields into a credential-bearing job.

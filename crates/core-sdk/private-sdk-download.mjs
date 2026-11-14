@@ -31,7 +31,7 @@ async function boundedBytes(response, limit) {
 
 export async function downloadPrivateSdk(entry, target, kind, {env = process.env, transport = fetch} = {}) {
   requireValue(entry.private_repository === REPOSITORY && TARGETS.has(target)
-    && /^(?:1\.0\.2|1\.1\.0)-dev\.[1-9][0-9]*$/.test(entry.sdk_version || '')
+    && /^(?:1\.0\.2|1\.1\.0|2\.0\.0)-dev\.[1-9][0-9]*$/.test(entry.sdk_version || '')
     && entry.release_tag === `sdk-v${entry.sdk_version}` && ['manifest', 'archive'].includes(kind),
   'Invalid private SDK repository/version/target');
   const tag = entry.release_tag, suffix = kind === 'manifest' ? 'manifest.json' : 'tar.gz';

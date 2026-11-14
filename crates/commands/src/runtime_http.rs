@@ -419,8 +419,39 @@ pub fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<BoundRuntim
     Ok(BoundRuntime { server, url })
 }
 
+struct HttpShutdown {
+    requested: tokio::sync::Notify,
+    drained: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+static HTTP_SHUTDOWN: std::sync::OnceLock<HttpShutdown> = std::sync::OnceLock::new();
+
+pub(crate) fn shutdown() -> anyhow::Result<()> {
+    use anyhow::Context;
+    if let Some(shutdown) = HTTP_SHUTDOWN.get() {
+        shutdown.requested.notify_one();
+        shutdown
+            .drained
+            .lock()
+            .map_err(|_| anyhow::anyhow!("HTTP shutdown state poisoned"))?
+            .recv_timeout(crate::network::IO_WAIT)
+            .context("HTTP response drain did not complete")?;
+    }
+    Ok(())
+}
+
 pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
     let bound = server.local_addr()?;
+    let (finished, drained) = std::sync::mpsc::sync_channel(1);
+    HTTP_SHUTDOWN
+        .set(HttpShutdown {
+            requested: tokio::sync::Notify::new(),
+            drained: std::sync::Mutex::new(drained),
+        })
+        .map_err(|_| anyhow::anyhow!("HTTP server already initialized"))?;
+    let shutdown = HTTP_SHUTDOWN
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("HTTP shutdown state unavailable"))?;
     crate::network::runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::from_std(server)?;
         let app = axum::Router::new()
@@ -430,7 +461,13 @@ pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
             crate::network::Listener(listener),
             app.into_make_service_with_connect_info::<crate::network::Peer>(),
         )
-        .await
+        .with_graceful_shutdown(async move { shutdown.requested.notified().await })
+        .await?;
+        finished.send(()).map_err(|_| {
+            std::io::Error::other("HTTP shutdown coordinator unavailable")
+        })?;
+        // The dispatcher must persist the final receipt before terminating the process.
+        std::future::pending::<std::io::Result<()>>().await
     })?;
     Ok(())
 }
