@@ -43,10 +43,12 @@ jobs:
           ACTUAL: ${{ steps.cache.outputs.cache-matched-key }}
         run: test -n "$EXPECTED" && test "$EXPECTED" = "$ACTUAL"
       - name: Build and stage the candidate Runtime
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/aarch64-apple-darwin
         run: |
           node scripts/fetch-core-sdk.mjs aarch64-apple-darwin
           cargo build --locked -p respire_runtime --bin rsrs-runtime
-          RSRS_CORE_SDK_DIR="$GITHUB_WORKSPACE/.sdk/aarch64-apple-darwin" node scripts/stage-core-runtime.mjs target/debug
+          node scripts/stage-core-runtime.mjs target/debug
       - name: Download the official dev.3 fixture and its pinned acceptance script
         env:
           GH_TOKEN: ${{ github.token }}
