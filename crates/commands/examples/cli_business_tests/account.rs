@@ -1772,6 +1772,8 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         let logged_out = execute(&["--json", "logout", "--full"])?;
         assert!(logged_out.status.success(), "{}", String::from_utf8_lossy(&logged_out.stdout));
         assert!(!target.join("session.json").exists());
+        let logged_out_health = runtime_health(runtime_port, "full-logout")?;
+        assert_eq!(logged_out_health["store_ready"], false, "full logout left the database open");
         let recovered = execute(&[
             "--json",
             "login",
