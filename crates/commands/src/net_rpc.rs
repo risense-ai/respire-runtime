@@ -609,7 +609,7 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     let command: Vec<_> = crate::rpc_worker::command_words(args).take(2).collect();
     if matches!(
         command.as_slice(),
-        ["model", "install" | "install-m3" | "activate"]
+        ["model", "activate"]
     ) || command
         .first()
         .is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
@@ -1198,8 +1198,7 @@ mod tests {
             vec!["--model-task-id", "task-one", "import", "synthetic.json"],
             vec!["import", "synthetic.json"],
             vec!["reembed"],
-            vec!["model", "install"],
-            vec!["--json", "--progress-id", "model", "model", "install-m3"],
+            vec!["--json", "--progress-id", "model", "model", "activate", "m3"],
             vec!["model", "--model-task-id", "install", "activate", "m3"],
         ] {
             let parsed = valid_timeout_args(&args);
