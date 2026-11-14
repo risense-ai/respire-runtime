@@ -5,8 +5,12 @@ package host
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -55,7 +59,7 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 			t.Error("cleanup receipt failed")
 		}
 	})
-	// Do not decode, log, or save the keygen output containing recovery material.
+	// Never log or save keygen recovery material; negative unlock probes use it only in memory.
 	requestID := "desktop-41abf107-3eb1-4d89-8acb-4053b1d9f012"
 	job, err := m.Submit("keygen", requestID, nil, true, "")
 	if err != nil {
@@ -254,6 +258,94 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 	}
 	if rejected.Code != "runtime_locked" {
 		t.Fatalf("locked Runtime rejected memory RPC with code %q", rejected.Code)
+	}
+	// Rejections must leave the same encrypted owner locked and its session unchanged.
+	token, err := os.ReadFile(filepath.Join(m.DataRoot, "runtime", "token"))
+	if err != nil || len(bytes.TrimSpace(token)) == 0 {
+		t.Fatal("isolated host token unavailable")
+	}
+	_, lockedRaw, err := m.Health(ctx)
+	var lockedIdentity struct {
+		Instance   string `json:"instance_id"`
+		Generation uint64 `json:"generation"`
+	}
+	if err != nil || json.Unmarshal(lockedRaw, &lockedIdentity) != nil || lockedIdentity.Instance == "" || lockedIdentity.Generation == 0 {
+		t.Fatal("locked owner identity unavailable")
+	}
+	// Keep the synthetic issued key only in memory so each identity rejection uses a valid key.
+	var issued struct {
+		Summary struct {
+			Super string `json:"super"`
+		} `json:"summary"`
+	}
+	if json.Unmarshal(job.Envelope, &issued) != nil || issued.Summary.Super == "" {
+		t.Fatal("synthetic keygen did not return its issued key")
+	}
+	database, err := os.ReadFile(filepath.Join(m.DataRoot, "rsrs.db"))
+	if err != nil {
+		t.Fatal("locked fixture database unavailable")
+	}
+	baseUnlock := map[string]any{"schema_version": 1, "profile": m.DataRoot,
+		"session_sha256": fmt.Sprintf("%x", sha256.Sum256(session)),
+		"instance_id":    lockedIdentity.Instance, "generation": lockedIdentity.Generation,
+		"super_password": issued.Summary.Super}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 20 * time.Second}
+	defer client.CloseIdleConnections()
+	for _, probe := range []struct {
+		name, field   string
+		value         any
+		authenticated bool
+		status        int
+	}{
+		{"missing-host-auth", "", nil, false, http.StatusUnauthorized},
+		{"wrong-key", "super_password", strings.Repeat("ab", 32), true, http.StatusConflict},
+		{"wrong-profile", "profile", filepath.Join(m.DataRoot, "foreign"), true, http.StatusConflict},
+		{"wrong-session", "session_sha256", strings.Repeat("0", 64), true, http.StatusConflict},
+		{"wrong-instance", "instance_id", "foreign-instance", true, http.StatusConflict},
+		{"wrong-generation", "generation", lockedIdentity.Generation + 1, true, http.StatusConflict},
+	} {
+		input := make(map[string]any, len(baseUnlock))
+		for key, value := range baseUnlock {
+			input[key] = value
+		}
+		if probe.field != "" {
+			input[probe.field] = probe.value
+		}
+		body, encodeErr := json.Marshal(input)
+		if encodeErr != nil {
+			t.Fatal("unlock probe encoding failed")
+		}
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodPost,
+			strings.TrimRight(m.Endpoint, "/")+"/api/runtime/unlock", bytes.NewReader(body))
+		if requestErr != nil {
+			t.Fatal("unlock probe request failed")
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if probe.authenticated {
+			request.Header.Set("Authorization", "Bearer "+string(bytes.TrimSpace(token)))
+		}
+		response, sendErr := client.Do(request)
+		if sendErr != nil {
+			t.Fatalf("%s probe transport failed", probe.name)
+		}
+		_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 65537))
+		closeErr := response.Body.Close()
+		if response.StatusCode != probe.status || readErr != nil || closeErr != nil {
+			t.Fatalf("%s did not return its expected rejection", probe.name)
+		}
+		retained, retainedRaw, healthErr := m.Health(ctx)
+		var retainedIdentity struct {
+			Instance   string `json:"instance_id"`
+			Generation uint64 `json:"generation"`
+		}
+		retainedSession, sessionErr := os.ReadFile(filepath.Join(m.DataRoot, "session.json"))
+		retainedDatabase, databaseErr := os.ReadFile(filepath.Join(m.DataRoot, "rsrs.db"))
+		if healthErr != nil || json.Unmarshal(retainedRaw, &retainedIdentity) != nil || retainedIdentity != lockedIdentity ||
+			retained.PID != locked.PID || retained.StoreReady || retained.CredentialState != "required" ||
+			sessionErr != nil || !bytes.Equal(session, retainedSession) ||
+			databaseErr != nil || !bytes.Equal(database, retainedDatabase) {
+			t.Fatalf("%s changed or unlocked the original owner", probe.name)
+		}
 	}
 	if err = m.Start(); err != nil {
 		t.Fatal("Client2 could not supply the stored native credential")
