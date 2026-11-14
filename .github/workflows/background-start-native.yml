@@ -104,7 +104,7 @@ jobs:
               channel='dev', target_triple=target, archive_file=archive.name,
               archive_sha256=digest(archive), binary_file=binary, binary_sha256=digest(payload / binary),
               source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-              compat={'min_cli': '1.0.21-dev.5', 'max_cli': '*'},
+              compat={'min_cli': '2.0.0-dev.11', 'max_cli': '*'},
               protocol_range={'minimum': 1, 'maximum': 1},
               capabilities={'business_executor': '1', 'mcp_server': '1', 'offline_keygen_handoff': '1'}, files=files)
           (root / f'runtime-build-{target}.json').write_text(json.dumps(metadata) + '\n')
