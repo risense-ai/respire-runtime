@@ -32,8 +32,8 @@ and will start producing artifacts as soon as the workspace lands.
 ## Release
 
 Push an unused `vX.Y.Z` (stable) or `vX.Y.Z-dev.N` (developer preview) tag on a
-reviewed `main` commit. The Release workflow builds all seven platform targets,
-runs the full native regression matrix and publishes:
+reviewed `main` commit. The Release workflow builds all eight platform targets,
+runs the native regression matrix and publishes:
 
 - `rsrs-runtime-<triple>` (raw binary, `.exe` on Windows)
 - `rsrs-runtime-<triple>.tar.gz` (binary + `core-runtime.json` manifest + native Core runtime libraries and notices)

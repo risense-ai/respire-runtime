@@ -19,8 +19,8 @@ tag), `publish`, and for non-tag sources the exact `dev_version`
 
 ## What the Release workflow produces
 
-Per platform triple (seven targets: `x86_64`/`aarch64` Linux glibc and musl,
-`aarch64-apple-darwin`, `x86_64`/`aarch64` Windows MSVC):
+Per platform triple (eight targets: `x86_64`/`aarch64` Linux glibc and musl,
+`x86_64-apple-darwin`/`aarch64-apple-darwin`, `x86_64`/`aarch64` Windows MSVC):
 
 | Asset | Content |
 | --- | --- |
@@ -31,7 +31,7 @@ Per platform triple (seven targets: `x86_64`/`aarch64` Linux glibc and musl,
 Consumers map legacy schema 1 by reading `sha256` as `archive_sha256` and
 `triple` as `target_triple`; conflicting aliases are rejected.
 
-Exactly 21 assets per release (three per platform). The tarball extracts to a
+Exactly 24 assets per release (three per platform). The tarball extracts to a
  flat layout: the triple-qualified binary sits at the archive root next to `core-runtime.json`
 and the `runtime/` libraries, matching the managed directory layout that
 `respire-cli` and `respire-client2` both use (`<installation_root>/runtime/<ver>/`).
@@ -40,16 +40,16 @@ and the `runtime/` libraries, matching the managed directory layout that
 
 1. `plan`: tag/version validation (stable tag must match the source version),
    main-ancestry check for published sources.
-2. `build` (7-platform matrix): pinned Core SDK from the exact cache,
+2. `build` (8-platform matrix): pinned Core SDK from the exact cache,
    release build, SDK staging, archive assembly, SHA-256 computation,
    `runtime-build` metadata generation. Windows ARM64 and Linux ARM64 run on
    native ARM hardware runners only.
-3. `native-regression` (7-platform matrix): digest verification of the actual
+3. `native-regression` (8-platform matrix): digest verification of the actual
    artifacts, then a real serve/health/stop smoke of the built binary with the
    `runtime_version` and `runtime_compat` contract checks. After the P2
    migration this job additionally carries the full inference, migration and
    startup-supervision regression suites moved from `respire-cli`.
-4. `publish`: inventory and digest re-verification of all 21 assets, draft
+4. `publish`: inventory and digest re-verification of all 24 assets, draft
    release creation, upload, then publication.
 
 Tag CI runs in its own concurrency group; publication is serialized repo-wide.
