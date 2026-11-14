@@ -297,6 +297,34 @@ mod tests {
         assert!(!recovery_pending());
         assert_eq!(load_journal()?.operations.len(), 2);
 
+        // A serving candidate must pass receipt checks before the host supplies credentials.
+        {
+            let durable_before = std::fs::read(recovery_path())?;
+            let mut locked_journal: Journal = serde_json::from_slice(&serde_json::to_vec(&account_journal)?)?;
+            let record = &mut locked_journal.operations[account_index];
+            let account = record.account.as_mut().context("locked account receipt missing")?;
+            account.target = Some(root.clone());
+            let candidate = serde_json::to_vec(&json!({
+                "user": account.user, "addr": account.addr, "keyring_account": record.alias
+            }))?;
+            record.phase = AuthPhase::AwaitingVerification;
+            record.backend = Some("secret_service".to_owned());
+            record.candidate_sha256 = Some(digest(&candidate));
+            record.candidate = Some(candidate.clone());
+            let active = locked_journal.active.as_mut().context("locked account recovery missing")?;
+            active.directory = root.clone();
+            active.alias = locked_journal.operations[account_index].alias.clone();
+            private_write(&root.join("session.json"), &candidate)?;
+            save_journal(&locked_journal)?;
+            assert!(!auth_recovery_pending()?, "locked account startup required host credentials");
+            assert!(verify_account_candidate(&locked_journal.operations[account_index]).is_err(),
+                "credential-free startup must not prove account material");
+            private_write(&root.join("session.json"), br#"{"user":"changed-owner"}"#)?;
+            assert!(auth_recovery_pending().is_err(), "startup accepted a changed account candidate");
+            std::fs::remove_file(root.join("session.json"))?;
+            private_write(&recovery_path(), &durable_before)?;
+        }
+
         #[cfg(windows)]
         {
             use std::path::{Component, Prefix};
@@ -869,7 +897,8 @@ pub fn auth_recovery_pending() -> Result<bool> {
                 && account.target.as_deref() == Some(active.directory.as_path())
                 && active.directory.canonicalize()? == crate::service::data_dir().canonicalize()?
                 && active.alias == record.alias, "runtime verification does not own the active account candidate");
-            verify_account_candidate(record)?;
+            // Serving starts locked; the host supplies keys before store verification and commit.
+            account_candidate_session(record, true)?;
             return Ok(false);
         }
     }
@@ -1593,6 +1622,12 @@ fn verify_account_material(record: &AuthRecord, require_published: bool) -> Resu
 }
 
 fn account_material_keys(record: &AuthRecord, require_published: bool) -> Result<crate::memory::SessionKeys> {
+    let session = account_candidate_session(record, require_published)?;
+    let backend = record.backend.as_deref().context("account credential checkpoint is missing")?;
+    session_material_keys(&session, &record.alias, backend)
+}
+
+fn account_candidate_session(record: &AuthRecord, require_published: bool) -> Result<Value> {
     let account = record.account.as_ref().context("account receipt is missing")?;
     let target = account.target.as_ref().context("account target is missing")?;
     let bytes = record.candidate.as_deref().context("account candidate is missing")?;
@@ -1602,8 +1637,8 @@ fn account_material_keys(record: &AuthRecord, require_published: bool) -> Result
     ensure!(session["user"].as_str() == Some(account.user.as_str())
         && session["addr"].as_str() == Some(account.addr.as_str())
         && session["keyring_account"].as_str() == Some(record.alias.as_str()), "account candidate identity mismatch");
-    let backend = record.backend.as_deref().context("account credential checkpoint is missing")?;
-    session_material_keys(&session, &record.alias, backend)
+    require_persistent_auth_backend(record.backend.as_deref().context("account credential checkpoint is missing")?)?;
+    Ok(session)
 }
 
 fn session_material_keys(session: &Value, alias: &str, backend: &str) -> Result<crate::memory::SessionKeys> {

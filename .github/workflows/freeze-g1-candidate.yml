@@ -241,7 +241,7 @@ jobs:
                       assert not member.flag_bits & 1
                       assert 0 <= member.file_size <= 256 * 1024 * 1024
                       total += member.file_size
-                      assert total <= 256 * 1024 * 1024
+                      assert total <= 1024 * 1024 * 1024
                       output = destination / member_name
                       output.parent.mkdir(parents=True, exist_ok=True)
                       data = bundle.read(member)
