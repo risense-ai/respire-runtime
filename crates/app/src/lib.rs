@@ -25,6 +25,7 @@ pub use respire_app_domain::embedding;
 pub use respire_app_domain::feedback;
 pub use respire_app_domain::input_error;
 pub use respire_app_domain::keystore;
+pub use respire_app_domain::credential_io;
 pub use respire_app_domain::lock;
 pub use respire_app_domain::memory;
 pub use respire_app_domain::metadata_gate;

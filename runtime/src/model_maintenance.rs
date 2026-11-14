@@ -137,7 +137,7 @@ fn plan(
         }
         ModelMaintenanceKind::UninstallM3 => {
             let directory =
-                std::path::absolute(respire_commands::model_install::install_target_dir(None)?)?;
+                std::path::absolute(respire_commands::model_assets::model_directory()?)?;
             anyhow::ensure!(
                 !directory
                     .to_string_lossy()
@@ -154,7 +154,7 @@ fn plan(
                     for_engine: Some("npu".into()),
                     ..Default::default()
                 };
-                result.preparation = Some(respire_commands::model_install::model_preparation_plan(
+                result.preparation = Some(respire_commands::model_assets::model_preparation_plan(
                     &intent,
                 )?);
                 let (_, dll_size, dll_sha256) =
@@ -219,11 +219,11 @@ pub(crate) fn execute(
         "invalid fixed model maintenance phase/revision"
     );
     crate::startup_identity::authorize_model_control(grant)?;
-    respire_spawn::watch_control_parent()?;
+    crate::host_control::watch_control_parent()?;
     crate::startup_identity::verify_control_binding(&params.binding)?;
     if params.phase == ModelMaintenancePhase::Verify {
-        respire_commands::model_install::enable_backend_probe_host(
-            respire_commands::model_install::BackendProbeHost::PrivateControl);
+        respire_commands::model_assets::enable_backend_probe_host(
+            respire_commands::model_assets::BackendProbeHost::PrivateControl);
     }
     let root = &params.binding.installation_root;
     let profile = &params.binding.profile;
@@ -395,7 +395,7 @@ pub(crate) fn execute(
                     ..Default::default()
                 };
                 receipt.plan.preparation =
-                    Some(respire_commands::model_install::model_preparation_verify(
+                    Some(respire_commands::model_assets::model_preparation_verify(
                         &intent,
                         &preparation.selection_sha256,
                     )?);

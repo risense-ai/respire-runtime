@@ -220,6 +220,25 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
         );
     }
     let path = url.split('?').next().unwrap_or(url.as_str());
+    if path == "/api/runtime/unlock" && method == tiny_http::Method::Post {
+        let expected = crate::net_rpc::read_token().ok().flatten();
+        let supplied = header_value(req, "Authorization");
+        if !req.peer.ip().is_loopback() || expected.as_ref().is_none_or(|token|
+            supplied.strip_prefix("Bearer ") != Some(token.as_str())) {
+            return (401, "application/json", br#"{"error":"unlock requires host authentication"}"#.to_vec());
+        }
+        let mut bytes = Vec::new();
+        if req.as_reader().take(65537).read_to_end(&mut bytes).is_err() || bytes.len() > 65536 {
+            return (400, "application/json", br#"{"error":"invalid unlock request"}"#.to_vec());
+        }
+        let result = serde_json::from_slice::<respire_protocol::credentials::RuntimeUnlock>(&bytes)
+            .map_err(anyhow::Error::from).and_then(crate::rpc_serve::unlock_runtime);
+        return match result {
+            Ok(()) => (200, "application/json", br#"{"store_ready":true}"#.to_vec()),
+            Err(_) => (409, "application/json", serde_json::to_vec(&json!({"error":"runtime_unlock_failed",
+                "store_ready":crate::rpc_serve::store_ready()})).unwrap_or_default()),
+        };
+    }
     if path == "/api/health" && method == tiny_http::Method::Get {
         if crate::legacy_host::health().is_err() {
             return (503, "application/json", br#"{"error":"legacy_host_binding_changed"}"#.to_vec());

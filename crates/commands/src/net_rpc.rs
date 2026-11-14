@@ -123,7 +123,7 @@ fn load_token() -> Option<String> {
     read_token().ok().flatten()
 }
 
-fn read_token() -> Result<Option<String>> {
+pub(crate) fn read_token() -> Result<Option<String>> {
     if let Ok(raw) = respire_app::env::var("RSRS_RPC_TOKEN") {
         let trimmed = raw.trim().to_owned();
         if !trimmed.is_empty() {

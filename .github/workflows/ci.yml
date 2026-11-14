@@ -145,6 +145,13 @@ jobs:
           set -euo pipefail
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-core-sdk.mjs "$target"
+      - name: Check out the independent CLI installer for lifecycle fixtures
+        uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-cli
+          ref: ef9a8cbb3b1a594de1a5e60f1ecca2b5534adfaa
+          path: .fixtures/cli
+          persist-credentials: false
       - name: Prepare official pinned standalone Runtime for lifecycle tests
         id: official-runtime-fixture
         shell: bash
@@ -153,7 +160,7 @@ jobs:
           RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
         run: |
           set -euo pipefail
-          cargo build --locked -p respire_host_frontend --example host-fixture-cli
+          cargo build --locked --manifest-path .fixtures/cli/Cargo.toml -p respire --target-dir target/runtime-fixture-cli
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
@@ -163,14 +170,14 @@ jobs:
           assert.equal(process.env.GITHUB_ACTIONS, 'true');
           assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
           const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
-          const cli = resolve('target/debug/examples/host-fixture-cli');
+          const cli = resolve('target/runtime-fixture-cli/debug/rsrs');
           const env = {...process.env, RSRS_DATA_DIR: root};
           // Keep the test environment intact; only the official installer may download.
           delete env.RSRS_CORE_TEST_MODE;
           const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
-          const pin = JSON.parse(readFileSync('host-frontend/runtime-pin.json', 'utf8'));
+          const pin = JSON.parse(readFileSync('.fixtures/cli/runtime-pin.json', 'utf8'));
           const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime');
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
           const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));

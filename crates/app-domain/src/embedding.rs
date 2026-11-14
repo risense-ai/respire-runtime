@@ -307,9 +307,9 @@ fn embedding_request(request: &Value, selection: &Selection) -> Result<Value> {
     let mut call = agent.post(endpoint);
     match (&backend.keyring_service, &backend.keyring_account) {
         (Some(service), Some(account)) => {
-            let secret = keyring::Entry::new(service, account)?
+            let secret = crate::credential_io::Entry::new(service, account, "native")
                 .get_password()
-                .map_err(|_| anyhow::anyhow!("embedding credential unavailable in OS keyring"))?;
+                .map_err(|_| anyhow::anyhow!("embedding credential must be supplied by the host"))?;
             call = call.set("Authorization", &format!("Bearer {secret}"));
         }
         (None, None) => (),
@@ -331,100 +331,4 @@ fn embedding_request(request: &Value, selection: &Selection) -> Result<Value> {
         "embedding provider response is too large"
     );
     serde_json::from_slice(&bytes).context("invalid embedding provider JSON")
-}
-
-/// Resource downloads are staged and resumable; the active library is never changed.
-pub fn prepare(
-    selection: &Selection,
-    mut progress: impl FnMut(&str, u64, Option<u64>) -> Result<()>,
-) -> Result<()> {
-    selection.validate()?;
-    if selection.backend_profile.backend == "host_transport" {
-        return Ok(());
-    }
-    for resource in [&selection.profile.weights, &selection.profile.tokenizer] {
-        let resource = resource.as_ref().context("resource missing")?;
-        if resource.path.is_file() {
-            // Existing corrupt files are errors, never silently replaced by a download.
-            crate::core_sdk::profiles::verify_resource(resource)?;
-            continue;
-        }
-        let url = resource
-            .download
-            .as_deref()
-            .context("resource missing and no download URL configured")?;
-        validate_url(url)?;
-        let parent = resource.path.parent().context("resource parent missing")?;
-        std::fs::create_dir_all(parent)?;
-        let partial = resource
-            .path
-            .with_extension(format!("{}.part", resource.sha256));
-        let offset = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-        anyhow::ensure!(
-            offset <= resource.size,
-            "partial resource exceeds expected size"
-        );
-        if offset == resource.size {
-            let mut staged = resource.clone();
-            staged.path = partial.clone();
-            crate::core_sdk::profiles::verify_resource(&staged)?;
-            progress(
-                &resource.path.to_string_lossy(),
-                offset,
-                Some(resource.size),
-            )?;
-            std::fs::rename(&partial, &resource.path)?;
-            continue;
-        }
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(10))
-            .timeout_read(std::time::Duration::from_secs(30))
-            .build();
-        let mut call = agent.get(url);
-        if offset > 0 {
-            call = call.set("Range", &format!("bytes={offset}-"));
-        }
-        let response = call
-            .call()
-            .map_err(|_| anyhow::anyhow!("model resource download failed"))?;
-        let resume = offset > 0 && response.status() == 206;
-        if resume {
-            anyhow::ensure!(
-                response
-                    .header("Content-Range")
-                    .is_some_and(|v| v.starts_with(&format!("bytes {offset}-"))),
-                "invalid download Range response"
-            );
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(resume)
-            .truncate(!resume)
-            .open(&partial)?;
-        let mut done = if resume { offset } else { 0 };
-        let mut reader = response.into_reader();
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            progress(&resource.path.to_string_lossy(), done, Some(resource.size))?;
-            let count = reader.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            done += count as u64;
-            anyhow::ensure!(
-                done <= resource.size,
-                "resource download exceeds pinned size"
-            );
-            file.write_all(&buffer[..count])?;
-        }
-        file.sync_all()?;
-        drop(file);
-        let mut staged = resource.clone();
-        staged.path = partial.clone();
-        crate::core_sdk::profiles::verify_resource(&staged)?;
-        progress(&resource.path.to_string_lossy(), done, Some(resource.size))?;
-        std::fs::rename(&partial, &resource.path)?;
-    }
-    Ok(())
 }

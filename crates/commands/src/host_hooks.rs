@@ -1,13 +1,6 @@
-//! Injection point for services that stay in the CLI host binary.
-//!
-//! The shared worker and engine call the accessor functions in this module;
-//! the binary installs the host implementations once at startup through
-//! [`install`]. Unset hooks fall back conservatively (maintenance reported as
-//! not paused, outcome-unknown calls rejected) so shared-crate tests never
-//! need the host wiring and a missing installer can never silently authorize
-//! a lifecycle action.
+//! Runtime admission, lifecycle and transport wiring. CLI installers, update
+//! checks, terminal UI and command dispatch are not hook points in Runtime.
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use anyhow::Result;
@@ -33,27 +26,12 @@ pub struct McpHttpIn {
 /// Loopback HTTP handler result shared by the runtime transport.
 pub type HttpReply = (u16, &'static str, Vec<u8>);
 
-/// Normalised CLI update status (mirror of the host `update_check` report).
-pub struct UpdateStatus {
-    pub current: String,
-    pub latest: String,
-    pub outdated: bool,
-    pub cached: bool,
-}
-
 pub type BackgroundPaused = fn() -> bool;
 pub type CheckDirectAccess = fn() -> Result<()>;
 pub type NoteCredentialAccess = fn(bool);
 pub type ContextChanged = fn();
 pub type CallRuntimeMethod = fn(&str, Vec<String>, bool) -> Result<MethodOutcome>;
-pub type UpdateHint = fn(bool) -> Option<String>;
-pub type UpdateEnabled = fn() -> bool;
-pub type UpdateCheckRun = fn(bool) -> Option<UpdateStatus>;
-pub type MaterializeBin = fn() -> std::result::Result<PathBuf, String>;
 pub type ForegroundProgress = fn(&str) -> anyhow::Result<serde_json::Value>;
-pub type RuntimeBrief = fn() -> Option<(u32, String, String)>;
-pub type HostCommand = fn(&crate::cli_def::Cli) -> Option<anyhow::Result<()>>;
-pub type ExtractTuiRun = fn() -> anyhow::Result<()>;
 pub type RuntimeIsUp = fn() -> bool;
 pub type ChangeProfile = fn(Box<dyn FnOnce() -> anyhow::Result<()> + Send>) -> anyhow::Result<()>;
 pub type ManagedId = fn() -> Option<&'static str>;
@@ -71,14 +49,7 @@ pub struct HostHooks {
     pub note_credential_access: Option<NoteCredentialAccess>,
     pub context_changed: Option<ContextChanged>,
     pub call_runtime_method: Option<CallRuntimeMethod>,
-    pub update_hint: Option<UpdateHint>,
-    pub update_enabled: Option<UpdateEnabled>,
-    pub update_check_run: Option<UpdateCheckRun>,
-    pub materialize_bin: Option<MaterializeBin>,
     pub foreground_progress: Option<ForegroundProgress>,
-    pub runtime_brief: Option<RuntimeBrief>,
-    pub host_command: Option<HostCommand>,
-    pub extract_tui_run: Option<ExtractTuiRun>,
     pub runtime_is_up: Option<RuntimeIsUp>,
     pub change_profile: Option<ChangeProfile>,
     pub managed_id: Option<ManagedId>,
@@ -95,14 +66,7 @@ static CHECK_DIRECT_ACCESS: OnceLock<CheckDirectAccess> = OnceLock::new();
 static NOTE_CREDENTIAL_ACCESS: OnceLock<NoteCredentialAccess> = OnceLock::new();
 static CONTEXT_CHANGED: OnceLock<ContextChanged> = OnceLock::new();
 static CALL_RUNTIME_METHOD: OnceLock<CallRuntimeMethod> = OnceLock::new();
-static UPDATE_HINT: OnceLock<UpdateHint> = OnceLock::new();
-static UPDATE_ENABLED: OnceLock<UpdateEnabled> = OnceLock::new();
-static UPDATE_CHECK_RUN: OnceLock<UpdateCheckRun> = OnceLock::new();
-static MATERIALIZE_BIN: OnceLock<MaterializeBin> = OnceLock::new();
 static FOREGROUND_PROGRESS: OnceLock<ForegroundProgress> = OnceLock::new();
-static RUNTIME_BRIEF: OnceLock<RuntimeBrief> = OnceLock::new();
-static HOST_COMMAND: OnceLock<HostCommand> = OnceLock::new();
-static EXTRACT_TUI_RUN: OnceLock<ExtractTuiRun> = OnceLock::new();
 static RUNTIME_IS_UP: OnceLock<RuntimeIsUp> = OnceLock::new();
 static CHANGE_PROFILE: OnceLock<ChangeProfile> = OnceLock::new();
 static MANAGED_ID: OnceLock<ManagedId> = OnceLock::new();
@@ -122,14 +86,7 @@ pub fn install(hooks: HostHooks) -> bool {
         note_credential_access,
         context_changed,
         call_runtime_method,
-        update_hint,
-        update_enabled,
-        update_check_run,
-        materialize_bin,
         foreground_progress,
-        runtime_brief,
-        host_command,
-        extract_tui_run,
         runtime_is_up,
         change_profile,
         managed_id,
@@ -146,14 +103,7 @@ pub fn install(hooks: HostHooks) -> bool {
         note_credential_access.map(|hook| NOTE_CREDENTIAL_ACCESS.set(hook).is_ok()),
         context_changed.map(|hook| CONTEXT_CHANGED.set(hook).is_ok()),
         call_runtime_method.map(|hook| CALL_RUNTIME_METHOD.set(hook).is_ok()),
-        update_hint.map(|hook| UPDATE_HINT.set(hook).is_ok()),
-        update_enabled.map(|hook| UPDATE_ENABLED.set(hook).is_ok()),
-        update_check_run.map(|hook| UPDATE_CHECK_RUN.set(hook).is_ok()),
-        materialize_bin.map(|hook| MATERIALIZE_BIN.set(hook).is_ok()),
         foreground_progress.map(|hook| FOREGROUND_PROGRESS.set(hook).is_ok()),
-        runtime_brief.map(|hook| RUNTIME_BRIEF.set(hook).is_ok()),
-        host_command.map(|hook| HOST_COMMAND.set(hook).is_ok()),
-        extract_tui_run.map(|hook| EXTRACT_TUI_RUN.set(hook).is_ok()),
         runtime_is_up.map(|hook| RUNTIME_IS_UP.set(hook).is_ok()),
         change_profile.map(|hook| CHANGE_PROFILE.set(hook).is_ok()),
         managed_id.map(|hook| MANAGED_ID.set(hook).is_ok()),
@@ -237,56 +187,11 @@ pub fn call_runtime_method(method: &str, args: Vec<String>, auto_start: bool) ->
     }
 }
 
-/// Cached update hint for maintenance notes, without a network round trip.
-pub fn update_hint(force: bool) -> Option<String> {
-    UPDATE_HINT.get().and_then(|hook| hook(force))
-}
-
-/// Whether the update checker is enabled (registry and RSRS_UPDATE_CHECK).
-pub fn update_enabled() -> bool {
-    UPDATE_ENABLED.get().map(|hook| hook()).unwrap_or(false)
-}
-
-/// Known CLI update status; `None` means "not checked yet".
-pub fn update_check_run(force: bool) -> Option<UpdateStatus> {
-    UPDATE_CHECK_RUN.get().and_then(|hook| hook(force))
-}
-
-/// Materialise the stable MCP stdio binary copy; host-owned installation.
-pub fn materialize_bin() -> std::result::Result<PathBuf, String> {
-    match MATERIALIZE_BIN.get() {
-        Some(hook) => hook(),
-        None => Err("the MCP binary installer is host-managed".to_owned()),
-    }
-}
-
 /// Poll a remote foreground command's progress through the host RPC client.
 pub fn foreground_progress(id: &str) -> anyhow::Result<serde_json::Value> {
     match FOREGROUND_PROGRESS.get() {
         Some(hook) => hook(id),
         None => Err(anyhow::anyhow!("runtime progress is unavailable in this process")),
-    }
-}
-
-/// Pid, web URL and binary version of the resident runtime, if it answers.
-pub fn runtime_brief() -> Option<(u32, String, String)> {
-    RUNTIME_BRIEF.get().and_then(|hook| hook())
-}
-
-/// Route a host-managed command before the shared engine match; `None` lets
-/// the engine arm handle the command.
-pub fn host_command(args: &crate::cli_def::Cli) -> Option<anyhow::Result<()>> {
-    match HOST_COMMAND.get() {
-        Some(hook) => hook(args),
-        None => None,
-    }
-}
-
-/// Open the interactive extract TUI; host-owned terminal UI.
-pub fn extract_tui_run() -> anyhow::Result<()> {
-    match EXTRACT_TUI_RUN.get() {
-        Some(hook) => hook(),
-        None => Err(anyhow::anyhow!("the extract TUI runs in the host terminal")),
     }
 }
 

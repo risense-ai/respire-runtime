@@ -10,18 +10,18 @@ publish = false
 
 [features]
 # Enabled only by app test dependencies to reuse their shared in-memory keyring.
-test-support = []
+test-support = ["dep:keyring"]
 default = ["cpu-owned-ort-experiment"]
 native-fault-tests = ["respire_core_sdk/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]
 
 [dependencies]
+keyring = { version = "3", optional = true, features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
 # WP-3 note: respire_spawn is kept only for snapshot.rs durable file publication.
 # The split plan wants spawn to stay in the CLI repository; snapshot writes need the
 # durable primitives, so the dependency is carried until durable IO is decoupled.
 respire_spawn = { path = "../../spawn" }
 rpassword = "7"
-keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
 base64 = "0.22"
 flate2 = "1.1"
 respire_protocol = { path = "../protocol" }
@@ -42,6 +42,7 @@ uuid = { version = "1.0", features = ["v4"] }
 whoami = "2.1"
 
 [dev-dependencies]
+keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }
 tempfile = "3.15"
 
 [lints.rust]

@@ -34,11 +34,6 @@ pub use process_identity::{
     process_birth, process_identity, runtime_process_identity, terminate_runtime, ProcessIdentity,
 };
 
-#[cfg(windows)]
-mod winml;
-#[cfg(windows)]
-pub use winml::{install_accelerators, replace_provider_manifest};
-
 /// Short-lived host service-manager clients must not retain the calling CLI's
 /// unrelated inheritable output handles on Windows or open a console window.
 pub fn spawn_host_control(command: &mut Command) -> io::Result<std::process::Child> {

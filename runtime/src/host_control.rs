@@ -730,7 +730,7 @@ fn receive_and_execute(
     }.map_err(|_| ("unauthorized", "host control launch authorization failed"))?;
     // Read both frames before letting the watcher own stdin. No further request
     // or argv dispatch is accepted; EOF/extra bytes revoke this read-only child.
-    respire_spawn::watch_control_parent()
+    watch_control_parent()
         .map_err(|_| ("unauthorized", "host control parent watch failed"))?;
     verify_binding(&params.binding)
         .map_err(|_| ("scope_mismatch", "host control binding does not match consumed grant"))?;
@@ -740,8 +740,8 @@ fn receive_and_execute(
         response.envelope = Some(ResultEnvelope::new(command, Status::Pending, serde_json::json!({}), Vec::new()));
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
         if model_verify {
-            respire_commands::model_install::enable_backend_probe_host(
-                respire_commands::model_install::BackendProbeHost::PrivateControl);
+            respire_commands::model_assets::enable_backend_probe_host(
+                respire_commands::model_assets::BackendProbeHost::PrivateControl);
             // Only the authenticated Paused operation can extend the initial input deadline.
             events.send(ControlEvent::LongControlStarted)
                 .map_err(|_| ("control_unavailable", "model verification controller unavailable"))?;
@@ -749,10 +749,10 @@ fn receive_and_execute(
         let model = model_params.as_ref()
             .ok_or(("invalid_request", "model preparation parameters missing"))?;
         let plan = if model_verify {
-            respire_commands::model_install::model_preparation_verify(&model.intent,
+            respire_commands::model_assets::model_preparation_verify(&model.intent,
                 model.selection_sha256.as_deref()
                     .ok_or(("invalid_request", "model preparation selection digest missing"))?)
-        } else { respire_commands::model_install::model_preparation_plan(&model.intent) }
+        } else { respire_commands::model_assets::model_preparation_plan(&model.intent) }
             .map_err(|_| ("model_plan_unavailable", "selected model preparation status unavailable"))?;
         verify_binding(&params.binding)
             .map_err(|_| ("scope_mismatch", "host control identity changed during model planning"))?;
@@ -792,17 +792,13 @@ fn receive_and_execute(
 }
 
 fn watch_auth_parent(events: mpsc::SyncSender<ControlEvent>) -> std::io::Result<()> {
-    std::thread::Builder::new().name("auth-control-parent".into()).spawn(move || {
-        let mut input = std::io::stdin();
-        let mut byte = [0u8; 1];
-        loop {
-            match input.read(&mut byte) {
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                _ => { let _ = events.send(ControlEvent::ParentRevoked); break; }
-            }
-        }
-    })?;
-    Ok(())
+    respire_app::credential_io::watch_parent(move || {
+        let _ = events.send(ControlEvent::ParentRevoked);
+    })
+}
+
+pub(crate) fn watch_control_parent() -> std::io::Result<()> {
+    respire_app::credential_io::watch_parent(|| std::process::exit(2))
 }
 
 pub(crate) fn validate_auth_request(request: &RpcRequest) -> std::result::Result<HostAuthKeygenParams, ControlFailure> {

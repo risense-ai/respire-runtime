@@ -56,7 +56,6 @@ pub fn is_write_command(c: &Command) -> bool {
             | Command::RetitleMany { .. }
             | Command::Snapshot { cmd: SnapshotCmd::Restore { .. } | SnapshotCmd::ResumeSync { .. } | SnapshotCmd::Recover { .. } }
             | Command::SyncReset
-            | Command::Doctor { fix: true, .. }
             | Command::SyncResolve { .. }
             | Command::SyncRestore { .. }
     )
@@ -91,13 +90,13 @@ pub fn is_off_allowed(c: &Command) -> bool {
     matches!(
         c,
         // Self-restore and inject (the only way out of off)
-        Command::AgentConfig { .. } | Command::Inject { .. }
+        Command::AgentConfig { .. }
         // Status and doctor
-        | Command::Status | Command::MemoryRevision | Command::Capabilities | Command::UpdateCheck { .. }
+        | Command::Status | Command::MemoryRevision | Command::Capabilities
         | Command::Extract { targets: true, .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
-        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
-        | Command::Plugin { .. } | Command::Config { .. }
+        | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
+        | Command::Config { .. }
         // Sync reads and writes memory, so it is paused while disabled.
         // Identity / account / credentials / space admin
         | Command::Login { .. } | Command::Logout { .. } | Command::Register { .. }

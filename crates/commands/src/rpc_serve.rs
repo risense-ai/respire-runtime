@@ -220,7 +220,32 @@ pub static RUNNING: AtomicUsize = AtomicUsize::new(0);
 static RUNNING_STATUS: AtomicUsize = AtomicUsize::new(0);
 pub static LIGHT_RUNNING: AtomicUsize = AtomicUsize::new(0);
 pub static WORKERS: AtomicUsize = AtomicUsize::new(1);
-static STORE_READY: AtomicBool = AtomicBool::new(false);
+static STORE_READY: AtomicBool = AtomicBool::new(cfg!(test));
+
+pub(crate) fn store_ready() -> bool {
+    STORE_READY.load(Ordering::Acquire)
+}
+
+/// The HTTP transport authenticates this separate endpoint before parsing secrets.
+/// Unlock input never enters operation journals, progress, argv or result caches.
+pub(crate) fn unlock_runtime(input: respire_protocol::credentials::RuntimeUnlock) -> Result<()> {
+    {
+        let _scope = SCOPE_EXECUTION.write().map_err(|_| anyhow::anyhow!("identity fence poisoned"))?;
+        anyhow::ensure!(!STOPPING.load(Ordering::Acquire)
+            && input.instance_id == process_identity().instance_id
+            && input.generation == crate::rpc_worker::wire_generation(), "unlock runtime scope mismatch");
+        anyhow::ensure!(!respire_app::service::off_mode(), "runtime service is disabled");
+        respire_app::auth::supply_runtime_session(input)?;
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while !store_ready() {
+        anyhow::ensure!(!STOPPING.load(Ordering::Acquire) && Instant::now() < until,
+            "runtime unlock did not reach library readiness");
+        respire_app::auth::load_local_session()?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
 static SNAPSHOT_BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
 pub static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
 static DISPATCH_THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
@@ -582,7 +607,7 @@ fn start_profile_switch_target(
             store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"prepare"}))?)?;
             check_sync_context(epoch)?;
             crate::model_progress::check()?;
-            crate::model_install::verify_selection_assets(&target)?;
+            crate::model_assets::verify_selection_assets(&target)?;
             check_sync_context(epoch)?;
             crate::model_progress::check()?;
             target.generation = respire_app::core_sdk::profiles::generation_key_for_profile(&target)?;
@@ -719,7 +744,7 @@ fn flight_loop() {
                     FLIGHT_ON.store(false, Ordering::Release);
                     return;
                 }
-                if crate::host_hooks::background_paused() {
+                if !store_ready() || crate::host_hooks::background_paused() {
                     state = SYNC_CV
                         .wait_timeout(state, Duration::from_millis(250))
                         .unwrap_or_else(|e| e.into_inner())
@@ -1068,6 +1093,13 @@ fn dispatch_inner(request: RpcRequest, tx: &Sender<Job>, legacy: bool) -> RpcRes
     if let Err((code, error)) = validate_request_scope(&request) {
         return error_response(&request, &code, &error);
     }
+    if !STORE_READY.load(Ordering::Acquire)
+        && !(request.method == "cli.exec" && command_name(&request.args) == Some("status"))
+        && !matches!(request.method.as_str(), "runtime.status" | "runtime.stop" | "runtime.result"
+            | "cli.progress" | "model.progress")
+    {
+        return error_response(&request, "runtime_locked", "supply private key material from the CLI or Client2 before accessing the library");
+    }
     if matches!(request.method.as_str(), "model.prepare" | "index.prepare")
         && crate::host_hooks::background_paused()
     {
@@ -1301,9 +1333,7 @@ fn dispatch_inner(request: RpcRequest, tx: &Sender<Job>, legacy: bool) -> RpcRes
             }
         }
         "model.prepare" => {
-            let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
             let result = (|| -> Result<RpcResponse> {
-                crate::model_install::validate_mirror(mirror)?;
                 anyhow::ensure!(!respire_app::service::service_paused(), "model preparation is paused by service mode");
                 let operation = operation.as_ref().context("model preparation requires an operation")?;
                 let mut response = status_response(&request);
@@ -1373,7 +1403,7 @@ fn dispatch_inner(request: RpcRequest, tx: &Sender<Job>, legacy: bool) -> RpcRes
             ));
             response
         }
-        "assets.status" => match crate::model_install::assets_status() {
+        "assets.status" => match crate::model_assets::assets_status() {
             Ok(status) => match serde_json::to_value(status) {
                 Ok(value) => {
                     let mut response = status_response(&request);
@@ -1743,7 +1773,7 @@ fn run_prepare(prepare: PrepareJob) {
         let _task = crate::model_progress::TaskScope::new(Some(operation_id.clone()));
         operation.enter_thread();
         crate::model_progress::check()?;
-        crate::model_install::verify_m3_assets()?;
+        crate::model_assets::verify_m3_assets()?;
         crate::model_progress::check()?;
         Ok(crate::output_state::Captured {
             exit: 0,
@@ -1989,6 +2019,7 @@ fn health_state() -> &'static str {
         "maintenance_requested" | "draining" => "draining",
         "resources_closing" | "forced_timeout" | "compatibility_timeout" => "stopping",
         "drained" => "stopped",
+        "running" if !store_ready() => "locked",
         "running" => "ready",
         other => other,
     }
@@ -2214,6 +2245,9 @@ pub fn handle_http_rpc_deferred(
 }
 
 fn inference_health_status() -> Value {
+    if !store_ready() {
+        return json!({"state":"locked","reason":"host_key_required"});
+    }
     match respire_app::memory::onnx::inference_status() {
         Ok(status) => status,
         Err(error) => json!({"state":"error","error":format!("{error:#}")}),
@@ -2285,7 +2319,7 @@ pub fn health_body() -> Value {
         "generation": crate::rpc_worker::wire_generation(),
         "protocol_range": {"minimum": PROTOCOL_V, "maximum": PROTOCOL_V},
         "capabilities": ["business_executor", "mcp_server"],
-        "credential_state": crate::host_hooks::credential_state(),
+        "credential_state": if STORE_READY.load(Ordering::Acquire) { "available" } else { "required" },
         "snapshot_restore_id": SNAPSHOT_BOOT_ID.lock().ok().and_then(|slot|slot.clone()),
         "recall_statistics": recall_stats_status(),
         "retrieval_index": index_status(),
@@ -2642,7 +2676,7 @@ fn dispatch_loop_inner(
     respire_app::core_sdk::worker::enable();
     // Keep WAL open across requests: closing the last connection can briefly lock
     // a concurrent opener during checkpoint/cleanup, even for read-only status.
-    let mut _store = if respire_app::service::off_mode() {
+    let mut _store = if respire_app::service::off_mode() || respire_app::auth::load_local_session().is_err() {
         None
     } else {
         Some(match respire_app::service::open_runtime_store(&_lock) {
@@ -2847,6 +2881,22 @@ fn dispatch_loop_inner(
         if STOPPING.load(Ordering::Acquire) {
             break;
         }
+        if _store.is_none() && !respire_app::service::off_mode()
+            && respire_app::auth::load_local_session().is_ok()
+        {
+            match respire_app::service::open_runtime_store(&_lock) {
+                Ok((store, snapshot_id)) => {
+                    if let Ok(mut slot) = SNAPSHOT_BOOT_ID.lock() { *slot = snapshot_id; }
+                    _store = Some(store);
+                    STORE_READY.store(true, Ordering::Release);
+                    context_changed();
+                }
+                Err(error) => {
+                    eprintln!("runtime library initialization after unlock failed: {error:#}");
+                    let _ = respire_app::auth::clear_runtime_session();
+                }
+            }
+        }
         match receive_dispatch_job(&rx, Duration::from_millis(10)) {
             Ok(job) => {
                 if job.stop {
@@ -2889,7 +2939,7 @@ fn dispatch_loop_inner(
                         let _ = job.reply.send(captured);
                         continue;
                     }
-                } else if _store.is_none()
+                } else if _store.is_none() && respire_app::auth::load_local_session().is_ok()
                     && !matches!(
                         command_name(&job.args),
                         Some("agent-config" | "memory-revision")
@@ -3107,6 +3157,10 @@ fn dispatch_loop_inner(
         set_control_state("resources_closing");
     }
     STORE_READY.store(false, Ordering::Release);
+    if let Err(error) = respire_app::auth::clear_runtime_session() {
+        eprintln!("runtime session cleanup failed: {error:#}");
+        clean = false;
+    }
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
         eprintln!("Core worker shutdown failed: {error:#}");
         set_control_state("failed");
