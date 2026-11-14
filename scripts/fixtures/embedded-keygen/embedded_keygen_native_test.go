@@ -242,8 +242,14 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 		t.Fatal("direct restart did not remain locked")
 	}
 	rejected, err := m.rpcResponse(ctx, "cli.exec", []string{"--json", "recall", "host-owned-native"}, "native-locked-read")
-	if err != nil || rejected.OK || rejected.Code != "runtime_locked" {
+	if err != nil {
+		t.Fatal("locked Runtime rejection probe failed before a valid RPC reply")
+	}
+	if rejected.OK {
 		t.Fatal("locked Runtime accepted memory RPC")
+	}
+	if rejected.Code != "runtime_locked" {
+		t.Fatalf("locked Runtime rejected memory RPC with code %q", rejected.Code)
 	}
 	if err = m.Start(); err != nil {
 		t.Fatal("Client2 could not supply the stored native credential")
