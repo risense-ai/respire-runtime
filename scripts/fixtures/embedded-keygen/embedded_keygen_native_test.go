@@ -28,7 +28,21 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
   if os.WriteFile(filepath.Join(m.DataRoot,"native-runtime-stopped"),[]byte("confirmed"),0600) != nil { t.Error("cleanup receipt failed") }
  })
  // Do not decode, log, or save the keygen output containing recovery material.
- if _, err = m.hostOperation(ctx, []string{"keygen"}, "", "", ""); err != nil { t.Fatal("managed keygen failed") }
+ requestID := "desktop-41abf107-3eb1-4d89-8acb-4053b1d9f012"
+ job, err := m.Submit("keygen", requestID, nil, true, ""); if err != nil { t.Fatal("managed keygen submission failed") }
+ for job.State == "running" {
+  select { case <-ctx.Done(): t.Fatal("managed keygen receipt timeout"); case <-time.After(100*time.Millisecond): }
+  job, err = m.Operation(requestID); if err != nil { t.Fatal("managed keygen receipt unavailable") }
+ }
+ if job.State != "done" || job.ID != requestID || job.Finished == nil || envelopeError(job.Envelope) != nil { t.Fatal("managed keygen receipt failed") }
+ repeated, err := m.Submit("keygen", requestID, nil, true, "")
+ if err != nil || repeated.State != "done" || !bytes.Equal(repeated.Envelope,job.Envelope) { t.Fatal("completed request was not retained") }
+ saved, err := os.ReadFile(filepath.Join(m.Root,"requests.json")); if err != nil { t.Fatal("managed keygen receipt not persisted") }
+ var records []operationRecord
+ if json.Unmarshal(saved,&records) != nil { t.Fatal("managed keygen receipt invalid") }
+ found := false
+ for _, record := range records { if record.ID == requestID && record.State == "done" { found = true } }
+ if !found { t.Fatal("completed keygen request absent from operation records") }
  pending := filepath.Join(m.DataRoot,"runtime","autostart","offline-keygen.json")
  before, err := os.ReadFile(pending); if err != nil { t.Fatal("original operation not persisted") }
  var original struct { Operation string `json:"operation_id"`; Stage string `json:"stage"` }
