@@ -3557,7 +3557,7 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
 pub fn run_local(args: Cli) -> Result<()> {
     respire_app::service::validate_client_config()?;
     set_json_mode(args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
-    if rpc::worker_active() && !rpc::store_ready() && matches!(args.command, Some(Command::Status)) {
+    if rpc::worker_active() && !crate::rpc_serve::store_ready() && matches!(args.command, Some(Command::Status)) {
         let mut result = ResultEnvelope::new("status", OutputStatus::Warn, serde_json::json!({
             "workspace":respire_app::service::workspace_mode(), "unlocked":false,
             "credential_state":"required", "store_ready":false,
@@ -6125,7 +6125,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             emit_result(result)?;
         }
         Command::V => unreachable!("version is printed before run_local work"),
-        Command::Mcp => unreachable!("mcp is served before run_local"),
         Command::Passport => {
             return run_passport();
         }

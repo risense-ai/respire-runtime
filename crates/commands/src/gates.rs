@@ -95,7 +95,7 @@ pub fn is_off_allowed(c: &Command) -> bool {
         | Command::Status | Command::MemoryRevision | Command::Capabilities
         | Command::Extract { targets: true, .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
-        | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
+        | Command::V | Command::ClassifyConfig { .. }
         | Command::Config { .. }
         // Sync reads and writes memory, so it is paused while disabled.
         // Identity / account / credentials / space admin
