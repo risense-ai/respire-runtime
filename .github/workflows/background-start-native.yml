@@ -22,7 +22,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RUNTIME_TARGET: ${{ matrix.target }}
     steps:
@@ -136,6 +136,31 @@ jobs:
           else
             "${command[@]}"
           fi
+      - name: Build the existing controlled-service account harness
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cargo test --locked -p respire_commands --example cli_business_tests --no-run --message-format=json > "$RUNNER_TEMP/paired-account-harness.jsonl"
+      - name: Exercise account authorization and sync with the exact paired sources
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          harness="$(python3 - <<'PYHARNESS'
+          import json,os,pathlib
+          records=[json.loads(line) for line in (pathlib.Path(os.environ['RUNNER_TEMP'])/'paired-account-harness.jsonl').read_text().splitlines()]
+          binaries=[record['executable'] for record in records if record.get('reason')=='compiler-artifact'
+            and record.get('target',{}).get('name')=='cli_business_tests'
+            and record.get('profile',{}).get('test') is True and record.get('executable')]
+          assert len(binaries)==1
+          print(binaries[0])
+          PYHARNESS
+          )"
+          python3 .cli-source/scripts/native-account-candidate.py \
+            --root "$RUNNER_TEMP/paired-account-business" --cli-source .cli-source --runtime-source . \
+            --cli-sha "$(git -C .cli-source rev-parse HEAD)" --runtime-sha "$(git rev-parse HEAD)" \
+            --cli .cli-source/target/debug/rsrs \
+            --runtime "$RUNNER_TEMP/joint-candidate-payload/rsrs-runtime-$RUNTIME_TARGET" \
+            --harness "$harness" --suite account
       - name: Download the official issue 285 macOS baseline
         if: runner.os == 'macOS'
         env:
@@ -167,5 +192,6 @@ jobs:
             ${{ runner.temp }}/native-host-credentials.json
             ${{ runner.temp }}/runtime-build-${{ matrix.target }}.json
             ${{ runner.temp }}/issue-285/upgrade-report.json
+            ${{ runner.temp }}/paired-account-business/result.json
           if-no-files-found: warn
           retention-days: 1
