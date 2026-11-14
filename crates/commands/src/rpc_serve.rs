@@ -1068,6 +1068,17 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     crate::runtime_http::serve_loop(bound.server)
 }
 
+fn locked_response(request: &RpcRequest) -> Option<RpcResponse> {
+    if !STORE_READY.load(Ordering::Acquire)
+        && !(request.method == "cli.exec" && command_name(&request.args) == Some("status"))
+        && !matches!(request.method.as_str(), "runtime.status" | "runtime.stop" | "runtime.result"
+            | "cli.progress" | "model.progress")
+    {
+        return Some(error_response(request, "runtime_locked", "supply private key material from the CLI or Client2 before accessing the library"));
+    }
+    None
+}
+
 pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
     if request.v != PROTOCOL_V {
         return error_response(
@@ -1089,12 +1100,8 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
     if let Err((code, error)) = validate_request_scope(&request) {
         return error_response(&request, &code, &error);
     }
-    if !STORE_READY.load(Ordering::Acquire)
-        && !(request.method == "cli.exec" && command_name(&request.args) == Some("status"))
-        && !matches!(request.method.as_str(), "runtime.status" | "runtime.stop" | "runtime.result"
-            | "cli.progress" | "model.progress")
-    {
-        return error_response(&request, "runtime_locked", "supply private key material from the CLI or Client2 before accessing the library");
+    if let Some(response) = locked_response(&request) {
+        return response;
     }
     if matches!(request.method.as_str(), "model.prepare" | "index.prepare")
         && crate::host_hooks::background_paused()
@@ -1558,6 +1565,10 @@ pub fn dispatch_deferred(
     }
     if let Err((code, error)) = validate_request_scope(&request) {
         action(error_response(&request, &code, &error));
+        return;
+    }
+    if let Some(response) = locked_response(&request) {
+        action(response);
         return;
     }
     if request.method == "cli.exec"
