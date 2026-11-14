@@ -158,7 +158,7 @@ jobs:
           PYHARNESS
           )"
           python3 .cli-source/scripts/native-account-candidate.py \
-            --root "$RUNNER_TEMP/paired-account-business" --cli-source .cli-source --runtime-source . \
+            --root "$RUNNER_TEMP/paired-account-business" --cli-source "$PWD/.cli-source" --runtime-source "$PWD" \
             --cli-sha "$(git -C .cli-source rev-parse HEAD)" --runtime-sha "$(git rev-parse HEAD)" \
             --cli .cli-source/target/debug/rsrs \
             --runtime "$RUNNER_TEMP/joint-candidate-payload/rsrs-runtime-$RUNTIME_TARGET" \
@@ -185,24 +185,6 @@ jobs:
             --candidate-runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
             --candidate-runtime-version "$version" \
             --m3-dir "$RUNNER_TEMP/offline-keygen-models" --root "$RUNNER_TEMP/issue-285"
-      - name: Report allowlisted account fixture startup diagnostics
-        if: always() && runner.os == 'Linux'
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'paired-account-business'
-          log = root / 'private.log'
-          captured = log.read_bytes() if log.is_file() else b''
-          markers = [b'ModuleNotFoundError', b'ImportError', b'FileNotFoundError',
-                     b'PermissionError', b'fixture_root_not_fresh',
-                     b'disposable_hosted_runner_required', b'fixture_path_outside_runner_temp',
-                     b'private_fixture_session_bus_required', b'dbus-run-session:']
-          result = {'private_log_present': log.is_file(),
-                    'keyring_report_present': (root / 'keyring/business-keyring-selftest.json').is_file(),
-                    'setup_codes': [marker.decode().rstrip(':') for marker in markers if marker in captured]}
-          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'paired-account-setup.json').write_text(json.dumps(result) + '\n')
-          print(json.dumps(result))
-          PY
       - name: Preserve joint candidate results (not G1 evidence)
         if: always()
         uses: actions/upload-artifact@v4
@@ -213,6 +195,5 @@ jobs:
             ${{ runner.temp }}/runtime-build-${{ matrix.target }}.json
             ${{ runner.temp }}/issue-285/upgrade-report.json
             ${{ runner.temp }}/paired-account-business/result.json
-            ${{ runner.temp }}/paired-account-setup.json
           if-no-files-found: warn
           retention-days: 1
