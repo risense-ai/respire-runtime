@@ -17,7 +17,12 @@ Boundaries in one sentence each:
   links the closed-source Core; `respire-cli` has no Core link, no
   private-sdk-cache and no native regression matrix.
 - runtime = core capability + RPC; every install, download, registration and
-  configuration entry point lives in the CLI.
+  configuration entry point lives in the CLI. Built-in model profiles pinned
+  inside the runtime (for example the Granite entries in
+  `crates/app-domain/src/embedding.rs`) are host-owned configuration data: they
+  declare expected paths, sizes, SHA-256 digests and immutable download URLs for
+  the CLI's asset plan, and registering them never downloads or installs
+  anything in the runtime.
 
 ## Cross-repository pins
 

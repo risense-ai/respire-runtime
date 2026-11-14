@@ -1,0 +1,66 @@
+{
+  "granite-97m-r2": {
+    "id": "granite-97m-r2",
+    "embedding": {
+      "model_id": "ibm-granite/granite-embedding-97m-multilingual-r2",
+      "revision": "835ad14087e140460703cf0fae09f97d469d65c2",
+      "dimensions": 384,
+      "max_tokens": 32768,
+      "pooling": "cls",
+      "normalize": true,
+      "query_prefix": "",
+      "document_prefix": "",
+      "pad_token_id": 179935,
+      "pad_to_max_tokens": false
+    },
+    "onnx": {
+      "input_ids": "input_ids",
+      "attention_mask": "attention_mask",
+      "output": "last_hidden_state"
+    },
+    "weights": {
+      "path": "~/.rsrs/models/granite-97m-r2/onnx/model.onnx",
+      "size": 390004608,
+      "sha256": "68e592b160673d30250824c1116bc6ab33f70efb22b97c9e1d7ce1e69c1c9d70",
+      "download": "https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2/resolve/835ad14087e140460703cf0fae09f97d469d65c2/onnx/model.onnx"
+    },
+    "tokenizer": {
+      "path": "~/.rsrs/models/granite-97m-r2/tokenizer.json",
+      "size": 25301672,
+      "sha256": "4f2842d568e2724370aec203652a42ac783c7937f8347a1a2cc7506d71f1582f",
+      "download": "https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2/resolve/835ad14087e140460703cf0fae09f97d469d65c2/tokenizer.json"
+    }
+  },
+  "granite-311m-r2": {
+    "id": "granite-311m-r2",
+    "embedding": {
+      "model_id": "ibm-granite/granite-embedding-311m-multilingual-r2",
+      "revision": "44399559930365213510b1ee2eb15ded83374f0e",
+      "dimensions": 768,
+      "max_tokens": 32768,
+      "pooling": "cls",
+      "normalize": true,
+      "query_prefix": "",
+      "document_prefix": "",
+      "pad_token_id": 0,
+      "pad_to_max_tokens": false
+    },
+    "onnx": {
+      "input_ids": "input_ids",
+      "attention_mask": "attention_mask",
+      "output": "last_hidden_state"
+    },
+    "weights": {
+      "path": "~/.rsrs/models/granite-311m-r2/onnx/model_quint8_avx2.onnx",
+      "size": 313421909,
+      "sha256": "f1fdd44e7e1ac51f12ab7957c7bd092e064d596c288513bf9d326842f669edee",
+      "download": "https://huggingface.co/ibm-granite/granite-embedding-311m-multilingual-r2/resolve/44399559930365213510b1ee2eb15ded83374f0e/onnx/model_quint8_avx2.onnx"
+    },
+    "tokenizer": {
+      "path": "~/.rsrs/models/granite-311m-r2/tokenizer.json",
+      "size": 33384821,
+      "sha256": "0087c868b33bad550a78a08d19798cfd7f713cde4f020803b8f51f405503e15f",
+      "download": "https://huggingface.co/ibm-granite/granite-embedding-311m-multilingual-r2/resolve/44399559930365213510b1ee2eb15ded83374f0e/tokenizer.json"
+    }
+  }
+}

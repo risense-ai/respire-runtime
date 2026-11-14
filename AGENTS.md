@@ -26,6 +26,11 @@
 - This repository never downloads models, engines or any host asset at runtime.
   Missing assets are reported (`health.inference.state`, `assets.status`); the CLI owns
   installation. Do not add download/installer/self-update/self-registration code here.
+  Built-in model profiles (for example the Granite entries in
+  `crates/app-domain/src/embedding.rs`) are host-owned configuration data: they pin
+  expected paths, sizes, SHA-256 digests and immutable Hugging Face URLs so the CLI's
+  asset plan can install them. Registering a pin never downloads, installs or activates
+  anything by itself; the boundary above still holds.
 - The RPC contract lives only in `crates/protocol` (published as `respire-protocol`).
   Never fork protocol types in another crate; bump and publish the crate instead.
 - `PROTOCOL_V` stays a hard gate: a mismatch fails fast with `protocol_version_mismatch`.
