@@ -149,33 +149,11 @@ fn mcp_http(
 }
 
 fn dispatch_rpc(body: &[u8], action: impl FnOnce(crate::rpc_serve::RpcResponse) + Send + 'static) -> anyhow::Result<()> {
-    match crate::legacy_host::prepare(body)? {
-        Some((request, projection)) => crate::rpc_serve::handle_http_legacy_deferred(request,
-            move |response| action(crate::legacy_host::project(response, projection))),
-        None => crate::rpc_serve::handle_http_rpc_deferred(body, action),
-    }
+    crate::rpc_serve::handle_http_rpc_deferred(body, action)
 }
 fn dispatch_rpc_sync(body: &[u8]) -> anyhow::Result<crate::rpc_serve::RpcResponse> {
-    match crate::legacy_host::prepare(body)? {
-        Some((request, projection)) => Ok(crate::legacy_host::project(
-            crate::rpc_serve::handle_http_legacy(request)?, projection)),
-        None => crate::rpc_serve::handle_http_rpc(body),
-    }
+    crate::rpc_serve::handle_http_rpc(body)
 }
-fn legacy_host_headers(headers: &axum::http::HeaderMap) -> anyhow::Result<()> {
-    for (name, required) in [("host", true), ("origin", false)] {
-        let mut values = headers.get_all(name).iter();
-        let first = values.next();
-        anyhow::ensure!(!required || first.is_some(), "legacy_host_header_rejected");
-        anyhow::ensure!(values.next().is_none(), "legacy_host_header_rejected");
-        if let Some(value) = first {
-            tiny_http::Header::from_bytes(name, value.as_bytes())
-                .map_err(|_| anyhow::anyhow!("legacy_host_header_rejected"))?;
-        }
-    }
-    Ok(())
-}
-
 
 fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static str, Vec<u8>) {
     let url = req.url().to_owned();
@@ -220,13 +198,26 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
         );
     }
     let path = url.split('?').next().unwrap_or(url.as_str());
+    if path == "/api/runtime/unlock" && method == tiny_http::Method::Post {
+        let expected = crate::net_rpc::read_token().ok().flatten();
+        let supplied = header_value(req, "Authorization");
+        if !req.peer.ip().is_loopback() || expected.as_ref().is_none_or(|token|
+            supplied.strip_prefix("Bearer ") != Some(token.as_str())) {
+            return (401, "application/json", br#"{"error":"unlock requires host authentication"}"#.to_vec());
+        }
+        let mut bytes = Vec::new();
+        if req.as_reader().take(65537).read_to_end(&mut bytes).is_err() || bytes.len() > 65536 {
+            return (400, "application/json", br#"{"error":"invalid unlock request"}"#.to_vec());
+        }
+        let result = serde_json::from_slice::<respire_protocol::credentials::RuntimeUnlock>(&bytes)
+            .map_err(anyhow::Error::from).and_then(crate::rpc_serve::unlock_runtime);
+        return match result {
+            Ok(()) => (200, "application/json", br#"{"store_ready":true}"#.to_vec()),
+            Err(_) => (409, "application/json", serde_json::to_vec(&json!({"error":"runtime_unlock_failed",
+                "store_ready":crate::rpc_serve::store_ready()})).unwrap_or_default()),
+        };
+    }
     if path == "/api/health" && method == tiny_http::Method::Get {
-        if crate::legacy_host::health().is_err() {
-            return (503, "application/json", br#"{"error":"legacy_host_binding_changed"}"#.to_vec());
-        }
-        if crate::legacy_host::is_enabled() && !crate::rpc_serve::startup_complete() {
-            return (503, "application/json", br#"{"error":"runtime_starting"}"#.to_vec());
-        }
         return (
             200,
             "application/json; charset=utf-8",
@@ -259,19 +250,9 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
                 br#"{"error":"invalid_stop_identity"}"#.to_vec(),
             );
         }
-        let expected: serde_json::Value = if body.is_empty() && crate::legacy_host::is_enabled() {
-            // This is the explicitly launched old local-host trust boundary.
-            // Bind legacy stop to this immutable actor, never current-account
-            // discovery. Ordinary and supervisor-managed instances stay strict.
-            match crate::legacy_host::stop_identity() {
-                Ok(Some(expected)) => expected,
-                _ => return (409, "application/json", br#"{"error":"legacy_host_binding_unavailable"}"#.to_vec()),
-            }
-        } else {
-            match serde_json::from_str(&body) {
-                Ok(expected) => expected,
-                Err(_) => return (400, "application/json", br#"{"error":"invalid_stop_identity"}"#.to_vec()),
-            }
+        let expected: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(expected) => expected,
+            Err(_) => return (400, "application/json", br#"{"error":"invalid_stop_identity"}"#.to_vec()),
         };
         let operation_id = match crate::rpc_serve::request_drain_exit(&expected) {
             Ok(operation_id) => operation_id,
@@ -482,10 +463,6 @@ async fn serve_request(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    if crate::legacy_host::is_enabled() && (!peer.ip().is_loopback()
-        || legacy_host_headers(&parts.headers).is_err()) {
-        return response(403, "application/json", br#"{"error":"invalid local transport"}"#.to_vec());
-    }
     let method = match parts.method.as_str().parse::<tiny_http::Method>() {
         Ok(method) => method,
         Err(_) => {

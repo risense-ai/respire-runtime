@@ -725,7 +725,7 @@ pub fn index_has_work() -> bool {
 pub fn index_loop_inner() -> Result<()> {
     let mut model_wait_started: Option<Instant> = None;
     loop {
-        if respire_app::service::service_paused() || crate::host_hooks::background_paused() {
+        if !crate::rpc_serve::store_ready() || respire_app::service::service_paused() || crate::host_hooks::background_paused() {
             if STOPPING.load(Ordering::Acquire) {
                 let mut work = INDEX_WORK
                     .lock()
@@ -774,7 +774,7 @@ pub fn index_loop_inner() -> Result<()> {
             let cpu_upgrade = active_profile.is_none()
                 && model == "m3"
                 && respire_app::MemoryTransport::count(&store)? > 0
-                && crate::model_install::cpu_model_preparation_needed()?;
+                && crate::model_assets::cpu_model_preparation_needed()?;
             if !pending && !diary_pending && !cpu_upgrade {
                 return Ok(true);
             }
@@ -794,10 +794,10 @@ pub fn index_loop_inner() -> Result<()> {
             }
             if let Some(selection) = active_profile.as_ref() {
                 crate::model_progress::update("verify", &selection.model, 0, None)?;
-                crate::model_install::verify_selection_assets(selection)?;
+                crate::model_assets::verify_selection_assets(selection)?;
             } else if model == "m3" {
                 crate::model_progress::update("verify", "BGE-M3", 0, None)?;
-                crate::model_install::prepare_m3_for_index()?;
+                crate::model_assets::verify_m3_assets()?;
             }
             check_sync_context(generation)?;
             if !pending && !diary_pending {
@@ -900,7 +900,7 @@ pub fn index_loop_inner() -> Result<()> {
             }
             Err(error)
                 if error
-                    .downcast_ref::<crate::model_install::AssetsUnavailable>()
+                    .downcast_ref::<crate::model_assets::AssetsUnavailable>()
                     .is_some() =>
             {
                 model_wait_started = None;

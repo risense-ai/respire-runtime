@@ -5,6 +5,7 @@ use respire_core_sdk::search::Embedder;
 pub use respire_core_sdk::RecalledWithContext;
 
 /// Unlocked session key material (in memory; gone when the process ends).
+#[derive(Clone)]
 pub struct SessionKeys {
     /// User Root Key
     pub urk: [u8; 32],

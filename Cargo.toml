@@ -3,10 +3,7 @@ resolver = "2"
 # P2 migration targets imported from risense-ai/respire-cli. crates/app is a
 # compatibility facade only; domain ownership remains in crates/app-domain.
 members = [
-    "host-frontend/cli",
-    "crates/host-commands",
     "crates/client-host",
-    "crates/host-control",
     "crates/logging",
     "runtime",            # P2 import: bin rsrs-runtime (lands after WP-3 merges in respire-cli)
     "spawn",              # P2 import: durable spawn / boot token / job object (respire_spawn)
@@ -32,7 +29,7 @@ repository = "https://github.com/risense-ai/respire-runtime"
 # Internal crates — path-based for the P2 transition. The version field on
 # respire_protocol keeps the registry pin so switching to registry-only
 # consumption later is a one-line change per entry.
-respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.7" }
+respire_protocol = { path = "crates/protocol", version = "=2.0.0-dev.8" }
 respire_core_sdk = { path = "crates/core-sdk" }
 respire_app_domain = { path = "crates/app-domain" }
 respire_app = { path = "crates/app" }

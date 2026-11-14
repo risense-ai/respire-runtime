@@ -124,7 +124,7 @@ use respire_app::sync::remote_configured;
 use crate::bench;
 use crate::classify;
 use crate::cli_def::{
-    BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd,
+    BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
     SessionCommand, SnapshotCmd,
 };
 use crate::gates::{is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine};
@@ -273,17 +273,11 @@ pub fn agent_config_read_result() -> Result<ResultEnvelope> {
 }
 
 pub fn note_write_maintenance() -> Option<String> {
-    // The tidy cycle is also when we check for a new CLI (2026-09-20): **only when TIDY fires**
-    // we query npm - so every write does not hit the network (24h throttle, silent offline; see update_check).
     match respire_app::service::counter_bump(&respire_app::service::maintenance_path()) {
         Ok((n, t)) if n >= t => {
-            let mut notes = vec![format!(
+            Some(format!(
                 "TIDY {n} new entries since last tidy (>= threshold {t}) - AI should judge whether to run the \u{a7}3.8 three-round tidy now (a successful resort --go resets the counter)"
-            )];
-            if let Some(h) = crate::host_hooks::update_hint(false) {
-                notes.push(h);
-            }
-            Some(notes.join("\n"))
+            ))
         }
         Ok(_) => None,
         Err(e) => {
@@ -676,10 +670,10 @@ pub fn run_extract_command(command: &Command) -> Result<()> {
                  or --json; drop --tui to apply them."
             );
         }
-        return crate::host_hooks::extract_tui_run();
+        anyhow::bail!("the extract TUI requires the standalone CLI or Client2");
     }
     if bare && interactive {
-        return crate::host_hooks::extract_tui_run();
+        anyhow::bail!("the extract TUI requires the standalone CLI or Client2");
     }
     run_extract(
         *targets,
@@ -3042,7 +3036,7 @@ fn run_runtime_doctor(check_remote: bool) -> Result<()> {
     if model_task["active"] == true {
         rows.push(OutputItem::new("embedder", OutputStatus::Warn, "Model operation in progress; inference check deferred"));
     } else {
-        match crate::model_install::assets_status() {
+        match crate::model_assets::assets_status() {
             Ok(status) if status.complete => rows.push(OutputItem::new("embedder", OutputStatus::Ok, format!("fresh inference verified: {}", serde_json::to_string(&status.backend_load)?))),
             Ok(status) => rows.push(OutputItem::new("embedder", OutputStatus::Fail, format!("Assets or backend unavailable: {}; install or repair assets through the host CLI", serde_json::to_string(&status.backend_load)?))),
             Err(error) => rows.push(OutputItem::new("embedder", OutputStatus::Fail, format!("inference unavailable: {error:#}; install or repair assets through the host CLI"))),
@@ -3088,376 +3082,6 @@ fn run_runtime_doctor(check_remote: bool) -> Result<()> {
         "host_checks": "Run host CLI diagnostics for credentials, injection, installation and CLI updates"
     }), rows);
     result.details = serde_json::json!({"model_operation": model_task, "retrieval_index": index_state});
-    emit_result(result)
-}
-
-pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
-    if rpc::worker_active() {
-        anyhow::ensure!(!check_update && !fix, "doctor repair and CLI update checks require the host CLI");
-        return run_runtime_doctor(check_remote);
-    }
-    progress::phase("\u{68c0}\u{67e5}\u{672c}\u{5730}\u{6570}\u{636e}\u{548c}\u{6587}\u{4ef6}", "Checking local data and files");
-    let mut items: Vec<(String, bool, String)> = Vec::new();
-    let mut model_warnings = Vec::new();
-    let add = |items: &mut Vec<(String, bool, String)>, name: &str, ok: bool, note: String| {
-        items.push((name.to_owned(), ok, note));
-    };
-
-    match respire_app::migration::pending_legacy_profiles() {
-        Ok(profiles) if !profiles.is_empty() => {
-            add(&mut items, "migration", true,
-                format!("{} legacy account(s) not migrated: {}; use rsrs migrate or TUI Accounts > Migrate; no automatic migration", profiles.len(), profiles.iter().filter_map(|profile| profile["source"].as_str()).collect::<Vec<_>>().join(", ")));
-            model_warnings.push("migration");
-        }
-        Ok(_) => {}
-        Err(error) => add(&mut items, "migration", false, format!("discovery failed: {error:#}")),
-    }
-
-    // 1) data dir and store
-    let dd = respire_app::service::data_dir();
-    let db = respire_app::service::database_path(&dd)?;
-    if db.exists() {
-        let store = build_local();
-        match store {
-            Ok(s) => {
-                let n = s.all(true).map(|v| v.len()).unwrap_or(0);
-                add(
-                    &mut items,
-                    "store",
-                    true,
-                    format!("{} ({} entries)", db.display(), n),
-                );
-            }
-            Err(e) => add(&mut items, "store", false, format!("open failed: {e}")),
-        }
-    } else {
-        add(
-            &mut items,
-            "store",
-            false,
-            format!(
-                "{} does not exist - register/login or keygen first",
-                db.display()
-            ),
-        );
-    }
-    add(&mut items, "data dir", true, dd.display().to_string());
-
-    match crate::host_hooks::materialize_bin() {
-        Ok(path) => add(
-            &mut items,
-            "mcp bin",
-            true,
-            format!(
-                "{} (MCP stdio command; not the npm JS shim)",
-                path.display()
-            ),
-        ),
-        Err(err) => add(&mut items, "mcp bin", false, err),
-    }
-    add(
-        &mut items,
-        "mcp http",
-        true,
-        format!(
-            "The internal runtime serves POST /mcp and GET /sse (default {}/mcp)",
-            crate::net_rpc::rpc_base_url()
-        ),
-    );
-
-    // 2) session (can we unlock)
-    progress::phase("\u{68c0}\u{67e5}\u{8d26}\u{6237}\u{548c}\u{89e3}\u{5bc6}\u{5bc6}\u{94a5}", "Checking account and decryption keys");
-    match auth::load_local_session() {
-        Ok(_) => add(
-            &mut items,
-            "session",
-            true,
-            "five-keys complete, can unlock".to_owned(),
-        ),
-        Err(e) => add(&mut items, "session", false, format!("{e}")),
-    }
-
-    // The resident index worker owns preparation. Do not start a second installer
-    // while it downloads, or wait here while holding its foreground command slot.
-    let store = build_local()?;
-    let active_model = store.retrieval_model()?;
-    progress::phase("\u{68c0}\u{67e5}\u{6a21}\u{578b}\u{548c}\u{7d22}\u{5f15}", "Checking model and index");
-    let pending_index = store.index_pending(&active_model);
-    let model_task = crate::model_progress::status()?;
-    let model_busy = model_task["active"].as_bool() == Some(true);
-    let mut index_state = rpc::index_status();
-    let defer_preparation = rpc::worker_active()
-        && pending_index.as_ref().is_ok_and(|pending| *pending)
-        && (fix || model_busy || index_state["scheduled"].as_bool() == Some(true)
-            || index_state["running"].as_bool() == Some(true));
-    if defer_preparation {
-        if fix {
-            rpc::kick_index();
-        }
-        model_warnings.push("embedder");
-        add(&mut items, "embedder", false,
-            format!("{active_model} preparation/indexing {} through the runtime; model task: {}. No second installer started",
-                if model_busy { "in progress" } else { "scheduled" }, model_task));
-    } else if model_busy {
-        model_warnings.push("embedder");
-        add(&mut items, "embedder", false,
-            format!("Model operation in progress: {model_task}; inference check deferred"));
-    } else {
-        // Diagnostics remain read-only unless --fix is explicit.
-        match BgeEmbedder::load_model(&active_model) {
-            Ok(e) => match e.probe("BGE-M3 doctor inference") {
-                Ok(probe) => add(&mut items, "embedder", true, format!("{active_model} {} dims; inference verified ({})", e.dims(), probe["selected"])),
-                Err(error) => add(&mut items, "embedder", false, format!("{active_model} inference failed: {error:#}")),
-            },
-            Err(e) if !fix => {
-                add(
-                    &mut items,
-                    "embedder",
-                    false,
-                    format!("{active_model} unavailable: {e} (inspect model-task progress and the selected profile resources)"),
-                );
-            }
-            Err(error) if store.active_selection()?.is_some() => {
-                let selection = store.active_selection()?.context("active profile missing")?;
-                let prepared = respire_app::embedding::prepare(&selection,|_,_,_|Ok(()))
-                    .and_then(|_| BgeEmbedder::load_model(&active_model)?.probe("Respire doctor inference"));
-                match prepared {
-                    Ok(probe) => add(&mut items,"embedder",true,format!("{active_model}; inference verified ({})",probe["selected"])),
-                    Err(repair) => add(&mut items,"embedder",false,format!("{active_model} unavailable: {error:#}; profile preparation failed: {repair:#}")),
-                }
-            }
-            Err(_) => {
-                progress::phase("\u{4e0b}\u{8f7d} BGE-M3 \u{6a21}\u{578b}", "Downloading BGE-M3 model");
-                let mirror = crate::model_install::mirror_from_env();
-                let install = crate::model_install::install_m3(mirror.as_deref());
-                match install {
-                    Ok(report) => match BgeEmbedder::load_model(&active_model) {
-                        Ok(e) => match e.probe("BGE-M3 doctor inference") {
-                            Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({}) (auto-installed {})", e.dims(), probe["selected"], report.dir.display())),
-                            Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed after install: {error:#}")),
-                        },
-                        Err(e) => add(
-                            &mut items,
-                            "embedder",
-                            false,
-                            format!("still failed to load after install: {e}"),
-                        ),
-                    },
-                    Err(e) => add(
-                        &mut items,
-                        "embedder",
-                        false,
-                        format!(
-                            "auto-install failed: {e}"
-                        ),
-                    ),
-                }
-            }
-        }
-    }
-
-    match pending_index {
-        Ok(true) => {
-            let indexing = rpc::index_status();
-            index_state = indexing.clone();
-            let progressing = indexing["running"].as_bool() == Some(true)
-                || indexing["scheduled"].as_bool() == Some(true)
-                || (model_busy && indexing["state"].as_str() != Some("failed"));
-            if progressing {
-                model_warnings.push("model index");
-            }
-            add(&mut items, "model index", false,
-                format!("BGE-M3 index pending; runtime status: {indexing}"));
-        }
-        Ok(false) => add(&mut items, "model index", true, "BGE-M3 index ready".to_owned()),
-        Err(error) => add(&mut items, "model index", false, format!("BGE-M3 index check failed: {error:#}")),
-    }
-
-    // 4) lock: main already holds it exclusively (reaching here proves lock.db is takeable) - never take it twice; two connections in one process deadlock
-    add(
-        &mut items,
-        "lock",
-        true,
-        "this process holds lock.db exclusively (other sessions wait)".to_owned(),
-    );
-
-    // 5) remote (config + optional reachability)
-    let configured = remote_configured();
-    progress::phase("\u{68c0}\u{67e5}\u{670d}\u{52a1}\u{5668}\u{8fde}\u{63a5}\u{ff1b}\u{7b49}\u{5f85}\u{54cd}\u{5e94}", "Checking server connection; waiting for response");
-    if configured {
-        let (addr, _tok) = remote_config_from_session_or_env()?.unwrap_or_default();
-        if check_remote {
-            match ureq::get(&format!("{}/health", addr.trim().trim_end_matches('/')))
-                .timeout(std::time::Duration::from_secs(5))
-                .call()
-            {
-                Ok(r) => add(
-                    &mut items,
-                    "remote",
-                    true,
-                    format!("{addr} /health -> {}", r.status()),
-                ),
-                Err(e) => add(
-                    &mut items,
-                    "remote",
-                    false,
-                    format!("{addr} unreachable: {e}"),
-                ),
-            }
-        } else {
-            add(
-                &mut items,
-                "remote",
-                true,
-                format!("{addr} (--remote probes reachability)"),
-            );
-        }
-    } else {
-        add(
-            &mut items,
-            "remote",
-            true,
-            "not configured (local-only)".to_owned(),
-        );
-    }
-
-    // 6) inject status
-    progress::phase("\u{68c0}\u{67e5}\u{5de5}\u{5177}\u{6ce8}\u{5165}\u{72b6}\u{6001}", "Checking tool injection status");
-    match respire_app::inject::targets() {
-        Ok(ts) => {
-            let fresh = ts.iter().filter(|t| t.state == "fresh").count();
-            let detected = ts.iter().filter(|t| t.likely_installed).count();
-            add(
-                &mut items,
-                "inject",
-                fresh > 0,
-                format!("{fresh}/{detected} injected and fresh ({detected} detected)"),
-            );
-        }
-        Err(e) => add(&mut items, "inject", false, format!("{e}")),
-    }
-
-    // 6.5) workspace three-state (added 2026-09-21): normal r/w | read-only | temporarily off
-    {
-        let (ok, note) = match respire_app::service::workspace_mode() {
-            "normal" => (true, "read/write".to_owned()),
-            "readonly" => (true, "read-only (writes rejected; team read-only is enforced by the server token)".to_owned()),
-            _ => (
-                false,
-                "temporarily off - recall and store are stopped; `agent-config --set workspace_mode=normal` to restore".to_owned(),
-            ),
-        };
-        add(&mut items, "memory status", ok, note);
-    }
-
-    // 8) tidy counter (auto: writes hitting the threshold print TIDY; resort --go resets)
-    let (n, t) = respire_app::service::counter_peek(&respire_app::service::maintenance_path());
-    add(
-        &mut items,
-        "tidy counter",
-        n < t,
-        format!("{n}/{t} - new since last tidy (TIDY when the threshold is hit; reset after tidy)"),
-    );
-
-    let runtime_version = if rpc::worker_active() {
-        Some(crate::app_version::embedded().to_owned())
-    } else {
-        crate::host_hooks::runtime_brief().map(|(_, _, version)| version)
-    };
-    add(
-        &mut items,
-        "Runtime version",
-        true,
-        runtime_version.clone().unwrap_or_else(|| "not connected".to_owned()),
-    );
-
-    // 9) CLI version (--check-update or RSRS_UPDATE_CHECK=1 hits the network; default reads cache, no network)
-    //    Doctor must not stall on the network, so it does not force a query - report known result, hint how to check if no cache.
-    if crate::host_hooks::update_enabled() {
-        progress::phase("\u{68c0}\u{67e5} CLI \u{7248}\u{672c}\u{ff1b}\u{7b49}\u{5f85}\u{7248}\u{672c}\u{6e90}", "Checking CLI version; waiting for version registry");
-        let force = check_update;
-        match crate::host_hooks::update_check_run(force) {
-            Some(s) if s.outdated => add(
-                &mut items,
-                "CLI version",
-                false,
-                format!(
-                    "{} -> {} newer available ({}) - npm i -g rsrs-cli@latest",
-                    s.current,
-                    s.latest,
-                    if s.cached { "cache" } else { "just checked" }
-                ),
-            ),
-            Some(s) => add(
-                &mut items,
-                "CLI version",
-                true,
-                format!("{} is latest ({})", s.current, if s.cached { "cache" } else { "just checked" }),
-            ),
-            None => add(
-                &mut items,
-                "CLI version",
-                true,
-                format!("{} (not checked - add --check-update to query, or set RSRS_UPDATE_CHECK=0 to disable)", crate::app_version::embedded()),
-            ),
-        }
-    } else {
-        add(
-            &mut items,
-            "CLI version",
-            true,
-            format!("{} (update check disabled)", crate::app_version::embedded()),
-        );
-    }
-
-    let rows: Vec<OutputItem> = items
-        .iter()
-        .map(|(name, ok, note)| {
-            let status = if name == "remote" && note.starts_with("not configured") {
-                OutputStatus::Skip
-            } else if name == "CLI version" && note.contains("not checked") {
-                OutputStatus::Skip
-            } else if name == "Runtime version" && runtime_version.is_none() {
-                OutputStatus::Skip
-            } else if name == "tidy counter" && *ok && note.contains("threshold is hit") {
-                OutputStatus::Warn
-            } else if model_warnings.contains(&name.as_str()) {
-                OutputStatus::Warn
-            } else if *ok {
-                OutputStatus::Ok
-            } else {
-                OutputStatus::Fail
-            };
-            OutputItem::new(name, status, note)
-        })
-        .collect();
-    let status = output::status_from_items(&rows);
-    let pass = rows
-        .iter()
-        .filter(|i| matches!(i.status, OutputStatus::Ok))
-        .count();
-    let warn = rows
-        .iter()
-        .filter(|i| matches!(i.status, OutputStatus::Warn))
-        .count();
-    let fail = rows
-        .iter()
-        .filter(|i| matches!(i.status, OutputStatus::Fail))
-        .count();
-    let skip = rows
-        .iter()
-        .filter(|i| matches!(i.status, OutputStatus::Skip))
-        .count();
-    let mut result = ResultEnvelope::new(
-        "doctor",
-        status,
-        serde_json::json!({ "version": crate::app_version::embedded(), "runtime_version": runtime_version, "pass": pass, "warn": warn, "fail": fail, "skip": skip, "total": rows.len() }),
-        rows,
-    );
-    result.details = serde_json::json!({
-        "model_operation": model_task,
-        "retrieval_index": index_state,
-    });
     emit_result(result)
 }
 
@@ -3840,12 +3464,11 @@ pub fn run_capabilities() -> Result<()> {
             "schema_version": 1,
             "cli_version": crate::app_version::embedded(),
             "capabilities": {
-                "host_rpc": {"version":1,"transport":"stdio","flag":"--host-rpc-stdio","methods":["auth.register","auth.login","auth.recover","auth.reset"]},
                 "memory_list_metadata": true,
                 "memory_metadata_flags": true,
                 "memory_metadata_gate_default": false,
                 "rerank": false,
-                "model": {"install": true, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"], "selection_scope":"library"}
+                "model": {"install": false, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"], "selection_scope":"library"}
             }
         }), Vec::new()))
 }
@@ -3934,6 +3557,17 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
 pub fn run_local(args: Cli) -> Result<()> {
     respire_app::service::validate_client_config()?;
     set_json_mode(args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
+    if rpc::worker_active() && !crate::rpc_serve::store_ready() && matches!(args.command, Some(Command::Status)) {
+        let mut result = ResultEnvelope::new("status", OutputStatus::Warn, serde_json::json!({
+            "workspace":respire_app::service::workspace_mode(), "unlocked":false,
+            "credential_state":"required", "store_ready":false,
+            "session":respire_app::service::session_info(), "data_dir":respire_app::service::data_dir(),
+            "autosync":false, "sync_scheduler":{"phase":"paused"},
+            "retrieval_index":rpc::index_status(), "local_total":null, "local_alive":null
+        }), Vec::new());
+        result.actions.push("Supply private key material from the CLI or Client2".into());
+        return emit_result(result);
+    }
     if respire_app::service::off_mode() && matches!(args.command, Some(Command::Status)) {
         let session = respire_app::service::session_info();
         return emit_result(ResultEnvelope::new("status", OutputStatus::Ok, serde_json::json!({
@@ -4002,9 +3636,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
     }
-    if matches!(args.command, Some(Command::Web { .. } | Command::Restart { .. })) {
-        anyhow::bail!("the dashboard launcher does not run inside a command worker");
-    }
     if matches!(args.command, Some(Command::MemoryRevision)) {
         return run_memory_revision();
     }
@@ -4072,11 +3703,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         }
     }
     // keygen/defrag/scope/config etc. do not need the embedder - handle early
-    // Host-managed commands route through the CLI binary dispatcher before
-    // the shared engine arms.
-    if let Some(outcome) = crate::host_hooks::host_command(&args) {
-        return outcome;
-    }
     match args.command.as_ref() {
         Some(Command::Metadata { command: metadata::Command::Status }) => return run_metadata_status(),
         Some(Command::Metadata { .. }) => anyhow::bail!("metadata enable/disable must run in the host CLI"),
@@ -4290,11 +3916,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         Some(Command::Share { root, raw, out }) => {
             return run_share(root.as_deref(), *raw, out.as_deref())
         }
-        Some(Command::Doctor {
-            remote,
-            check_update,
-            fix,
-        }) => return run_doctor(*remote, *check_update, *fix),
+        Some(Command::Doctor { remote }) => return run_runtime_doctor(*remote),
         Some(Command::Audit { json }) => return run_audit(*json),
         Some(Command::Witness { verify: _ }) => {
             let report=build_local()?.witness_verify()?;
@@ -4375,33 +3997,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         Some(Command::Model { action }) => {
             return match action {
                 ModelAction::Catalog | ModelAction::Configure { .. } | ModelAction::Switch { .. } | ModelAction::Progress | ModelAction::Resume => anyhow::bail!("model profile command must use the runtime interface"),
-                ModelAction::InstallM3 { mirror, model, for_engine } => {
-                    let mirror_env = crate::model_install::mirror_from_env();
-                    let resolved = mirror.as_deref().or(mirror_env.as_deref());
-                    let prepare = || -> Result<_> {
-                        // Reject bad variants before downloading the baseline.
-                        if let Some(variant) = model.as_deref() { respire_app::memory::onnx::parse_variant(variant)?; }
-                        let report = crate::model_install::install_m3(resolved)?;
-                        if let Some(variant) = model.as_deref() { crate::model_install::install_variant(variant, resolved)?; }
-                        Ok(report)
-                    };
-                    let report = if let Some(engine) = for_engine {
-                        let engine = respire_app::memory::onnx::Engine::parse(engine)?;
-                        respire_app::memory::onnx::with_selection(engine,
-                            model.as_deref().unwrap_or(respire_app::memory::onnx::default_variant(engine)), prepare)?
-                    } else { prepare()? };
-                    emit_result(ResultEnvelope::new(
-                        "model install-m3",
-                        OutputStatus::Ok,
-                        serde_json::json!({"dir":report.dir,"skipped":report.skipped,"activated":false,"model":"m3"}),
-                        vec![OutputItem::new(
-                            "model",
-                            OutputStatus::Ok,
-                            "BGE-M3 ready; run rsrs reembed to rebuild an old index",
-                        )],
-                    ))?;
-                    Ok(())
-                }
                 ModelAction::Activate { model } => {
                     use crate::model_progress;
                     let _operation = model_progress::Operation::try_begin_background_index()?
@@ -4433,9 +4028,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     ))?;
                     Ok(())
                 }
-                ModelAction::ResetCpu => {
-                    anyhow::bail!("run `rsrs model reset-cpu` directly in your terminal")
-                }
                 ModelAction::Engine { engine, model, expected_revision } => {
                     use respire_app::memory::onnx;
                     let selected = respire_app::embedding::saved_selection()?;
@@ -4452,7 +4044,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                             .map_err(|_| anyhow!("embedder cache poisoned"))? = None;
                         let summary = serde_json::json!({"engine":engine,
                             "model":onnx::configured_variant(onnx::Engine::parse(engine)?)?.name,
-                            "revision":revision,"variants":crate::model_install::variant_inventory()?,
+                            "revision":revision,"variants":crate::model_assets::variant_inventory()?,
                             "active_selection":selected});
                         emit_result(ResultEnvelope::new("model",OutputStatus::Ok,summary,vec![]))?;
                         return Ok(());
@@ -4466,7 +4058,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         OutputStatus::Ok,
                         serde_json::json!({"engine":engine,
                             "model":onnx::configured_variant(engine)?.name,
-                            "variants":crate::model_install::variant_inventory()?, "active_selection":selected}),
+                            "variants":crate::model_assets::variant_inventory()?, "active_selection":selected}),
                         vec![],
                     ))?;
                     Ok(())
@@ -4485,9 +4077,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     emit_result(ResultEnvelope::new("model load", OutputStatus::Ok, result, vec![]))?;
                     Ok(())
                 }
-                ModelAction::InstallEngines => {
-                    anyhow::bail!("inference engine installation is host-managed; run rsrs model install-engines from the host terminal")
-                }
                 ModelAction::Probe { text, model } => {
                     let current = build_local()?.retrieval_model()?;
                     let selected = model.clone().unwrap_or_else(||current.clone());
@@ -4498,29 +4087,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         OutputStatus::Ok,
                         result,
                         vec![],
-                    ))?;
-                    Ok(())
-                }
-                ModelAction::UninstallM3 => {
-                    let report = crate::model_install::uninstall_m3()?;
-                    let status = if report.removed {
-                        OutputStatus::Ok
-                    } else {
-                        OutputStatus::Skip
-                    };
-                    emit_result(ResultEnvelope::new(
-                        "model",
-                        status,
-                        serde_json::json!({"dir":report.dir.display().to_string(),"removed":report.removed,"model":"bge-m3"}),
-                        vec![OutputItem::new(
-                            "model",
-                            status,
-                            if report.removed {
-                                report.dir.display().to_string()
-                            } else {
-                                "not installed".to_owned()
-                            },
-                        )],
                     ))?;
                     Ok(())
                 }
@@ -6558,7 +6124,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             emit_result(result)?;
         }
         Command::V => unreachable!("version is printed before run_local work"),
-        Command::Mcp => unreachable!("mcp is served before run_local"),
         Command::Passport => {
             return run_passport();
         }
@@ -6615,88 +6180,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             result.details = serde_json::Value::Array(rows);
             emit_result(result)?;
         }
-        Command::Plugin { command } => match command {
-            PluginCommand::List => {
-                let cfg = crate::hooks::read_config();
-                let path = crate::hooks::config_path();
-                let mut items = Vec::new();
-                for (ev, hooks) in &cfg.hooks {
-                    for h in hooks {
-                        let policy = if h.on_error.is_empty() {
-                            "default"
-                        } else {
-                            &h.on_error
-                        };
-                        items.push(OutputItem::new(
-                            ev,
-                            OutputStatus::Ok,
-                            format!("{} timeout={}ms on_error={policy}", h.cmd, h.timeout_ms),
-                        ));
-                    }
-                }
-                if items.is_empty() {
-                    items.push(OutputItem::new(
-                        "hooks",
-                        OutputStatus::Skip,
-                        format!("none configured; file={}", path.display()),
-                    ));
-                }
-                let mut result = ResultEnvelope::new(
-                    "plugin-list",
-                    if cfg.hooks.is_empty() {
-                        OutputStatus::Skip
-                    } else {
-                        OutputStatus::Ok
-                    },
-                    serde_json::json!({
-                        "config_path": path.to_string_lossy(),
-                        "events": crate::hooks::EVENT_NAMES,
-                        "count": cfg.hooks.values().map(Vec::len).sum::<usize>(),
-                    }),
-                    items,
-                );
-                result.details = serde_json::to_value(&cfg.hooks)?;
-                result
-                    .actions
-                    .push("plugin test <EVENT> --payload <JSON>".into());
-                emit_result(result)?;
-            }
-            PluginCommand::Test { event, payload } => {
-                let ev = crate::hooks::HookEvent::parse(event.as_str()).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown event \"{event}\"; available: {}",
-                        crate::hooks::EVENT_NAMES.join(" / ")
-                    )
-                })?;
-                let data: serde_json::Value = serde_json::from_str(payload.as_str())
-                    .map_err(|e| anyhow::anyhow!("--payload is not JSON: {e}"))?;
-                let v = crate::hooks::fire(ev, data);
-                let status = if v.blocked {
-                    OutputStatus::Warn
-                } else {
-                    OutputStatus::Ok
-                };
-                let mut result = ResultEnvelope::new(
-                    "plugin-test",
-                    status,
-                    serde_json::json!({"event": ev.as_str(), "blocked": v.blocked, "warning_count": v.warnings.len()}),
-                    vec![OutputItem::new(
-                        "event",
-                        status,
-                        if v.blocked {
-                            format!("{} blocked: {}", ev.as_str(), v.reason)
-                        } else {
-                            format!("{} allowed", ev.as_str())
-                        },
-                    )],
-                );
-                result.details = serde_json::json!({"event": ev.as_str(), "blocked": v.blocked, "reason": v.reason, "warnings": v.warnings});
-                if v.blocked {
-                    result.actions.push("review plugin policy".into());
-                }
-                emit_result(result)?;
-            }
-        },
         Command::Update {
             id,
             metadata,
@@ -6829,7 +6312,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         | Command::TreeFloat { .. }
         | Command::Split { .. }
         | Command::Extract { .. }
-        | Command::Inject { .. }
         | Command::TreeDeepen { .. }
         | Command::Config { .. }
         | Command::Export { .. }
@@ -6846,7 +6328,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Doctor { .. }
         | Command::Audit { .. }
         | Command::Witness { .. }
-        | Command::UpdateCheck { .. }
         | Command::Model { .. }
         | Command::Share { .. }
         | Command::Diary { .. }
@@ -6866,9 +6347,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Bench { .. }
         | Command::RunLog { .. }
         | Command::Classify { .. }
-        | Command::Web { .. }
-        | Command::Restart { .. }
-        | Command::Runtime { .. }
         | Command::ClassifyConfig { .. } => unreachable!(
             "commands that do not need the embedder already returned at the top of main"
         ),

@@ -102,7 +102,68 @@ pub fn load_local_session() -> Result<SessionKeys> {
 /// Unlock keys and retain the profile-owner alias from the same file snapshot.
 /// This is local configuration identity, not proof of remote account authentication.
 pub fn load_local_session_with_owner() -> Result<(SessionKeys, Option<String>)> {
-    unlock_local_session_snapshot(&read_session_json()?)
+    let data = read_session_json()?;
+    if !crate::credential_io::is_private_control() && !cfg!(any(test, feature = "test-support")) {
+        let supplied = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
+        let supplied = supplied.as_ref().ok_or_else(|| anyhow::Error::new(
+            SessionCredentialRequired("runtime_locked: supply private key material from the CLI or Client2")))?;
+        anyhow::ensure!(supplied.profile == crate::service::data_dir().canonicalize()?
+            && supplied.session == session_digest(&data)?, "runtime_locked: session changed; host must supply its key again");
+        return Ok((supplied.keys.clone(), supplied.owner.clone()));
+    }
+    unlock_local_session_snapshot(&data)
+}
+
+struct RuntimeSession {
+    profile: PathBuf,
+    session: String,
+    keys: SessionKeys,
+    owner: Option<String>,
+}
+
+static RUNTIME_SESSION: std::sync::Mutex<Option<RuntimeSession>> = std::sync::Mutex::new(None);
+
+fn session_digest(data: &serde_json::Value) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(data)?)))
+}
+
+/// Accept explicit host input only. Never consult or write a native key store.
+pub fn supply_runtime_session(mut input: respire_protocol::credentials::RuntimeUnlock) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(input.schema_version == respire_protocol::credentials::CREDENTIAL_SCHEMA_V
+        && input.profile.is_absolute()
+        && !input.profile.components().any(|part| part == std::path::Component::ParentDir)
+        && input.profile.canonicalize()? == crate::service::data_dir().canonicalize()?,
+        "unlock profile mismatch");
+    let bytes = std::fs::read(session_file()?)?;
+    anyhow::ensure!(format!("{:x}", Sha256::digest(&bytes)) == input.session_sha256,
+        "unlock session revision mismatch");
+    let data: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let user = data["user"].as_str().unwrap_or("");
+    let mut material = data.clone();
+    let version = data["vault_version"].as_u64().unwrap_or(1);
+    let fields = material.as_object_mut().context("session must contain an object")?;
+    for name in ["super", "secret_key", "pass", "secret"] { fields.remove(name); }
+    if let Some(value) = &input.legacy_secret {
+        if version == 3 { material["secret_key"] = serde_json::json!(value); }
+        else if version < 2 { material["secret"] = serde_json::json!(value); }
+    }
+    let keys = unlock_session_keys(&material, input.login_password.as_deref().unwrap_or(""),
+        input.super_password.as_deref(), user)?;
+    anyhow::ensure!(std::fs::read(session_file()?)? == bytes, "session changed during unlock");
+    crate::credential_io::supply_credentials(std::mem::take(&mut input.provider_credentials))?;
+    *RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))? = Some(RuntimeSession {
+        profile: input.profile.canonicalize()?, session: session_digest(&data)?, keys,
+        owner: (!user.trim().is_empty()).then(|| user.to_owned()),
+    });
+    Ok(())
+}
+
+pub fn clear_runtime_session() -> Result<()> {
+    *RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))? = None;
+    crate::credential_io::supply_credentials(Vec::new())?;
+    Ok(())
 }
 
 /// Keep key material and owner inseparable even if the profile changes after reading.
