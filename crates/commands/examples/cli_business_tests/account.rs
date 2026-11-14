@@ -816,6 +816,9 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         // RemoteUnknown, committed operations and pending/published remote effects.
         let rolled_back = execute(&["--json", "runtime", "account-rollback", "--operation-id",
             operation, "--source-profile", source_arg, "--confirm"])?;
+        if !rolled_back.status.success() {
+            authorization_failure_evidence(&root, &original, &rolled_back);
+        }
         let envelope: Value = serde_json::from_slice(&rolled_back.stdout)?;
         assert_eq!(envelope["command"], "auth-account");
         let receipt: HostAuthAccountResult = serde_json::from_value(envelope["summary"].clone())?;
