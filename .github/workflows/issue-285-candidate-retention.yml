@@ -1,0 +1,68 @@
+name: Preserve issue 285 reporter candidate
+on:
+  push:
+    branches: [build/issue-285-candidate-retention]
+    paths: [.github/workflows/issue-285-candidate-retention.yml]
+  workflow_dispatch:
+    inputs:
+      source_artifact_id:
+        description: Artifact containing the pinned issue 285 candidate
+        type: string
+        default: '14112640691'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  retain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify and copy existing candidate bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id || '14112640691' }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, os, pathlib, re, stat, subprocess, zipfile
+          artifact_id = os.environ['SOURCE_ARTIFACT_ID']
+          assert re.fullmatch('[1-9][0-9]*', artifact_id)
+          endpoint = 'repos/risense-ai/respire-runtime/actions/artifacts/' + artifact_id
+          info = json.loads(subprocess.check_output(['gh', 'api', endpoint]))
+          assert not info['expired'] and 0 < info['size_in_bytes'] <= 256 * 1024 * 1024
+          raw = subprocess.check_output(['gh', 'api', endpoint + '/zip'])
+          assert len(raw) == info['size_in_bytes']
+          assert 'sha256:' + hashlib.sha256(raw).hexdigest() == info['digest']
+          with zipfile.ZipFile(io.BytesIO(raw)) as bundle:
+              part_bytes = bundle.read('part.json')
+              assert hashlib.sha256(part_bytes).hexdigest() == '5fe531d01abe7c50c66cbd8e520d4684701a7d285508e4e2704b4a2b735d74aa'
+              part = json.loads(part_bytes)
+              assert part['source_sha'] == 'e57d53b0683b2e8eeee29223012c6d57b8727308'
+              assert part['cli_source_sha'] == 'b1b91394769c25b861974da7bb58934d10feccb8'
+              assert part['target'] == 'aarch64-apple-darwin'
+              files = {entry['path']: entry for entry in part['files']}
+              members = bundle.infolist()
+              assert len(members) == len(files) + 1
+              assert {entry.filename for entry in members} == set(files) | {'part.json'}
+              destination = pathlib.Path('reporter-candidate')
+              destination.mkdir()
+              for member in members:
+                  name = member.filename
+                  assert not member.is_dir() and not name.startswith('/')
+                  assert not any(value in name for value in ['\\', ':', '\0'])
+                  assert all(value not in ('', '.', '..') for value in name.split('/'))
+                  assert stat.S_IFMT(member.external_attr >> 16) in (0, stat.S_IFREG)
+                  assert member.file_size == (len(part_bytes) if name == 'part.json' else files[name]['size'])
+                  data = bundle.read(member)
+                  if name != 'part.json':
+                      assert hashlib.sha256(data).hexdigest() == files[name]['sha256']
+                  output = destination / name
+                  output.parent.mkdir(parents=True, exist_ok=True)
+                  with output.open('xb') as stream:
+                      stream.write(data)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-285-macos-arm64-candidate-${{ github.run_id }}
+          path: reporter-candidate/
+          if-no-files-found: error
+          retention-days: 90
