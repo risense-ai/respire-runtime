@@ -192,6 +192,9 @@ fn finish_legacy_handoff(
 struct Client2Selection {
     version: String,
     sha256: String,
+    // Installers authenticate release provenance; this verifier checks the selected payload.
+    #[serde(default, rename = "release")]
+    _release: Option<serde::de::IgnoredAny>,
 }
 
 fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
