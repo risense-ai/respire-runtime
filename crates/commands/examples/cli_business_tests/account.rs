@@ -1769,7 +1769,8 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         );
         assert_eq!(std::fs::read(root.join("client.json"))?, retained_config);
         *cloud.lock().map_err(|error| error.to_string())? = cloud_snapshot;
-        assert!(execute(&["--json", "logout", "--full"])?.status.success());
+        let logged_out = execute(&["--json", "logout", "--full"])?;
+        assert!(logged_out.status.success(), "{}", String::from_utf8_lossy(&logged_out.stdout));
         assert!(!target.join("session.json").exists());
         let recovered = execute(&[
             "--json",
