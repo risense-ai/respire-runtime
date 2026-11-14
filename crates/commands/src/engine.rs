@@ -3925,15 +3925,8 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             result.details=serde_json::to_value(report)?;
             return emit_result(result);
         },
-        Some(Command::SuperReset { super_pass }) => {
-            let new_super = respire_app::auth::super_reset(None, super_pass.as_deref())?;
-            emit_result(ResultEnvelope::new(
-                "super-reset",
-                OutputStatus::Ok,
-                serde_json::json!({"ok":true,"super":new_super}),
-                vec![OutputItem::new("password", OutputStatus::Ok, "issued")],
-            ))?;
-            return Ok(());
+        Some(Command::SuperReset { .. }) => {
+            anyhow::bail!("super-reset requires private host key control");
         }
         Some(Command::QueryLog {
             limit,

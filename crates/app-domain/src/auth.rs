@@ -703,37 +703,6 @@ fn unlock_cloud_vault(
     }
 }
 
-/// Reset super password: current code (keyring/--super/input) unwraps URK → mint a new code → rewrap v4 → upload.
-/// URK unchanged, data stays. Requires login (token). Returns the new super password.
-pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String> {
-    let mut data = read_session_json()?;
-    let user = data["user"].as_str().unwrap_or("").to_owned();
-    let token = data["token"].as_str().unwrap_or("").to_owned();
-    anyhow::ensure!(!token.is_empty(), "not logged in \u{2014} run rsrs login before resetting the super password");
-    let addr = match addr.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(a) => a.to_owned(),
-        None => data["addr"].as_str().unwrap_or(crate::service::DEFAULT_SERVER_ADDR).to_owned(),
-    };
-    let keys = unlock_session_keys(&data, data["pass"].as_str().unwrap_or(""), super_arg, &user)
-        .context("unlock failed \u{2014} current super password required (or one stored in the local keyring)")?;
-    let new_super = crypto::generate_secret_key();
-    let (kdf_salt, wrapped_urk, urk_nonce) = if data["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX))
-        || data["crypto_namespace"].as_str() == Some(crypto::RSRS_PREFIX) {
-        wrap_with_rsrs(&new_super, &keys.urk)?
-    } else {
-        wrap_with_v4(&new_super, &keys.urk)?
-    };
-    data["secret_key"] = serde_json::Value::String(new_super.clone());
-    data["kdf_salt"] = serde_json::Value::String(kdf_salt);
-    data["wrapped_urk"] = serde_json::Value::String(wrapped_urk);
-    data["urk_nonce"] = serde_json::Value::String(urk_nonce);
-    data["vault_version"] = serde_json::json!(4);
-    data.as_object_mut().map(|o| o.remove("super"));
-    put_vault(&addr, &token, &data)?;
-    write_session_json(&data)?;
-    crate::keystore::save_super(&user, &new_super).ok();
-    Ok(new_super)
-}
 
 /// Mutate the in-memory candidate session only; do not overwrite saved material on network or unlock failure.
 pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
