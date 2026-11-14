@@ -28,7 +28,8 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 	if err != nil {
 		t.Fatal("managed inventory unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// This deadline covers several real native lifecycle phases, not one startup.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	executable, err := m.hostExecutable(ctx)
 	if err != nil || !samePath(executable, filepath.Join(m.DataRoot, "bin", cliBinary())) {
@@ -227,6 +228,7 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 	})
 	deadline := time.Now().Add(30 * time.Second)
 	var locked HealthInfo
+	startupReady := false
 	for time.Now().Before(deadline) {
 		var value json.RawMessage
 		locked, value, err = m.Health(ctx)
@@ -234,12 +236,14 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 			Startup bool `json:"startup_complete"`
 		}
 		if err == nil && json.Unmarshal(value, &state) == nil && state.Startup {
+			startupReady = true
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if err != nil || locked.PID != uint32(child.Process.Pid) || locked.StoreReady || locked.CredentialState != "required" {
-		t.Fatal("direct restart did not remain locked")
+	if !startupReady || err != nil || locked.PID != uint32(child.Process.Pid) || locked.StoreReady || locked.CredentialState != "required" {
+		t.Fatalf("direct restart did not remain locked (ready=%t, health_error=%t, expected_pid=%t, store_ready=%t, credentials_required=%t, deadline_expired=%t)",
+			startupReady, err != nil, locked.PID == uint32(child.Process.Pid), locked.StoreReady, locked.CredentialState == "required", ctx.Err() != nil)
 	}
 	rejected, err := m.rpcResponse(ctx, "cli.exec", []string{"--json", "recall", "host-owned-native"}, "native-locked-read")
 	if err != nil {
