@@ -529,8 +529,11 @@ The existing schema, manifest and consumers also freeze these private methods:
   never in public_response, progress or ledger fields. Existing native recovery
   session snapshots are not claimed to be credential-free.
 - control.model_maintenance uses ModelMaintenanceParams / ModelMaintenanceReceipt.
-  Plan has no expected review; apply is reset_cpu-only; verify excludes reset_cpu.
-  Non-plan receipts must match both selection and revision digests. Catalog
+  Plan normally has no expected review. For reset_cpu, a plan with an expected
+  review rechecks the selected model while the host holds the configuration locks.
+  Runtime rejects Apply. The host publishes reset_cpu configuration after the
+  reviewed preflight under its own locks; Runtime verification excludes reset_cpu.
+  When supplied, the review must match both selection and revision digests. Catalog
   package source/hash/version/member are fixed; DLL metadata in the fixture is
   synthetic, not installed-byte or hardware evidence. npu_ready remains false.
 

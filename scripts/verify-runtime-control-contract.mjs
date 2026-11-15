@@ -43,8 +43,8 @@ if (manifest.release_metadata_schema_version !== 2) fail("wrong release metadata
 
 const positive = manifest.fixtures?.positive;
 const negative = manifest.fixtures?.negative;
-if (!Array.isArray(positive) || positive.length !== 93) fail("positive fixture count");
-if (!Array.isArray(negative) || negative.length !== 300) fail("negative fixture count");
+if (!Array.isArray(positive) || positive.length !== 92) fail("positive fixture count");
+if (!Array.isArray(negative) || negative.length !== 301) fail("negative fixture count");
 
 const boundPaths = new Set();
 for (const bound of manifest.files ?? []) {
@@ -617,7 +617,7 @@ function fixedWriteModelFailure(payload, params, kind) {
           (result.outcome === "awaiting_input") !== (result.required_inputs.length > 0)) return "write_identity_mismatch";
     }
   } else {
-    if (params.phase !== "plan" && !isDeepStrictEqual(params.expected, result.plan.review)) return "model_review_mismatch";
+    if (params.expected != null && !isDeepStrictEqual(params.expected, result.plan.review)) return "model_review_mismatch";
     if (result.plan.kind !== params.kind || result.phase !== params.phase || result.verified !== (params.phase !== "plan") ||
         result.config_applied !== (params.phase === "apply") ||
         params.kind === "reset_cpu" && (!result.plan.cpu_candidate_sha256 || result.plan.preparation != null || result.plan.catalog != null || result.plan.uninstall_directory != null) ||
@@ -998,8 +998,9 @@ function privateHostFailure(payload) {
       ["control.key.fivekeys", "control.key.complete"].includes(request.method) && params.operation.kind !== "fivekeys")) return "host_params_invalid";
   if (method.params === "identityWriteParams" && request.method !== "control.identity.write_result" &&
       (request.method === "control.identity.logout") !== (params.operation.kind === "logout")) return "host_params_invalid";
-  if (method.params === "modelMaintenanceParams" && ((params.phase === "plan") !== (params.expected == null) ||
-      params.phase === "apply" && params.kind !== "reset_cpu" || params.phase === "verify" && params.kind === "reset_cpu")) return "host_params_invalid";
+  if (method.params === "modelMaintenanceParams" && (params.phase !== "plan" && params.expected == null ||
+      params.phase === "plan" && params.expected != null && params.kind !== "reset_cpu" ||
+      params.phase === "apply" || params.phase === "verify" && params.kind === "reset_cpu")) return "host_params_invalid";
   if (method.params === "modelParams" && (request.method === "control.model_install_plan"
       ? params.selection_sha256 != null : params.selection_sha256 == null)) return "host_params_invalid";
   const snapshot = request.method === "control.snapshot_maintenance";
@@ -1094,7 +1095,7 @@ function privateHostFailure(payload) {
 const profileRecoveryExtension = manifest.extensions.profile_recovery;
 if (profileRecoveryExtension.schema !== "schema/private-host-control.schema.json" ||
     profileRecoveryExtension.consumer !== "consumers/private_host_control.rs") fail("profile/recovery must reuse the shared schema and consumer");
-for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive", positive, 25, 68, 21], ["negative", negative, 48, 252, 132]]) {
+for (const [groupName, group, legacyCount, newCount, extraCount] of [["positive", positive, 25, 67, 21], ["negative", negative, 48, 253, 132]]) {
   let checked = 0;
   const extra = profileRecoveryExtension.fixtures[groupName];
   if (!Array.isArray(extra) || extra.length !== extraCount) fail("profile/recovery fixture count drift");

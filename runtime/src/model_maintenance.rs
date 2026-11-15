@@ -208,12 +208,14 @@ pub(crate) fn execute(
     let params: ModelMaintenanceParams = serde_json::from_str(&request.args[0])?;
     anyhow::ensure!(
         params.schema_version == MODEL_MAINTENANCE_SCHEMA_V
-            && (params.phase == ModelMaintenancePhase::Plan) == params.expected.is_none()
+            && (params.phase == ModelMaintenancePhase::Plan || params.expected.is_some())
+            && (params.phase != ModelMaintenancePhase::Plan
+                || params.expected.is_none()
+                || params.kind == ModelMaintenanceKind::ResetCpu)
             && params.expected.as_ref().is_none_or(
                 |review| digest(&review.selection_sha256) && digest(&review.revision_sha256)
             )
-            && !(params.phase == ModelMaintenancePhase::Apply
-                && params.kind != ModelMaintenanceKind::ResetCpu)
+            && params.phase != ModelMaintenancePhase::Apply
             && !(params.phase == ModelMaintenancePhase::Verify
                 && params.kind == ModelMaintenanceKind::ResetCpu),
         "invalid fixed model maintenance phase/revision"
@@ -235,7 +237,7 @@ pub(crate) fn execute(
         "SDK inference settings root differs from authorized installation"
     );
     // CPU Plan is a read-only preflight: reject active profiles before stopping
-    // the owner. Apply recomputes this review after owning both existing locks.
+    // the owner. The host recomputes this review while holding its existing locks.
     let _ownership = if params.kind == ModelMaintenanceKind::ResetCpu
         && params.phase == ModelMaintenancePhase::Plan
     {
@@ -248,35 +250,43 @@ pub(crate) fn execute(
             .context("model maintenance requires library owner exit")?;
         Some((installation, library))
     };
-    // Same cross-process lock as the existing engine/variant setters.
-    let lock_path = root.join("inference.json.lock");
-    match fs::symlink_metadata(&lock_path) {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                metadata.is_file() && !metadata.file_type().is_symlink(),
-                "inference configuration lock is not a regular local path"
-            );
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
+    // A reviewed CPU plan is rechecked while its host owns the configuration locks.
+    let host_locked = params.kind == ModelMaintenanceKind::ResetCpu
+        && params.phase == ModelMaintenancePhase::Plan
+        && params.expected.is_some();
+    let _config_lock = if host_locked {
+        None
+    } else {
+        let lock_path = root.join("inference.json.lock");
+        match fs::symlink_metadata(&lock_path) {
+            Ok(metadata) => {
                 anyhow::ensure!(
-                    metadata.file_attributes() & 0x400 == 0,
-                    "inference configuration lock is a reparse point"
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "inference configuration lock is not a regular local path"
                 );
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    anyhow::ensure!(
+                        metadata.file_attributes() & 0x400 == 0,
+                        "inference configuration lock is a reparse point"
+                    );
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let config_lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)?;
-    config_lock.lock()?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        lock.lock()?;
+        Some(lock)
+    };
     let before = settings(root)?;
-    let _legacy_lock = if before.source != before.target {
+    let _legacy_lock = if !host_locked && before.source != before.target {
         let path = before.source.with_file_name("inference.json.lock");
         read(&path)?;
         let lock = fs::OpenOptions::new()
@@ -313,44 +323,6 @@ pub(crate) fn execute(
     };
     match (params.kind, params.phase) {
         (_, ModelMaintenancePhase::Plan) => {}
-        (ModelMaintenanceKind::ResetCpu, ModelMaintenancePhase::Apply) => {
-            let candidate = cpu_candidate(&before.value)?;
-            // Recheck the complete read set under the existing configuration lock.
-            anyhow::ensure!(
-                plan(params.kind, root, profile, &settings(root)?)?.review == receipt.plan.review,
-                "model reset revision changed before CAS"
-            );
-            let staged = root.join(format!(".inference-reset-{}.json", uuid::Uuid::new_v4()));
-            let result = (|| -> Result<()> {
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&staged)?;
-                file.write_all(&candidate)?;
-                file.sync_all()?;
-                crate::startup_identity::verify_control_binding(&params.binding)?;
-                anyhow::ensure!(
-                    read(&before.target)? == before.target_bytes,
-                    "model reset target revision conflict"
-                );
-                if before.target_bytes.is_some() {
-                    respire_spawn::durable::replace_file(&staged, &before.target)?;
-                } else {
-                    respire_spawn::durable::publish_new_file(&staged, &before.target)?;
-                }
-                Ok(())
-            })();
-            if result.is_err() && staged.try_exists()? {
-                fs::remove_file(&staged)?;
-            }
-            result?;
-            anyhow::ensure!(
-                read(&before.target)?.as_deref() == Some(candidate.as_slice()),
-                "CPU reset outcome unknown; inspect configuration, do not replay"
-            );
-            receipt.config_applied = true;
-            receipt.verified = true;
-        }
         (ModelMaintenanceKind::UninstallM3, ModelMaintenancePhase::Verify) => {
             let directory = receipt
                 .plan
