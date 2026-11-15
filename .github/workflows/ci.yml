@@ -101,6 +101,10 @@ jobs:
         run: node --test scripts/test-freeze-runtime-g1-candidate.mjs
       - name: Verify approved SDK version trains and download boundaries
         run: node --test scripts/test-sdk-version-trains.mjs
+      - name: Reject incomplete memory evidence and unsafe original archives
+        run: |
+          node scripts/test-produce-runtime-g1-memory.mjs
+          python3 -B scripts/test-run-runtime-g1-memory.py
       - name: Check native release smoke response assertions
         run: node scripts/smoke-runtime-release.mjs --self-check
       - name: Reject invalid MCP execution evidence
@@ -589,9 +593,227 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  g1-native-memory:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
+    name: g1-native-memory (${{ matrix.target }})
+    needs: [control-contract, detect]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            harness_target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            harness_target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            harness_target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            harness_target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            harness_target: x86_64-apple-darwin
+            platform: darwin
+            arch: x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            harness_target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            harness_target: x86_64-pc-windows-msvc
+            platform: win32
+            arch: x64
+            rustflags: -C target-feature=-crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            harness_target: aarch64-pc-windows-msvc
+            platform: win32
+            arch: arm64
+            rustflags: -C target-feature=-crt-static
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUNTIME_TARGET: ${{ matrix.target }}
+      G1_HARNESS_TARGET: ${{ matrix.harness_target }}
+      G1_NATIVE_PLATFORM: ${{ matrix.platform }}
+      G1_NATIVE_ARCH: ${{ matrix.arch }}
+      G1_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+      RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.harness_target }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require native hardware for every memory target
+        run: |
+          bash scripts/require-native-linux-arm64.sh "$RUNTIME_TARGET"
+          if [ "$RUNTIME_TARGET" = x86_64-apple-darwin ]; then
+            node scripts/smoke-runtime-release.mjs --check-native-intel
+          fi
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 memory acceptance requires native ARM64 hardware'
+          }
+      - name: Authenticate the exact frozen memory input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN: ${{ inputs.required_candidate_run_id }}
+          INPUT_ARTIFACT: ${{ inputs.required_candidate_artifact_id }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          for (const key of ['INPUT_RUN', 'INPUT_ARTIFACT']) assert.match(process.env[key] ?? '', /^[1-9][0-9]*$/);
+          const base = `repos/${process.env.GITHUB_REPOSITORY}/actions`;
+          const api = path => JSON.parse(execFileSync('gh', ['api', `${base}/${path}`], {encoding: 'utf8'}));
+          const run = api(`runs/${process.env.INPUT_RUN}`);
+          const artifact = api(`artifacts/${process.env.INPUT_ARTIFACT}`);
+          assert.equal(run.repository.full_name, process.env.GITHUB_REPOSITORY);
+          assert.equal(run.head_sha, process.env.GITHUB_SHA);
+          assert.equal(run.status, 'completed');
+          assert.equal(run.conclusion, 'success');
+          assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
+          assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
+          assert.equal(artifact.expired, false);
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.required_candidate_artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.required_candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: g1-input
+      - name: Resolve the CLI source from original candidate bytes
+        id: combination
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {appendFileSync, readFileSync} from 'node:fs';
+          const bytes = readFileSync('g1-input/candidate.json');
+          assert.equal(createHash('sha256').update(bytes).digest('hex'), process.env.G1_CANDIDATE_SHA256);
+          const candidate = JSON.parse(bytes);
+          assert.equal(candidate.schema, 2);
+          assert.equal(candidate.frozen, true);
+          assert.equal(candidate.gate, 'G1');
+          assert.equal(candidate.components.runtime.source_sha, process.env.GITHUB_SHA);
+          const sha = candidate.components.cli.source_sha;
+          assert.match(sha, /^[a-f0-9]{40}$/);
+          appendFileSync(process.env.GITHUB_OUTPUT, `cli_sha=${sha}\n`);
+          NODE
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-cli
+          ref: ${{ steps.combination.outputs.cli_sha }}
+          path: .cli-source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install the native musl loader for actual musl products
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl
+      - name: Resolve exact product and harness SDK cache keys
+        id: sdk
+        run: |
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "host_key=$(node scripts/sdk-ci-cache.mjs key "$G1_HARNESS_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "host_archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$G1_HARNESS_TARGET")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: .sdk-archives/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        if: matrix.target != matrix.harness_target
+        with:
+          path: .sdk/${{ matrix.harness_target }}
+          key: ${{ steps.sdk.outputs.host_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        if: matrix.target != matrix.harness_target
+        with:
+          path: .sdk-archives/${{ matrix.harness_target }}
+          key: ${{ steps.sdk.outputs.host_archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Check memory producer refusal paths
+        run: |
+          node scripts/test-produce-runtime-g1-memory.mjs
+          python -B scripts/test-run-runtime-g1-memory.py
+      - name: Build only the source business harness with its native host SDK
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
+          node scripts/sdk-ci-cache.mjs observe "$G1_HARNESS_TARGET"
+          cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-memory-harness-build.jsonl"
+          node scripts/stage-core-runtime.mjs target/debug/examples
+      - name: Execute pure memory cases on original frozen products
+        run: |
+          set -euo pipefail
+          test ! -e release-assets
+          mv g1-input/release-assets release-assets
+          node scripts/produce-runtime-g1-memory.mjs run
+      - name: Upload original memory evidence for this target and attempt
+        id: raw
+        uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-raw-runtime-memory-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-memory-raw
+          if-no-files-found: error
+          retention-days: 7
+      - name: Bind all three suites to the actual raw upload
+        env:
+          G1_RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}
+          G1_RAW_ARTIFACT_SHA256: ${{ steps.raw.outputs.artifact-digest }}
+          G1_RAW_ARTIFACT_NAME: required-tests-raw-runtime-memory-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node scripts/produce-runtime-g1-memory.mjs report
+      - uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-report-memory-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: g1-memory-report
+          if-no-files-found: error
+          retention-days: 7
+
   g1-report:
-    if: ${{ !cancelled() && needs.g1-native-smoke.result == 'success' && needs.g1-native-business.result == 'success' }}
-    needs: [g1-native-smoke, g1-native-business]
+    if: ${{ !cancelled() && needs.g1-native-smoke.result == 'success' && needs.g1-native-business.result == 'success' && needs.g1-native-memory.result == 'success' }}
+    needs: [g1-native-smoke, g1-native-business, g1-native-memory]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

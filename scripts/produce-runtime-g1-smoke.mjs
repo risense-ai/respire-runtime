@@ -18,6 +18,14 @@ export const BUSINESS_CASES = {
   'runtime.idempotency-same-fingerprint-once': ['diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once'],
   'runtime.idempotency-conflict': ['diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once'],
 };
+// Native child cases are mandatory even though one Rust test drives all modes.
+export const STOP_CASES = {
+  'runtime.stop-clean-drained': ['standalone:accepted-write', 'standalone:normal',
+    'cli-supervised:normal', 'client2-owned:normal'],
+  'runtime.stop-forced-timeout': ['standalone:explicit-force',
+    'cli-supervised:explicit-force', 'client2-owned:explicit-force'],
+  'runtime.stop-caller-timeout-drains': ['cli-supervised:caller-timeout', 'client2-owned:caller-timeout'],
+};
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const read = path => {
   const stat = lstatSync(path);
@@ -190,7 +198,10 @@ function bundle() {
   const parts = targets.map(target => ({target, cases: REQUIRED_CASES,
     part: `required-tests-report-part-${target}`, job: `g1-native-smoke (${target})`, raw: `required-tests-raw-runtime-native-${target}`}));
   assert.ok(targets.includes('x86_64-unknown-linux-gnu'), 'Business evidence requires the actual native Linux leg');
-  parts.push({target: 'x86_64-unknown-linux-gnu', cases: BUSINESS_CASES,
+  parts.push(...targets.map(target => ({target, cases: BUSINESS_CASES,
+    part: `required-tests-report-memory-${target}`, job: `g1-native-memory (${target})`,
+    raw: `required-tests-raw-runtime-memory-${target}`})));
+  parts.push({target: 'x86_64-unknown-linux-gnu', cases: STOP_CASES,
     part: 'required-tests-report-business-x86_64-unknown-linux-gnu', job: 'g1-native-business',
     raw: 'required-tests-raw-runtime-business-x86_64-unknown-linux-gnu'});
   for (const part of parts) {
@@ -220,8 +231,12 @@ function bundle() {
         assert.equal(String(report[key]), String(expected));
       }
       assert.deepEqual(report.actual_native_sdk, candidate.components.runtime.artifacts[target].native_sdk);
-      if (part.cases === BUSINESS_CASES) {
+      if (part.cases === BUSINESS_CASES || part.cases === STOP_CASES) {
         assert.deepEqual(report.actual_cli_native_sdk, candidate.components.cli.artifacts[target].native_sdk);
+      }
+      if (part.cases === BUSINESS_CASES) {
+        assert.equal(report.producer, 'scripts/produce-runtime-g1-memory.mjs');
+        assert.match(report.memory_sha256 ?? '', /^[a-f0-9]{64}$/);
       }
       assert.deepEqual(report.cases.map(item => item.name).sort(), [...names].sort());
       assert.ok(report.cases.every(item => item.status === 'passed'));

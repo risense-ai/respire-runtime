@@ -2012,6 +2012,11 @@ impl RegisteredStopFixture {
 
     fn run(&self, args: &[&str]) -> anyhow::Result<Value> {
         let output = self.command(args)?.output()?;
+        if !output.status.success() {
+            // Only the private libtest capture receives command output; public reports use fixed codes.
+            eprintln!("\nREGISTERED_LIFECYCLE_PRIVATE_STDOUT\n{}\nREGISTERED_LIFECYCLE_PRIVATE_STDERR\n{}\nREGISTERED_LIFECYCLE_PRIVATE_END",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
         anyhow::ensure!(output.status.success(), "registered lifecycle command failed with exit code {:?}", output.status.code());
         Ok(serde_json::from_slice::<Value>(&output.stdout)?["summary"].clone())
     }

@@ -145,10 +145,32 @@ Client2 verifies that operation against the persisted receipt after its own
 OS-bound exit wait. A normal drain timeout never implicitly authorizes a kill.
 
 Client disconnects do not cancel admitted writes. Idle MCP connections do not
-block drain; new calls are rejected and started calls finish. About four seconds
-is only a compatibility or forced-path deadline. That outcome is
-`forced_timeout` or `compatibility_timeout`; unfinished operations are `aborted`
-or `unknown`, never a normal successful drain.
+block drain; new calls are rejected and started calls finish. The approximately
+four-second grace applies only after an explicit force request. Its final outcome
+is `forced_timeout`; unfinished operations are `aborted` or `unknown`, never a
+normal successful drain. Legacy `compatibility_timeout` receipts retain the
+same unfinished-outcome restrictions when parsed.
+
+The current Runtime has no production path that emits `compatibility_timeout`.
+The enum, receipt parser and legacy receipt fixtures remain supported wire
+compatibility. They do not require restoring an automatic drain deadline.
+The former `runtime.stop-compatibility-timeout` G1 entry is replaced by
+`runtime.stop-caller-timeout-drains`: original CLI-supervised and Client2-owned
+callers may time out while the same Runtime remains draining, retains its lock
+and worker, rejects replay of the in-flight operation, and later commits the
+accepted encrypted write after the provider is released. Caller timeout must
+not trigger an implicit kill or fabricate a final Runtime timeout receipt.
+Explicit force is a separate identity-bound request; its unfinished operation
+remains unknown and its final outcome is `forced_timeout`.
+
+The normal, forced and caller-timeout native entries enumerate mandatory child
+cases for each applicable startup mode. The existing real business harness
+checks process identities, final receipts, business effects and cleanup before
+its producer emits candidate-bound reports. All eight native targets remain
+required; wiring a Linux producer does not implement the other seven targets.
+Registry `implemented` means the complete producer/mapping exists, not that
+execution passed. Current-run reports for every required target and child case
+remain mandatory regardless of that implementation status.
 
 Force is allowed only for an exact instance identity. A timeout alone does not
 prove that the lock holder died.
@@ -341,7 +363,9 @@ unfinished operation IDs. Unfinished results may be `aborted` or `unknown`,
 never fabricated `completed`. Neither timeout state is a normal `drained`
 receipt. `stop-final-fabricated-completion.json` is rejected. These are wire
 fixtures, not proof of process exit, child cleanup, lock release or a working
-force executor; dedicated native acceptance remains mandatory.
+force executor. Dedicated native acceptance remains mandatory for current
+normal drain, explicit force and caller-timeout safety. The legacy
+`compatibility_timeout` fixture proves parsing only, not a current producer.
 
 ### Backend load evidence in assets.status
 

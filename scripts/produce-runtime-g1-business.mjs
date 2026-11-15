@@ -4,14 +4,14 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {context, BUSINESS_CASES as CASES} from './produce-runtime-g1-smoke.mjs';
+import {context, BUSINESS_CASES, STOP_CASES as CASES} from './produce-runtime-g1-smoke.mjs';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
 const pairedClient2 = '1734322b6c6dd543441a753f07a3517bee5e1231';
 export {CASES};
 export const selected = [...new Set([
-  ...Object.values(CASES).flat(),
+  ...Object.values(BUSINESS_CASES).flat(),
   'account::authorization_preserves_and_commits_profiles',
   'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay',
 ])].sort();
@@ -178,6 +178,13 @@ export function verifyOwnedStop(report, mode, bound) {
     assert.equal(item.encrypted_write_committed, item.case !== 'explicit-force');
     assert.equal(item.forced_operation_remains_unknown, item.case === 'explicit-force');
     assert.equal(item.credential_cleanup_verified, true);
+    assert.equal(item.business_sender, 'modern-harness');
+    assert.equal(item.stop_sender, mode === 'registered'
+      ? (item.case === 'normal' ? 'modern-cli' : 'original-go-client2-managed') : 'original-go-client2');
+    if (item.case === 'normal') assert.equal(item.caller_timeout_ms, null);
+    else assert.ok(Number.isSafeInteger(item.caller_timeout_ms)
+      && item.caller_timeout_ms >= (mode === 'registered' ? 35000 : 30000)
+      && item.caller_timeout_ms <= 60000, 'Original caller must actually time out before explicit force or completion');
   }
   assert.equal(report.keyring.passed, true);
   assert.equal(report.keyring.business_passed, true);
@@ -295,6 +302,7 @@ function report() {
       artifact_id: Number(process.env.G1_RAW_ARTIFACT_ID), artifact_name: name,
       artifact_sha256: process.env.G1_RAW_ARTIFACT_SHA256, producer: execution.producer,
       business_sha256: execution.business_sha256, launcher_sha256: execution.launcher_sha256,
+      owned_stop_sha256: execution.owned_stop_sha256,
     });
   }
 }
