@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -258,3 +259,44 @@ print("stop runner refuses missing, ignored, duplicated or unsuccessful native e
 print("failed preparation writes safe stage/exit evidence and preserves the original exception")
 print("failed stop reports only complete allowlisted accepted-write checkpoints")
 print("Intel macOS harness abort reports only safe log markers")
+
+workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/background-start-native.yml").read_text()
+workflow = workflow.replace("\r\n", "\n")
+validation = textwrap.dedent(workflow.split("      - name: Validate explicit diagnostic inputs\n", 1)[1]
+    .split("          python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+for diagnostic, sha, legacy, accepted in [
+    ("false", "", "false", True),
+    ("true", "a" * 40, "false", True),
+    ("true", "", "false", False),
+    ("true", "branch-name", "false", False),
+    ("true", "a" * 40, "true", False),
+]:
+    with patch.dict(os.environ, MACOS_STOP_DIAGNOSTIC=diagnostic, CLI_SOURCE_SHA=sha, LEGACY_DEV_UPGRADE=legacy):
+        try:
+            exec(compile(validation, "diagnostic-inputs", "exec"), {})
+        except AssertionError:
+            assert not accepted
+        else:
+            assert accepted
+diagnostic = textwrap.dedent(workflow.split(
+    "      - name: Diagnose source-native macOS standalone stop with the original isolated HOME\n", 1)[1]
+    .split("          python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+compile(diagnostic, "macos-stop-diagnostic", "exec")
+for required in ("original.verify_source(", "env = stop.environment(root, request)",
+                 "env = manager.configure_env(env)", "original.verify_receipt(",
+                 "original.safe_failure_diagnostics(captured,", "stop.stop_failure_diagnostics(captured)",
+                 "stop.passed_case(captured)", "original.standalone_stop_checks(captured,",
+                 "manager.cleanup()", "release_acceptance=False", "g1_passed=False",
+                 "stdout=harness_log", "sys.exit(0 if report['passed'] and report['test_executed'] else 1)"):
+    assert required in diagnostic, required
+assert "stdout=subprocess.PIPE" not in diagnostic
+assert "env['HOME'] =" not in diagnostic and 'env["HOME"] =' not in diagnostic
+assert "macos-stop-diagnostic/result.json" in workflow
+assert "macos-stop-diagnostic/private.log" not in workflow
+assert "macos-stop-diagnostic/harness-private.log" not in workflow
+build = workflow.split("      - name: Build the existing controlled-service account harness\n", 1)[1].split("      - name:", 1)[0]
+assert "'respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures' || 'respire_app_domain/native-credential-fixtures'" in build
+assert '--features "$HARNESS_FEATURES"' in build
+assert 'if [[ "$MACOS_STOP_DIAGNOSTIC" == true ]]; then' in build
+assert 'RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET" node scripts/stage-core-runtime.mjs target/debug/examples' in build
+print("source-native Mac diagnostic requires an exact CLI, retains HOME isolation and publishes only safe reports")

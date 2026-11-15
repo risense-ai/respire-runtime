@@ -1514,6 +1514,11 @@ impl Fixture {
                     assert_eq!(health["store_ready"], false, "standalone stop fixture unlocked without its host");
                     assert_eq!(health["credential_state"], "required");
                     let delivered = self.command(&["--json", "runtime", "unlock"]).output()?;
+                    // Retain only the host's scalar diagnostic marker; raw stderr stays private.
+                    for line in String::from_utf8_lossy(&delivered.stderr).lines()
+                        .filter(|line| line.starts_with("HOST_PROVIDER_CREDENTIAL_FAILURE ")) {
+                        eprintln!("{line}");
+                    }
                     anyhow::ensure!(delivered.status.success(), "standalone stop fixture host key delivery failed");
                     let receipt: Value = serde_json::from_slice(&delivered.stdout)?;
                     let provider_status: respire_protocol::credentials::ProviderCredentialStatus =

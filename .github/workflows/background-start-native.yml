@@ -10,6 +10,14 @@ on:
       - '.github/workflows/background-start-native.yml'
   workflow_dispatch:
     inputs:
+      macos_stop_diagnostic:
+        description: Run only the source-native macOS standalone stop diagnostic (not G1)
+        type: boolean
+        default: false
+      cli_source_sha:
+        description: Exact CLI source commit (required for the macOS stop diagnostic)
+        type: string
+        default: ''
       legacy_dev_upgrade:
         description: Run the optional issue 285 DEV-to-DEV upgrade diagnostic (unchanged database format)
         type: boolean
@@ -24,11 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
+        include: ${{ fromJSON(inputs.macos_stop_diagnostic && '[{"os":"macos-latest","target":"aarch64-apple-darwin"}]' || '[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -38,13 +42,29 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Validate explicit diagnostic inputs
+        env:
+          MACOS_STOP_DIAGNOSTIC: ${{ inputs.macos_stop_diagnostic }}
+          CLI_SOURCE_SHA: ${{ inputs.cli_source_sha }}
+          LEGACY_DEV_UPGRADE: ${{ inputs.legacy_dev_upgrade }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          sha = os.environ['CLI_SOURCE_SHA']
+          diagnostic = os.environ['MACOS_STOP_DIAGNOSTIC'] == 'true'
+          assert not sha or re.fullmatch(r'[a-f0-9]{40}', sha), 'Exact CLI source SHA required'
+          assert not diagnostic or sha, 'macOS stop diagnostic requires cli_source_sha'
+          assert not diagnostic or os.environ['LEGACY_DEV_UPGRADE'] != 'true', 'Select one diagnostic'
+          PY
       - uses: actions/checkout@v5
+        if: inputs.macos_stop_diagnostic != true
         with:
           repository: risense-ai/respire-client2
           ref: 6ffa187685734873721ab51f3a54d8b2c29cd269
           path: .client2-source
           persist-credentials: false
       - uses: actions/setup-go@v5
+        if: inputs.macos_stop_diagnostic != true
         with:
           go-version: '1.26.0'
           cache: false
@@ -73,13 +93,26 @@ jobs:
       - name: Build actual candidate
         run: cargo build --locked -p respire_runtime --bin rsrs-runtime
       - name: Verify native diagnostics stay outside worker IPC
+        if: inputs.macos_stop_diagnostic != true
         run: cargo test --locked -p respire_core_sdk --lib core_wire_tests::worker_stdout_keeps_protocol_private -- --exact
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-cli
-          ref: 74b3ae3a4118bd5407d1ee58a12029086bee7359
+          ref: ${{ inputs.cli_source_sha || '74b3ae3a4118bd5407d1ee58a12029086bee7359' }}
           path: .cli-source
           persist-credentials: false
+      - name: Verify the exact CLI checkout
+        env:
+          CLI_SOURCE_SHA: ${{ inputs.cli_source_sha || '74b3ae3a4118bd5407d1ee58a12029086bee7359' }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, pathlib
+          path = pathlib.Path('.cli-source/scripts/native-account-candidate.py')
+          spec = importlib.util.spec_from_file_location('paired_source_identity', path)
+          original = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(original)
+          original.verify_source(pathlib.Path('.cli-source'), os.environ['CLI_SOURCE_SHA'])
+          PY
       - name: Build the fixed CLI compatibility consumer
         run: cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --features client2-host-prototype --target-dir .cli-source/target
       - name: Package the actual candidate for the existing CLI installer
@@ -133,6 +166,7 @@ jobs:
           curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' --output "$models/onnx/model_quantized.onnx"
           curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 'https://github.com/risense-ai/respire-cli/releases/download/model-bge-m3-ort-v1/model_quantized.cpu-v1.ort' --output "$models/onnx/model_quantized.cpu-v1.ort"
       - name: Exercise paired host lifecycle, restart locking and native key delivery
+        if: inputs.macos_stop_diagnostic != true
         run: |
           set -euo pipefail
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("runtime/Cargo.toml", "rb"))["package"]["version"])')"
@@ -147,10 +181,115 @@ jobs:
             "${command[@]}"
           fi
       - name: Build the existing controlled-service account harness
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' || inputs.macos_stop_diagnostic == true
+        env:
+          HARNESS_FEATURES: ${{ inputs.macos_stop_diagnostic && 'respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures' || 'respire_app_domain/native-credential-fixtures' }}
+          MACOS_STOP_DIAGNOSTIC: ${{ inputs.macos_stop_diagnostic }}
         run: |
           set -euo pipefail
-          cargo test --locked -p respire_commands --features respire_app_domain/native-credential-fixtures --example cli_business_tests --no-run --message-format=json > "$RUNNER_TEMP/paired-account-harness.jsonl"
+          cargo test --locked -p respire_commands --features "$HARNESS_FEATURES" --example cli_business_tests --no-run --message-format=json > "$RUNNER_TEMP/paired-account-harness.jsonl"
+          if [[ "$MACOS_STOP_DIAGNOSTIC" == true ]]; then
+            RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET" node scripts/stage-core-runtime.mjs target/debug/examples
+          fi
+      - name: Diagnose source-native macOS standalone stop with the original isolated HOME
+        if: inputs.macos_stop_diagnostic == true
+        env:
+          CLI_SOURCE_SHA: ${{ inputs.cli_source_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, shutil, subprocess, sys
+          sys.path.insert(0, str(pathlib.Path('.cli-source/scripts').resolve()))
+          from importlib.util import module_from_spec, spec_from_file_location
+          def load(name, path):
+              spec = spec_from_file_location(name, path)
+              module = module_from_spec(spec)
+              spec.loader.exec_module(module)
+              return module
+          original = load('paired_stop_assertions', '.cli-source/scripts/native-account-candidate.py')
+          stop = load('paired_stop_driver', 'scripts/run-runtime-g1-stop.py')
+          native = load('paired_stop_credentials', '.cli-source/scripts/dev-migration-keyring-selftest.py')
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
+          root = temp / 'macos-stop-diagnostic'
+          root.mkdir(mode=0o700)
+          report = dict(schema=1, passed=False, test_executed=False, release_acceptance=False,
+              g1_passed=False, evidence_class='source-native-diagnostic', target=os.environ['RUNTIME_TARGET'],
+              runtime_source_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              cli_source_sha=os.environ['CLI_SOURCE_SHA'], home_isolation='unchanged-g1-stop', stage='preparation')
+          manager = None
+          try:
+              assert sys.platform == 'darwin'
+              original.verify_source(pathlib.Path('.cli-source'), report['cli_source_sha'])
+              records = [json.loads(line) for line in (temp / 'paired-account-harness.jsonl').read_text().splitlines()]
+              binaries = [r['executable'] for r in records if r.get('reason') == 'compiler-artifact'
+                  and r.get('target', {}).get('name') == 'cli_business_tests'
+                  and r.get('profile', {}).get('test') is True and r.get('executable')]
+              assert len(binaries) == 1
+              harness = pathlib.Path(binaries[0]).resolve(strict=True)
+              metadata = temp / ('runtime-build-' + report['target'] + '.json')
+              request = dict(cli=str(pathlib.Path('.cli-source/target/debug/rsrs').resolve(strict=True)),
+                  runtime_metadata=str(metadata), cli_source_sha=report['cli_source_sha'],
+                  source_sha=report['runtime_source_sha'])
+              for name in ('home', 'data', 'config', 'cache', 'runtime', 'tmp', 'installation', 'cli'):
+                  (root / name).mkdir()
+              env = stop.environment(root, request)
+              cli = pathlib.Path(env['RSRS_CLI_BIN'])
+              shutil.copy2(request['cli'], cli)
+              report['cli_binary_sha256'] = original.digest(cli)
+              report['harness_sha256'] = original.digest(harness)
+              report['runtime_binary_sha256'] = json.loads(metadata.read_bytes())['binary_sha256']
+              shutil.copytree(temp / 'offline-keygen-models', root / 'model')
+              for name, sha in original.MODEL_HASHES.items():
+                  assert original.digest(root / 'model' / name) == sha
+              with (root / 'private.log').open('wb') as log:
+                  subprocess.run([str(cli), '--json', 'runtime', 'install', '--file',
+                      str(temp / ('rsrs-runtime-' + report['target'] + '.tar.gz')), '--version',
+                      json.loads(metadata.read_bytes())['runtime_version']], env=env, stdout=log, stderr=log, check=True)
+                  installed = original.verify_receipt(root / 'installation', metadata)
+                  assert str(installed) == env['RSRS_RUNTIME_BIN']
+                  report['stage'] = 'credential_setup'
+                  manager = native.backend.create(root / 'credentials')
+                  env = manager.configure_env(env)
+                  before = {}
+                  native.roundtrips(manager, before)
+                  assert len(before) == 8
+                  report['stage'] = 'stop_harness'
+                  # File output cannot keep Python waiting on a pipe inherited by a detached child.
+                  with (root / 'harness-private.log').open('wb') as harness_log:
+                      process = subprocess.run([str(harness), stop.CASE, '--exact', '--test-threads=1', '--show-output'],
+                          env=env, stdout=harness_log, stderr=subprocess.STDOUT)
+                  captured = (root / 'harness-private.log').read_bytes()
+                  report['exit_code'] = process.returncode
+                  report['test_executed'] = f'test {stop.CASE} ... '.encode() in captured
+                  # Only existing allowlist parsers may publish product diagnostics, including numeric OSStatus.
+                  report['failure_diagnostics'] = original.safe_failure_diagnostics(captured,
+                      [stop.CASE] if process.returncode else [])
+                  report['accepted_write_checkpoints'] = stop.accepted_write_checkpoints(captured)
+                  report['stop_diagnostics'] = stop.stop_failure_diagnostics(captured)
+                  assert process.returncode == 0, 'Native standalone stop failed'
+                  report['stage'] = 'stop_assertions'
+                  stop.passed_case(captured)
+                  report['standalone'] = original.standalone_stop_checks(captured, report['runtime_binary_sha256'])
+                  assert report['standalone']['passed']
+                  report['stage'] = 'credential_after'
+                  after = {}
+                  native.roundtrips(manager, after)
+                  assert len(after) == 8
+                  assert original.digest(cli) == report['cli_binary_sha256']
+                  assert original.digest(harness) == report['harness_sha256']
+                  assert original.digest(installed) == report['runtime_binary_sha256']
+                  report.update(passed=True, stage='complete')
+          except Exception as error:
+              report['failure_type'] = type(error).__name__
+          finally:
+              if manager is not None:
+                  try:
+                      report['keyring_cleanup'] = manager.cleanup()
+                      assert report['keyring_cleanup']['passed'] and not report['keyring_cleanup']['remaining_entries']
+                  except Exception as error:
+                      report.update(passed=False, cleanup_failure_type=type(error).__name__)
+              original.write_json(root / 'result.json', report)
+          sys.exit(0 if report['passed'] and report['test_executed'] else 1)
+          PY
       - name: Exercise account authorization and sync with the exact paired sources
         if: runner.os == 'Linux'
         run: |
@@ -203,5 +342,6 @@ jobs:
             ${{ runner.temp }}/runtime-build-${{ matrix.target }}.json
             ${{ runner.temp }}/issue-285/upgrade-report.json
             ${{ runner.temp }}/paired-account-business/result.json
+            ${{ runner.temp }}/macos-stop-diagnostic/result.json
           if-no-files-found: warn
           retention-days: 1
