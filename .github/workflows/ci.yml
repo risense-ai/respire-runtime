@@ -545,10 +545,44 @@ jobs:
       - name: Resolve the exact SDK payload and original archive cache keys
         id: sdk
         run: |
-          cmp sdk/core-sdk.lock.json .cli-source/sdk/core-sdk.lock.json
+          set -euo pipefail
           cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
+          cmp .cli-source/sdk/core-sdk.lock.json .cli-source/crates/core-sdk/core-sdk.lock.json
           echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
           echo "archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "cli_key=$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "cli_archive_key=$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      # Restore at the producer's paths to retain the existing cache version, then move to its owner.
+      - uses: actions/cache/restore@v4
+        id: cli-payload
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.sdk.outputs.cli_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: cli-archive
+        with:
+          path: .sdk-archives/x86_64-unknown-linux-gnu
+          key: ${{ steps.sdk.outputs.cli_archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the CLI's own original SDK bytes
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.cli_key }}
+          MATCHED_KEY: ${{ steps.cli-payload.outputs.cache-matched-key }}
+          EXPECTED_ARCHIVE_KEY: ${{ steps.sdk.outputs.cli_archive_key }}
+          MATCHED_ARCHIVE_KEY: ${{ steps.cli-archive.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -n "$EXPECTED_ARCHIVE_KEY" && test "$EXPECTED_ARCHIVE_KEY" = "$MATCHED_ARCHIVE_KEY"
+          mkdir -p .cli-source/.sdk .cli-source/.sdk-archives
+          test ! -e ".cli-source/.sdk/$RUNTIME_TARGET" && test ! -e ".cli-source/.sdk-archives/$RUNTIME_TARGET"
+          mv ".sdk/$RUNTIME_TARGET" ".cli-source/.sdk/$RUNTIME_TARGET"
+          mv ".sdk-archives/$RUNTIME_TARGET" ".cli-source/.sdk-archives/$RUNTIME_TARGET"
+          (cd .cli-source && node ../scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET")
       - uses: actions/cache/restore@v4
         id: payload
         with:
@@ -574,9 +608,7 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
           test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
           test -n "$EXPECTED_ARCHIVE_KEY" && test "$EXPECTED_ARCHIVE_KEY" = "$MATCHED_ARCHIVE_KEY"
-          node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
-          test ! -e .cli-source/.sdk && cp -a .sdk .cli-source/.sdk
-          test ! -e .cli-source/.sdk-archives && cp -a .sdk-archives .cli-source/.sdk-archives
+          node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
           cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-business-harness-build.jsonl"
           node scripts/stage-core-runtime.mjs target/debug/examples
       - name: Execute the existing exact business cases and original Client2 on frozen product bytes
@@ -788,17 +820,55 @@ jobs:
       - name: Resolve exact product and harness SDK cache keys
         id: sdk
         run: |
+          set -euo pipefail
+          cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
+          cmp .cli-source/sdk/core-sdk.lock.json .cli-source/crates/core-sdk/core-sdk.lock.json
           echo "key=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
           echo "archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
           echo "host_key=$(node scripts/sdk-ci-cache.mjs key "$G1_HARNESS_TARGET")" >> "$GITHUB_OUTPUT"
           echo "host_archive_key=$(node scripts/sdk-ci-cache.mjs archive-key "$G1_HARNESS_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "cli_key=$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "cli_archive_key=$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      # Restore at the producer's paths to retain the existing cache version, then move to its owner.
       - uses: actions/cache/restore@v4
+        id: cli-payload
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.cli_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: cli-archive
+        with:
+          path: .sdk-archives/${{ matrix.target }}
+          key: ${{ steps.sdk.outputs.cli_archive_key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the CLI's own original SDK bytes
+        env:
+          EXPECTED_KEY: ${{ steps.sdk.outputs.cli_key }}
+          MATCHED_KEY: ${{ steps.cli-payload.outputs.cache-matched-key }}
+          EXPECTED_ARCHIVE_KEY: ${{ steps.sdk.outputs.cli_archive_key }}
+          MATCHED_ARCHIVE_KEY: ${{ steps.cli-archive.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test -n "$EXPECTED_ARCHIVE_KEY" && test "$EXPECTED_ARCHIVE_KEY" = "$MATCHED_ARCHIVE_KEY"
+          mkdir -p .cli-source/.sdk .cli-source/.sdk-archives
+          test ! -e ".cli-source/.sdk/$RUNTIME_TARGET" && test ! -e ".cli-source/.sdk-archives/$RUNTIME_TARGET"
+          mv ".sdk/$RUNTIME_TARGET" ".cli-source/.sdk/$RUNTIME_TARGET"
+          mv ".sdk-archives/$RUNTIME_TARGET" ".cli-source/.sdk-archives/$RUNTIME_TARGET"
+          (cd .cli-source && node ../scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET")
+      - uses: actions/cache/restore@v4
+        id: payload
         with:
           path: .sdk/${{ matrix.target }}
           key: ${{ steps.sdk.outputs.key }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache/restore@v4
+        id: archive
         with:
           path: .sdk-archives/${{ matrix.target }}
           key: ${{ steps.sdk.outputs.archive_key }}

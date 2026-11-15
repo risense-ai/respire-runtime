@@ -67,10 +67,9 @@ export function validatePart(part, expected, target) {
   for (const owner of ['runtime', 'cli']) {
     const observed = part.native_sdk[owner];
     assert.deepEqual(Object.keys(observed).sort(), ['archive_sha256', 'manifest_sha256', 'version']);
-    assert.ok(observed.version);
+    assert.ok(typeof observed.version === 'string' && observed.version);
     for (const key of ['archive_sha256', 'manifest_sha256']) assert.match(observed[key], /^[a-f0-9]{64}$/);
   }
-  assert.deepEqual(part.native_sdk.runtime, part.native_sdk.cli);
   assert.ok(Array.isArray(part.files) && part.files.length);
   const names = new Set();
   for (const file of part.files) {
@@ -94,6 +93,15 @@ function archive(payload, output) {
   const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar';
   execFileSync(tar, ['--format=ustar', '-czf', output, '-C', payload, '.'], {stdio: 'inherit'});
 }
+export function observeConsumerSdk(root, target) {
+  const lock = bytes(root, 'sdk/core-sdk.lock.json');
+  assert.ok(lock.equals(bytes(root, 'crates/core-sdk/core-sdk.lock.json')), 'Consumer SDK lock copies differ');
+  const entry = JSON.parse(lock).targets[target];
+  const observed = observeSdkArchive(bytes(root, `.sdk-archives/${target}/sdk.tar.gz`), target, entry);
+  auditSdkDirectory(join(root, '.sdk', target), target, entry);
+  assert.equal(digest(bytes(root, `.sdk/${target}/manifest.json`)), observed.manifest_sha256);
+  return observed;
+}
 function packagePart() {
   const context = checkedContext(), target = process.env.RUNTIME_TARGET;
   assert.ok(FREEZE_TARGETS.includes(target));
@@ -102,15 +110,10 @@ function packagePart() {
   const cli = resolve('.cli-source');
   assert.equal(execFileSync('git', ['-C', cli, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), context.cli_source_sha);
   assert.equal(execFileSync('git', ['-C', cli, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
-  const lock = bytes('.', 'sdk/core-sdk.lock.json');
-  for (const path of ['crates/core-sdk/core-sdk.lock.json', '.cli-source/sdk/core-sdk.lock.json', '.cli-source/crates/core-sdk/core-sdk.lock.json']) assert.ok(lock.equals(bytes('.', path)));
-  const entry = JSON.parse(lock).targets[target], native_sdk = {};
+  const native_sdk = {};
   for (const [owner, root] of [['runtime', resolve('.')], ['cli', cli]]) {
-    native_sdk[owner] = observeSdkArchive(bytes(root, `.sdk-archives/${target}/sdk.tar.gz`), target, entry);
-    auditSdkDirectory(join(root, '.sdk', target), target, entry);
-    assert.equal(digest(bytes(root, `.sdk/${target}/manifest.json`)), native_sdk[owner].manifest_sha256);
+    native_sdk[owner] = observeConsumerSdk(root, target);
   }
-  assert.deepEqual(native_sdk.runtime, native_sdk.cli);
   const runtimeMetadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
   const cliMetadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {cwd: cli, encoding: 'utf8'}));
   const runtimePackage = runtimeMetadata.packages.filter(value => value.name === 'respire_runtime');
@@ -168,8 +171,10 @@ export function assembleCandidate(parts, expected, artifacts) {
   for (const part of parts) {
     validatePart(part, expected, part.target);
     assert.equal(part.runtime_version, components.runtime.version); assert.equal(part.cli_version, components.cli.version);
-    assert.equal(part.native_sdk.runtime.version, parts[0].native_sdk.runtime.version);
-    for (const owner of ['runtime', 'cli']) components[owner].artifacts[part.target] = {...artifacts[part.target][owner], native_sdk: part.native_sdk[owner]};
+    for (const owner of ['runtime', 'cli']) {
+      assert.equal(part.native_sdk[owner].version, parts[0].native_sdk[owner].version);
+      components[owner].artifacts[part.target] = {...artifacts[part.target][owner], native_sdk: part.native_sdk[owner]};
+    }
     if (part.target === FREEZE_TARGETS[0]) components.client2.artifacts[part.target] = {...artifacts[part.target].client2, native_sdk: null};
   }
   for (const component of Object.values(components)) for (const artifact of Object.values(component.artifacts)) {

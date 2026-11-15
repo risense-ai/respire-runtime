@@ -4,7 +4,9 @@ import {CASES, selected, verifyResults} from './produce-runtime-g1-memory.mjs';
 // Synthetic refusal checks are never uploaded as product acceptance evidence.
 assert.equal(Object.keys(CASES).length, 3);
 assert.equal(selected.length, 2);
-const identity = {target: 'aarch64-unknown-linux-musl', candidate_sha256: 'a'.repeat(64)};
+const identity = {target: 'aarch64-unknown-linux-musl', candidate_sha256: 'a'.repeat(64),
+  actual_cli_native_sdk: {version: '2.0.0-dev.4', archive_sha256: 'b'.repeat(64), manifest_sha256: 'c'.repeat(64)},
+  cli_sdk_lock_sha256: 'd'.repeat(64)};
 const result = {schema: 1, passed: true, test_executed: true, release_acceptance: false,
   offline_installer_verified: true, identity, target: identity.target, passed_cases: selected,
   model_sha256: {
@@ -18,5 +20,7 @@ for (const change of [
   {offline_installer_verified: false}, {passed_cases: selected.slice(1)},
   {passed_cases: [...selected, selected[0]]}, {target: 'aarch64-unknown-linux-gnu'},
   {identity: {...identity, candidate_sha256: 'b'.repeat(64)}}, {model_sha256: {}},
+  {identity: {...identity, actual_cli_native_sdk: {...identity.actual_cli_native_sdk, version: 'other'}}},
+  {identity: {...identity, cli_sdk_lock_sha256: '0'.repeat(64)}},
 ]) assert.throws(() => verifyResults({...result, ...change}, identity));
 console.log('memory producer rejects incomplete cases, wrong targets, changed inputs and unverified models');

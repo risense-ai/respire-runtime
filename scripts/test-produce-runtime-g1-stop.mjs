@@ -4,7 +4,9 @@ import {CASES, selected, verifyResults} from './produce-runtime-g1-stop.mjs';
 // Synthetic refusal checks, never native acceptance evidence.
 const digest = 'a'.repeat(64);
 const identity = {target: 'aarch64-unknown-linux-musl', source_sha: 'b'.repeat(40),
-  cli_source_sha: 'c'.repeat(40), client2_source_sha: 'd'.repeat(40), run_id: '13', run_attempt: '2'};
+  cli_source_sha: 'c'.repeat(40), client2_source_sha: 'd'.repeat(40), run_id: '13', run_attempt: '2',
+  actual_cli_native_sdk: {version: '2.0.0-dev.4', archive_sha256: digest, manifest_sha256: 'e'.repeat(64)},
+  cli_sdk_lock_sha256: 'f'.repeat(64)};
 const standalone = {passed: true, observations: ['normal', 'explicit-force', 'accepted-write'].map(name => ({case: name}))};
 const mode = name => ({passed: true, standalone,
   credential: {passed: true, credential_before_passed: true, credential_after_passed: true,
@@ -46,6 +48,8 @@ for (const mutate of [
   r => { r.prepared_memory.passed_cases.push('fabricated-case'); },
   r => { r.prepared_memory.passed_cases.push(r.prepared_memory.passed_cases[0]); },
   r => { r.prepared_memory.identity = {...identity, cli_source_sha: 'e'.repeat(40)}; },
+  r => { r.prepared_memory.identity.actual_cli_native_sdk.archive_sha256 = '0'.repeat(64); },
+  r => { r.prepared_memory.identity.cli_sdk_lock_sha256 = '0'.repeat(64); },
   r => { r.prepared_memory.model_sha256 = {}; },
   r => { r.prepared_memory.passed = false; },
   r => { r.prepared_memory.test_executed = false; },

@@ -88,6 +88,21 @@ def verify_installed_payload(directory, binary, archive_binary, inventory):
     assert actual == set(expected), "Managed Runtime inventory differs from authenticated runtime files"
 
 
+def verify_cli_sdk(sdk, expected_sdk, core, inventory, cli_files):
+    assert digest(sdk / "manifest.json") == expected_sdk["manifest_sha256"], "CLI SDK manifest digest differs"
+    manifest = json.loads((sdk / "manifest.json").read_bytes())
+    assert core["target"] == manifest["target"]
+    assert core["sdk_version"] == manifest["sdk_version"] == expected_sdk["version"]
+    for item in manifest["files"]:
+        name = item["path"]
+        staged = (name[8:] if name.startswith("runtime/") else
+                  "core-notices/" + name[8:] if name.startswith("notices/") else
+                  "core-notices/CORE-SDK-LICENSE.txt" if name == "LICENSE.txt" else None)
+        if staged is not None:
+            assert inventory[staged] == item["sha256"]
+            assert cli_files[staged]["size"] == (sdk / safe_name(name)).stat().st_size
+
+
 def execute(request):
     root = Path(request["root"])
     assert root.is_absolute() and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve()
@@ -109,17 +124,10 @@ def execute(request):
     assert set(cli_files) == set(inventory) | {"core-runtime.json"}
     for name, sha in inventory.items():
         assert cli_files[name]["sha256"] == sha
-    sdk = Path(".sdk") / target
-    manifest = json.loads((sdk / "manifest.json").read_bytes())
-    assert core["sdk_version"] == manifest["sdk_version"]
-    for item in manifest["files"]:
-        name = item["path"]
-        staged = (name[8:] if name.startswith("runtime/") else
-                  "core-notices/" + name[8:] if name.startswith("notices/") else
-                  "core-notices/CORE-SDK-LICENSE.txt" if name == "LICENSE.txt" else None)
-        if staged is not None:
-            assert inventory[staged] == item["sha256"]
-            assert cli_files[staged]["size"] == (sdk / safe_name(name)).stat().st_size
+    assert digest(Path(".cli-source/sdk/core-sdk.lock.json")) == request["cli_sdk_lock_sha256"]
+    expected_sdk = request["actual_cli_native_sdk"]
+    assert digest(Path(".cli-source/.sdk-archives") / target / "sdk.tar.gz") == expected_sdk["archive_sha256"]
+    verify_cli_sdk(Path(".cli-source/.sdk") / target, expected_sdk, core, inventory, cli_files)
     runtime_files = unpack(Path(request["runtime_archive"]), root / "runtime-payload", request["runtime_archive_sha256"])
     expected = {safe_name(item["path"]): {"size": item["size"], "sha256": item["sha256"]} for item in runtime_meta["files"]}
     assert len(expected) == len(runtime_meta["files"]) and runtime_files == expected

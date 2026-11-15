@@ -7,6 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {context, STOP_CASES, BUSINESS_CASES} from './produce-runtime-g1-smoke.mjs';
 import {verifyResults as verifyMemoryResults} from './produce-runtime-g1-memory.mjs';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
+import {observeConsumerSdk} from './freeze-runtime-g1-candidate.mjs';
 
 export const CASES = {...BUSINESS_CASES, ...STOP_CASES};
 export const selected = [...new Set(Object.values(STOP_CASES).flat())].sort();
@@ -36,10 +37,9 @@ function inputs() {
   for (const directory of ['.', '.cli-source', '.client2-source']) {
     assert.equal(execFileSync('git', ['-C', directory, 'diff', 'HEAD', '--name-only'], {encoding: 'utf8'}).trim(), '');
   }
-  assert.deepEqual(json('.cli-source/sdk/core-sdk.lock.json'), json('sdk/core-sdk.lock.json'));
-  assert.deepEqual(json('.cli-source/crates/core-sdk/core-sdk.lock.json'), json('sdk/core-sdk.lock.json'));
   const artifact = bound.candidate.components.cli.artifacts[bound.target];
-  assert.deepEqual(artifact.native_sdk, bound.observed);
+  const actualCliSdk = observeConsumerSdk(resolve('.cli-source'), bound.target);
+  assert.deepEqual(actualCliSdk, artifact.native_sdk);
   const suffix = bound.target.includes('windows') ? '.exe' : '';
   const metadataPath = resolve('g1-input/cli-assets', `cli-build-${bound.target}.json`);
   const metadata = json(metadataPath);
@@ -62,6 +62,7 @@ function inputs() {
   return {bound, identity: {target: bound.target, source_sha: process.env.GITHUB_SHA, cli_source_sha: source, client2_source_sha: client2,
     run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
     candidate_sha256: hash(bound.bytes), harness_target: harnessTarget, harness_native_sdk: harnessSdk,
+    actual_cli_native_sdk: actualCliSdk, cli_sdk_lock_sha256: hash(read('.cli-source/sdk/core-sdk.lock.json')),
     cli, cli_metadata: metadataPath,
     cli_metadata_sha256: hash(read(metadataPath)), sdk_lock_sha256: hash(read('sdk/core-sdk.lock.json')),
     cli_binary_sha256: artifact.binary_sha256, cli_archive: archive, cli_archive_sha256: artifact.archive_sha256,
@@ -152,7 +153,7 @@ function run() {
   writeFileSync('g1-stop-raw/candidate.json', bound.bytes, {flag: 'wx'});
   save('g1-stop-raw/execution.json', {schema: 1, ...identity, repository: process.env.GITHUB_REPOSITORY,
     job_name: `g1-native-stop (${bound.target})`, producer: 'scripts/produce-runtime-g1-stop.mjs',
-    actual_native_sdk: bound.observed, actual_cli_native_sdk: bound.candidate.components.cli.artifacts[bound.target].native_sdk,
+    actual_native_sdk: bound.observed,
     stop_sha256: hash(read('g1-stop-raw/stop.json')), started_at, completed_at: new Date().toISOString()});
 }
 
@@ -164,7 +165,7 @@ function report() {
   assert.equal(execution.job_name, `g1-native-stop (${bound.target})`);
   assert.equal(execution.producer, 'scripts/produce-runtime-g1-stop.mjs');
   assert.deepEqual(execution.actual_native_sdk, bound.observed);
-  assert.deepEqual(execution.actual_cli_native_sdk, bound.candidate.components.cli.artifacts[bound.target].native_sdk);
+  assert.deepEqual(execution.actual_cli_native_sdk, identity.actual_cli_native_sdk);
   assert.ok(read('g1-stop-raw/candidate.json').equals(bound.bytes));
   assert.equal(execution.stop_sha256, hash(read('g1-stop-raw/stop.json')));
   const verifiedCases = verifyResults(json('g1-stop-raw/stop.json'), identity);

@@ -1,6 +1,7 @@
 """Small refusal checks only; no product execution or acceptance claims."""
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -70,4 +71,26 @@ with tempfile.TemporaryDirectory(prefix="g1-memory-check-") as directory:
     extra.unlink()
     (managed / "core-notices").mkdir()
     refuses(verify)
+    sdk = root / "cli-sdk"
+    (sdk / "runtime").mkdir(parents=True)
+    library = sdk / "runtime/core.so"
+    library.write_bytes(b"cli-native")
+    manifest = sdk / "manifest.json"
+    manifest.write_text(json.dumps({"target": "fixture-target", "sdk_version": "2.0.0-dev.4",
+                                   "files": [{"path": "runtime/core.so", "sha256": fixture.digest(library)}]}),
+                        encoding="utf-8")
+    expected_sdk = {"version": "2.0.0-dev.4", "manifest_sha256": fixture.digest(manifest)}
+    core = {"target": "fixture-target", "sdk_version": "2.0.0-dev.4"}
+    inventory = {"core.so": fixture.digest(library)}
+    files = {"core.so": {"size": library.stat().st_size}}
+    verify_sdk = lambda: fixture.verify_cli_sdk(sdk, expected_sdk, core, inventory, files)
+    verify_sdk()
+    runtime_sdk = {"version": "2.0.0-dev.3", "manifest_sha256": "0" * 64}
+    refuses(lambda: fixture.verify_cli_sdk(sdk, runtime_sdk, core, inventory, files))
+    refuses(lambda: fixture.verify_cli_sdk(sdk, {**expected_sdk, "version": "2.0.0-dev.3"}, core, inventory, files))
+    refuses(lambda: fixture.verify_cli_sdk(sdk, expected_sdk, {**core, "target": "other"}, inventory, files))
+    refuses(lambda: fixture.verify_cli_sdk(sdk, expected_sdk, core, {"core.so": "0" * 64}, files))
+    refuses(lambda: fixture.verify_cli_sdk(sdk, expected_sdk, core, inventory, {"core.so": {"size": 0}}))
+    manifest.write_text("{}", encoding="utf-8")
+    refuses(verify_sdk)
 print("memory fixture rejects skipped coverage, duplicate cases, altered archives, traversal and links")

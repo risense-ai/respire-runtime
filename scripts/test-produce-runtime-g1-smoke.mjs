@@ -20,9 +20,10 @@ const suites = {
 };
 const targets = ['x86_64-unknown-linux-gnu', ...TARGETS.filter(target => target !== 'x86_64-unknown-linux-gnu')];
 const sdk = {version: 'synthetic-only', archive_sha256: 'a'.repeat(64), manifest_sha256: 'b'.repeat(64)};
+const cliSdk = {version: 'synthetic-cli-only', archive_sha256: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64)};
 const candidateBytes = Buffer.from(JSON.stringify({schema: 2, frozen: true, gate: 'G1',
   components: {runtime: {source_sha: sha, artifacts: Object.fromEntries(targets.map(target => [target, {native_sdk: sdk}]))},
-    cli: {artifacts: Object.fromEntries(targets.map(target => [target, {native_sdk: sdk}]))}}}));
+    cli: {artifacts: Object.fromEntries(targets.map(target => [target, {native_sdk: cliSdk}]))}}}));
 const digest = createHash('sha256').update(candidateBytes).digest('hex');
 const mutations = [
   ['valid', () => {}, true],
@@ -52,7 +53,9 @@ const mutations = [
   ['stop wrong attempt', (part) => {part.reports[0].run_attempt = '1';}, false, 'stop'],
   ['stop wrong SDK', (part) => {part.reports[0].actual_native_sdk = {...sdk, archive_sha256: 'c'.repeat(64)};}, false, 'stop'],
   ['stop raw hash reused', (part) => {for (const report of part.reports) report.artifact_sha256 = createHash('sha256').update(`stop-${targets[0]}`).digest('hex');}, false, 'stop'],
-  ['stop CLI SDK differs', (part) => {part.reports[0].actual_cli_native_sdk = {...sdk, archive_sha256: 'c'.repeat(64)};}, false, 'stop'],
+  ['stop CLI SDK differs', (part) => {part.reports[0].actual_cli_native_sdk = {...cliSdk, archive_sha256: 'e'.repeat(64)};}, false, 'stop'],
+  ['stop CLI claims Runtime SDK', (part) => {part.reports[0].actual_cli_native_sdk = sdk;}, false, 'stop'],
+  ['stop Runtime claims CLI SDK', (part) => {part.reports[0].actual_native_sdk = cliSdk;}, false, 'stop'],
   ['stop raw reused', (part) => {for (const report of part.reports) report.artifact_id = 32;}, false, 'stop'],
 ];
 for (const [name, mutate, passed, kind = 'native'] of mutations) {
@@ -74,7 +77,7 @@ for (const [name, mutate, passed, kind = 'native'] of mutations) {
     const stop = {candidate: candidateBytes, reports: Object.entries({...BUSINESS_CASES, ...STOP_CASES}).map(([test_id, names]) => ({
       schema: 2, test_id, target, status: 'passed', coverage: 'real-artifact', source_sha: sha,
       repository: 'risense-ai/respire-runtime', run_id: '17', run_attempt: '2', candidate_sha256: digest,
-      job_name: `g1-native-stop (${target})`, actual_native_sdk: sdk, actual_cli_native_sdk: sdk,
+      job_name: `g1-native-stop (${target})`, actual_native_sdk: sdk, actual_cli_native_sdk: cliSdk,
       producer: 'scripts/produce-runtime-g1-stop.mjs', stop_sha256: 'b'.repeat(64),
       artifact_id: 201 + index, artifact_sha256: createHash('sha256').update(`stop-${target}`).digest('hex'),
       artifact_name: `required-tests-raw-runtime-stop-${target}-17-2`,

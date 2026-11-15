@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       cli_source_sha:
-        description: Reviewed immutable CLI source SHA; SDK locks must match this Runtime
+        description: Reviewed immutable CLI source SHA; each consumer uses its own pinned SDK
         type: string
         required: true
 
@@ -95,15 +95,47 @@ jobs:
           if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
             throw 'Windows ARM64 freeze requires native ARM64 hardware'
           }
-      - name: Require matching locks and resolve exact existing SDK caches
+      - name: Require each consumer's matching locks and resolve its exact SDK caches
         id: sdk
         run: |
           set -euo pipefail
           cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
-          cmp sdk/core-sdk.lock.json .cli-source/sdk/core-sdk.lock.json
-          cmp sdk/core-sdk.lock.json .cli-source/crates/core-sdk/core-sdk.lock.json
+          cmp .cli-source/sdk/core-sdk.lock.json .cli-source/crates/core-sdk/core-sdk.lock.json
           echo "payload=$(node scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
           echo "archive=$(node scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "cli_payload=$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+          echo "cli_archive=$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")" >> "$GITHUB_OUTPUT"
+      # Restore at the producer's paths to retain the existing cache version, then move to its owner.
+      - uses: actions/cache/restore@v4
+        id: cli-payload
+        with:
+          path: .sdk/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.cli_payload }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        id: cli-archive
+        with:
+          path: .sdk-archives/${{ env.RUNTIME_TARGET }}
+          key: ${{ steps.sdk.outputs.cli_archive }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the CLI's own original SDK bytes
+        env:
+          EXPECTED_PAYLOAD: ${{ steps.sdk.outputs.cli_payload }}
+          MATCHED_PAYLOAD: ${{ steps.cli-payload.outputs.cache-matched-key }}
+          EXPECTED_ARCHIVE: ${{ steps.sdk.outputs.cli_archive }}
+          MATCHED_ARCHIVE: ${{ steps.cli-archive.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_PAYLOAD" && test "$EXPECTED_PAYLOAD" = "$MATCHED_PAYLOAD"
+          test -n "$EXPECTED_ARCHIVE" && test "$EXPECTED_ARCHIVE" = "$MATCHED_ARCHIVE"
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          mkdir -p .cli-source/.sdk .cli-source/.sdk-archives
+          test ! -e ".cli-source/.sdk/$RUNTIME_TARGET" && test ! -e ".cli-source/.sdk-archives/$RUNTIME_TARGET"
+          mv ".sdk/$RUNTIME_TARGET" ".cli-source/.sdk/$RUNTIME_TARGET"
+          mv ".sdk-archives/$RUNTIME_TARGET" ".cli-source/.sdk-archives/$RUNTIME_TARGET"
+          (cd .cli-source && node ../scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET")
       - uses: actions/cache/restore@v4
         id: payload
         with:
@@ -130,14 +162,6 @@ jobs:
           test -n "$EXPECTED_ARCHIVE" && test "$EXPECTED_ARCHIVE" = "$MATCHED_ARCHIVE"
           test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
           node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
-          python3 - <<'PY'
-          import os, pathlib, shutil
-          target = os.environ['RUNTIME_TARGET']
-          for directory in ['.sdk', '.sdk-archives']:
-              destination = pathlib.Path('.cli-source') / directory / target
-              destination.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copytree(pathlib.Path(directory) / target, destination)
-          PY
       - name: Build the exact two checked-out consumers without credentials
         run: |
           set -euo pipefail
@@ -145,10 +169,10 @@ jobs:
           export RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET"
           if [[ "$RUNTIME_TARGET" == *-musl ]]; then
             bash scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate
-            bash .cli-source/scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate
+            (cd .cli-source && RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET" bash scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate)
           else
             cargo build --locked -p respire_runtime --bin rsrs-runtime --target "$RUNTIME_TARGET"
-            cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target "$RUNTIME_TARGET" --target-dir .cli-source/target
+            RSRS_CORE_SDK_DIR="$PWD/.cli-source/.sdk/$RUNTIME_TARGET" cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target "$RUNTIME_TARGET" --target-dir .cli-source/target
           fi
       - name: Authenticate the exact paired Linux desktop CI artifact
         if: matrix.target == 'x86_64-unknown-linux-gnu'
