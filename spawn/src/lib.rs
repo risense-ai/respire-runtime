@@ -1,12 +1,11 @@
-//! Start `rsrs --runtime-internal` without keeping the caller's stdout pipe open.
+//! Private control helpers, process identity checks and durable file operations.
 //!
 //! On Windows, `CreateProcess` with `bInheritHandles = TRUE` copies every
 //! inheritable handle, not only the stdio slots. A piped parent then never
 //! sees EOF. The inherit bit is cleared only for the duration of the spawn.
 
 use std::io;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 mod confinement;
 pub mod durable;
@@ -45,85 +44,6 @@ pub fn spawn_host_control(command: &mut Command) -> io::Result<std::process::Chi
     }
     #[cfg(not(windows))]
     {
-        command.spawn()
-    }
-}
-
-pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
-    spawn_runtime_with_boot_token(exe, None)
-}
-
-/// A non-secret maintenance operation identifier lets the replacement child
-/// prove it belongs to the host's still-fenced startup, before accepting work.
-pub fn spawn_runtime_with_boot_token(
-    exe: &Path,
-    token: Option<&str>,
-) -> io::Result<std::process::Child> {
-    spawn_binary_with_boot_token(
-        exe,
-        &[std::ffi::OsString::from("--runtime-internal")],
-        token,
-    )
-}
-
-/// Spawn an external binary (typically the managed `rsrs-runtime`) detached from
-/// the caller's console and stdio, with an optional boot-token environment.
-///
-/// The legacy `spawn_runtime`/`spawn_runtime_with_boot_token` pair forwards here
-/// with the historical `--runtime-internal` argument.
-pub fn spawn_binary_with_boot_token(
-    exe: &Path,
-    args: &[std::ffi::OsString],
-    token: Option<&str>,
-) -> io::Result<std::process::Child> {
-    spawn_detached(exe, args, token, false)
-}
-
-/// Detached, same-user startup with one private readiness frame on stdout.
-/// The pipe reports initialization only; it never grants serving authority.
-pub fn spawn_binary_with_readiness(
-    exe: &Path,
-    args: &[std::ffi::OsString],
-) -> io::Result<std::process::Child> {
-    spawn_detached(exe, args, None, true)
-}
-
-fn spawn_detached(
-    exe: &Path,
-    args: &[std::ffi::OsString],
-    token: Option<&str>,
-    readiness: bool,
-) -> io::Result<std::process::Child> {
-    let mut command = Command::new(exe);
-    command.env_remove("RSRS_RUNTIME_BOOT_TOKEN");
-    if let Some(token) = token {
-        command.env("RSRS_RUNTIME_BOOT_TOKEN", token);
-    }
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(if readiness { Stdio::piped() } else { Stdio::null() })
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-        return without_inherited_stdio(|| command.spawn());
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::process::CommandExt;
-        // A new session so the runtime is not signaled when the short-lived client exits.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
         command.spawn()
     }
 }

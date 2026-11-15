@@ -1,9 +1,7 @@
 //! Dependency-free file logging for the respire CLI and the resident runtime.
 //!
-//! The runtime is detached with all three stdio handles pointed at null
-//! (`respire_spawn::spawn_binary_with_boot_token`), so every `eprintln!` on a
-//! serving path is silently discarded. This crate gives both binaries a tiny
-//! append-only log file instead:
+//! CLI or Client2 may start the foreground runtime with stderr redirected.
+//! This crate provides a persistent append-only log for both binaries:
 //!
 //! - Off by default until `init` installs a sink; every record call before
 //!   that is a no-op, so unit tests never write files.
