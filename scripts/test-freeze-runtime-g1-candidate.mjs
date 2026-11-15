@@ -87,6 +87,13 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   assert.ok(workflow.includes('artifact-id'));
   assert.ok(workflow.includes('artifact-digest'));
   assert.ok(workflow.includes('G1: not evaluated'));
+  const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const smokeMatrix = ci.slice(ci.indexOf('  g1-native-smoke:'), ci.indexOf('  g1-native-business:'));
+  for (const target of FREEZE_TARGETS) {
+    assert.ok(workflow.includes(`target: ${target}`), `Missing native freeze target ${target}`);
+    assert.ok(smokeMatrix.includes(`target: ${target}`), `Missing native smoke target ${target}`);
+  }
+  assert.deepEqual(JSON.parse(ci.match(/G1_TARGETS: '([^']+)'/)[1]), FREEZE_TARGETS);
   const producer = readFileSync(new URL('./freeze-runtime-g1-candidate.mjs', import.meta.url), 'utf8');
   const release = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
   for (const capability of ['business_executor', 'mcp_server', 'offline_keygen_handoff']) {

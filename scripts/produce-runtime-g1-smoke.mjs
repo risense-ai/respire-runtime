@@ -29,7 +29,7 @@ const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2)
 export function context() {
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
-  assert.ok(['linux', 'darwin'].includes(process.env.G1_NATIVE_PLATFORM));
+  assert.ok(['linux', 'darwin', 'win32'].includes(process.env.G1_NATIVE_PLATFORM));
   assert.ok(['x64', 'arm64'].includes(process.env.G1_NATIVE_ARCH));
   assert.equal(process.platform, process.env.G1_NATIVE_PLATFORM);
   assert.equal(process.arch, process.env.G1_NATIVE_ARCH);

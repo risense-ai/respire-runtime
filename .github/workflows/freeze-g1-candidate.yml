@@ -13,17 +13,42 @@ permissions:
   contents: read
   actions: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  package-linux:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+  package:
+    name: package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
-      RUNTIME_TARGET: x86_64-unknown-linux-gnu
+      RUNTIME_TARGET: ${{ matrix.target }}
       FREEZE_CLI_SHA: ${{ inputs.cli_source_sha }}
-    outputs:
-      id: ${{ steps.upload.outputs.artifact-id }}
-      digest: ${{ steps.upload.outputs.artifact-digest }}
-    steps: &package_steps
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
@@ -48,6 +73,28 @@ jobs:
         if: runner.os == 'Linux'
         run: node --test scripts/test-freeze-runtime-g1-candidate.mjs
       - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Require native platform hardware
+        run: |
+          bash scripts/require-native-linux-arm64.sh "$RUNTIME_TARGET"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const target = process.env.RUNTIME_TARGET;
+          assert.equal(process.platform, target.includes('windows') ? 'win32' : target.includes('apple') ? 'darwin' : 'linux');
+          assert.equal(process.arch, target.startsWith('aarch64') ? 'arm64' : 'x64');
+          assert.equal(process.env.RUNNER_ARCH, process.arch === 'arm64' ? 'ARM64' : 'X64');
+          NODE
+      - name: Require native Intel Mac hardware
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: node scripts/smoke-runtime-release.mjs --check-native-intel
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 freeze requires native ARM64 hardware'
+          }
       - name: Require matching locks and resolve exact existing SDK caches
         id: sdk
         run: |
@@ -96,10 +143,15 @@ jobs:
           set -euo pipefail
           test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
           export RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET"
-          cargo build --locked -p respire_runtime --bin rsrs-runtime
-          cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target-dir .cli-source/target
+          if [[ "$RUNTIME_TARGET" == *-musl ]]; then
+            bash scripts/build-linux-musl.sh "$RUNTIME_TARGET"
+            bash .cli-source/scripts/build-linux-musl.sh "$RUNTIME_TARGET"
+          else
+            cargo build --locked -p respire_runtime --bin rsrs-runtime --target "$RUNTIME_TARGET"
+            cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target "$RUNTIME_TARGET" --target-dir .cli-source/target
+          fi
       - name: Authenticate the exact paired Linux desktop CI artifact
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -159,19 +211,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  package-macos:
-    runs-on: macos-latest
-    timeout-minutes: 45
-    env:
-      RUNTIME_TARGET: aarch64-apple-darwin
-      FREEZE_CLI_SHA: ${{ inputs.cli_source_sha }}
-    outputs:
-      id: ${{ steps.upload.outputs.artifact-id }}
-      digest: ${{ steps.upload.outputs.artifact-digest }}
-    steps: *package_steps
-
   freeze:
-    needs: [package-linux, package-macos]
+    needs: [package]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -184,13 +225,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Authenticate both actual upload outputs in this exact run and attempt
+      - name: Authenticate all native upload outputs in this exact run and attempt
         env:
           GH_TOKEN: ${{ github.token }}
-          LINUX_ID: ${{ needs.package-linux.outputs.id }}
-          LINUX_DIGEST: ${{ needs.package-linux.outputs.digest }}
-          MACOS_ID: ${{ needs.package-macos.outputs.id }}
-          MACOS_DIGEST: ${{ needs.package-macos.outputs.digest }}
         run: |
           python3 - <<'PY'
           import hashlib, io, json, os, pathlib, re, stat, subprocess, zipfile
@@ -200,18 +237,20 @@ jobs:
           assert run['head_sha'] == os.environ['GITHUB_SHA'] and run['event'] == 'workflow_dispatch'
           assert run['path'] == '.github/workflows/freeze-g1-candidate.yml'
           assert str(run['run_attempt']) == os.environ['GITHUB_RUN_ATTEMPT']
+          targets = json.loads(subprocess.check_output(['node', '--input-type=module', '-e',
+              "import {FREEZE_TARGETS} from './scripts/freeze-runtime-g1-candidate.mjs'; console.log(JSON.stringify(FREEZE_TARGETS));"]))
+          uploaded = api(f"/actions/runs/{run['id']}/artifacts?per_page=100")['artifacts']
           artifacts = []
-          for key, target in [('LINUX', 'x86_64-unknown-linux-gnu'), ('MACOS', 'aarch64-apple-darwin')]:
-              assert re.fullmatch('[1-9][0-9]*', os.environ[key + '_ID'])
-              expected_digest = os.environ[key + '_DIGEST']
-              assert re.fullmatch('[a-f0-9]{64}', expected_digest)
-              artifact = api('/actions/artifacts/' + os.environ[key + '_ID'])
-              assert str(artifact['id']) == os.environ[key + '_ID'] and not artifact['expired']
-              assert artifact['digest'] == 'sha256:' + expected_digest
-              assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == run['head_sha']
+          for target in targets:
               expected_artifact_name = f"g1-freeze-part-{target}-{run['id']}-{run['run_attempt']}"
-              assert artifact['name'] == expected_artifact_name
-              assert 0 < artifact['size_in_bytes'] <= 256 * 1024 * 1024
+              matches = [item for item in uploaded if item['name'] == expected_artifact_name]
+              assert len(matches) == 1
+              artifact = api('/actions/artifacts/' + str(matches[0]['id']))
+              assert not artifact['expired'] and artifact['name'] == expected_artifact_name
+              assert re.fullmatch('sha256:[a-f0-9]{64}', artifact['digest'])
+              expected_digest = artifact['digest'].removeprefix('sha256:')
+              assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == run['head_sha']
+              assert 0 < artifact['size_in_bytes'] <= 512 * 1024 * 1024
               raw = subprocess.check_output(['gh', 'api', 'repos/risense-ai/respire-runtime/actions/artifacts/' + str(artifact['id']) + '/zip'])
               assert len(raw) == artifact['size_in_bytes'] and hashlib.sha256(raw).hexdigest() == expected_digest
               destination = pathlib.Path('freeze-parts') / target

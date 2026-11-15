@@ -7,7 +7,9 @@ import {pathToFileURL} from 'node:url';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 // This creates inputs, never acceptance reports. No SDK archive is uploaded.
-export const FREEZE_TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin'];
+export const FREEZE_TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin',
+  'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc', 'x86_64-apple-darwin',
+  'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'];
 const client2Source = '1734322b6c6dd543441a753f07a3517bee5e1231';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function ordinary(root, name) {
@@ -93,7 +95,7 @@ function archive(payload, output) {
 function packagePart() {
   const context = checkedContext(), target = process.env.RUNTIME_TARGET;
   assert.ok(FREEZE_TARGETS.includes(target));
-  assert.equal(process.platform, target.includes('apple') ? 'darwin' : 'linux');
+  assert.equal(process.platform, target.includes('windows') ? 'win32' : target.includes('apple') ? 'darwin' : 'linux');
   assert.equal(process.arch, target.includes('aarch64') ? 'arm64' : 'x64');
   const cli = resolve('.cli-source');
   assert.equal(execFileSync('git', ['-C', cli, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), context.cli_source_sha);
@@ -120,9 +122,11 @@ function packagePart() {
   const runtimePayload = join(work, 'runtime'), cliPayload = join(work, 'cli');
   staged(resolve('.sdk', target), 'scripts/stage-core-runtime.mjs', runtimePayload, target);
   staged(join(cli, '.sdk', target), join(cli, 'scripts/stage-core-runtime.mjs'), cliPayload, target);
-  const runtimeName = `rsrs-runtime-${target}`, cliName = `rsrs-${target}`;
-  copyFileSync(ordinary('.', 'target/debug/rsrs-runtime'), join(runtimePayload, runtimeName));
-  copyFileSync(ordinary(cli, 'target/debug/rsrs'), join(cliAssets, cliName));
+  const suffix = target.includes('windows') ? '.exe' : '';
+  const runtimeName = `rsrs-runtime-${target}${suffix}`, cliName = `rsrs-${target}${suffix}`;
+  const build = target.includes('musl') ? `target/ci/${target}/release` : `target/${target}/debug`;
+  copyFileSync(ordinary('.', `${build}/rsrs-runtime${suffix}`), join(runtimePayload, runtimeName));
+  copyFileSync(ordinary(cli, `${build}/rsrs${suffix}`), join(cliAssets, cliName));
   copyFileSync(join(runtimePayload, runtimeName), join(release, runtimeName));
   const inventory = files(runtimePayload).map(path => ({path, size: bytes(runtimePayload, path).length, sha256: digest(bytes(runtimePayload, path))}));
   const runtimeArchive = `rsrs-runtime-${target}.tar.gz`, cliArchive = `rsrs-${target}-runtime.tar.gz`;
@@ -197,15 +201,16 @@ function assemble() {
       assert.ok(!existsSync(join(output, file.path)), 'Parts must not overwrite each other');
       copy(root, file.path, output);
     }
+    const suffix = target.includes('windows') ? '.exe' : '';
     const runtime = json(root, `release-assets/runtime-build-${target}.json`), cli = json(root, `cli-assets/cli-build-${target}.json`);
     assert.equal(runtime.source_commit, expected.source_sha); assert.equal(runtime.target_triple, target);
     assert.equal(runtime.runtime_version, part.runtime_version); assert.equal(cli.git_sha, expected.cli_source_sha);
     assert.equal(cli.target, target); assert.equal(cli.version, part.cli_version);
     assert.deepEqual(runtime.candidate, {kind: 'unpublished-source-fixture', cli_source_sha: expected.cli_source_sha,
-      cli_binary_sha256: digest(bytes(root, `cli-assets/rsrs-${target}`))});
+      cli_binary_sha256: digest(bytes(root, `cli-assets/rsrs-${target}${suffix}`))});
     const pair = (prefix, binary, archive) => ({binary_sha256: digest(bytes(root, `${prefix}/${binary}`)), archive_sha256: digest(bytes(root, `${prefix}/${archive}`))});
-    const runtimeArtifact = pair('release-assets', `rsrs-runtime-${target}`, `rsrs-runtime-${target}.tar.gz`);
-    const cliArtifact = pair('cli-assets', `rsrs-${target}`, `rsrs-${target}-runtime.tar.gz`);
+    const runtimeArtifact = pair('release-assets', `rsrs-runtime-${target}${suffix}`, `rsrs-runtime-${target}.tar.gz`);
+    const cliArtifact = pair('cli-assets', `rsrs-${target}${suffix}`, `rsrs-${target}-runtime.tar.gz`);
     assert.equal(runtime.binary_sha256, runtimeArtifact.binary_sha256); assert.equal(runtime.archive_sha256, runtimeArtifact.archive_sha256);
     assert.equal(cli.binary_sha256, cliArtifact.binary_sha256); assert.equal(cli.runtime_sha256, cliArtifact.archive_sha256);
     observedArtifacts[target] = {runtime: runtimeArtifact, cli: cliArtifact};

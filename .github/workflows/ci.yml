@@ -13,7 +13,7 @@ on:
         description: Existing same-source Runtime run containing the reviewed frozen native input artifact
         type: string
       required_candidate_artifact_id:
-        description: Exact same-repository artifact containing candidate.json and release-assets for both native targets
+        description: Exact same-repository artifact containing candidate.json and release-assets for every required native target
         type: string
       required_candidate_sha256:
         description: SHA-256 of the exact frozen candidate.json bytes; never enables a source-check exemption
@@ -292,8 +292,35 @@ jobs:
             target: aarch64-apple-darwin
             platform: darwin
             arch: arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32
+            arch: x64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: win32
+            arch: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin
+            arch: x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            arch: x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux
+            arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 30
     env:
       RUNTIME_TARGET: ${{ matrix.target }}
       G1_NATIVE_PLATFORM: ${{ matrix.platform }}
@@ -307,6 +334,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Require native hardware for the selected target
+        run: |
+          bash scripts/require-native-linux-arm64.sh "$RUNTIME_TARGET"
+          if [ "$RUNTIME_TARGET" = x86_64-apple-darwin ]; then
+            node scripts/smoke-runtime-release.mjs --check-native-intel
+          fi
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
       - name: Authenticate the exact frozen input artifact without private SDK credentials
         env:
           GH_TOKEN: ${{ github.token }}
@@ -327,7 +367,7 @@ jobs:
           assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
           assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
           assert.equal(artifact.expired, false);
-          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 512 * 1024 * 1024);
+          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 2048 * 1024 * 1024);
           NODE
       - uses: actions/download-artifact@v4
         with:
@@ -430,7 +470,7 @@ jobs:
           assert.equal(artifact.workflow_run.id, Number(process.env.INPUT_RUN));
           assert.equal(artifact.workflow_run.head_sha, process.env.GITHUB_SHA);
           assert.equal(artifact.expired, false);
-          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 512 * 1024 * 1024);
+          assert.ok(artifact.size_in_bytes > 0 && artifact.size_in_bytes <= 2048 * 1024 * 1024);
           NODE
       - uses: actions/download-artifact@v4
         with:
@@ -568,7 +608,7 @@ jobs:
       - name: Require identical frozen bytes and all selected native legs
         env:
           G1_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
-          G1_TARGETS: '["x86_64-unknown-linux-gnu","aarch64-apple-darwin"]'
+          G1_TARGETS: '["x86_64-unknown-linux-gnu","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc","x86_64-apple-darwin","aarch64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-musl"]'
         run: node scripts/produce-runtime-g1-smoke.mjs bundle
       - uses: actions/upload-artifact@v4
         with:
