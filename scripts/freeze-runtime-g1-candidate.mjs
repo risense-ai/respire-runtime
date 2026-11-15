@@ -10,7 +10,7 @@ import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 export const FREEZE_TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin',
   'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc', 'x86_64-apple-darwin',
   'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'];
-const client2Source = 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151';
+const client2Source = '6ffa187685734873721ab51f3a54d8b2c29cd269';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function ordinary(root, name) {
   assert.ok(typeof name === 'string' && name && !/[\\:\0]/.test(name));

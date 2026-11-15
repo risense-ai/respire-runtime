@@ -8,7 +8,7 @@ import {context, BUSINESS_CASES, STOP_CASES as CASES} from './produce-runtime-g1
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
-const pairedClient2 = 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151';
+const pairedClient2 = '6ffa187685734873721ab51f3a54d8b2c29cd269';
 export {CASES};
 export const selected = [...new Set([
   ...Object.values(BUSINESS_CASES).flat(),

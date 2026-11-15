@@ -28,7 +28,7 @@ test('freeze keeps original source/bytes distinct from G1 acceptance', () => {
   assert.equal(candidate.gate, 'G1');
   assert.equal(candidate.components.runtime.source_sha, expected.source_sha);
   assert.equal(candidate.components.cli.source_sha, expected.cli_source_sha);
-  assert.equal(candidate.components.client2.source_sha, 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151');
+  assert.equal(candidate.components.client2.source_sha, '6ffa187685734873721ab51f3a54d8b2c29cd269');
   assert.equal(candidate.components.client2.version, '0.2.56-dev.262');
   assert.deepEqual(Object.keys(candidate.components.runtime.artifacts).sort(), [...FREEZE_TARGETS].sort());
   assert.equal(candidate.components.client2.artifacts[FREEZE_TARGETS[0]].native_sdk, null);

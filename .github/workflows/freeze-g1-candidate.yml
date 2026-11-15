@@ -182,21 +182,21 @@ jobs:
           python3 - <<'PY'
           import hashlib, io, json, os, pathlib, subprocess, tarfile
           repository = 'repos/risense-ai/respire-client2'
-          source = 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151'
-          run_id, artifact_id = 43705532188, 14157714821
-          artifact_sha256 = '3c6faeec6106e8c834c5eec17d0e3f373581788d8100eb211eb9405fd5823eed'
-          archive_sha256 = 'ebb1bee78d0f33146cca42d4d14769ace42f5ac8def870ac79e3af23f96ba611'
-          binary_sha256 = '769730f83f3b19e83f8d4385ac4dd1da92eabd7d93c8c82362c6bfaa037a6477'
+          source = '6ffa187685734873721ab51f3a54d8b2c29cd269'
+          run_id, artifact_id = 43721147038, 14163499760
+          artifact_sha256 = '307d235c76c90272c4f8d1dcb4382910b40e58a16399494da82fb6802e053934'
+          archive_sha256 = '4a294a7de11fdaea48e534539bbfb5693c30a90e05544aea9aff344414a3c925'
+          binary_sha256 = '4a62424ecffad8f732f5484495e1a6a5f7c6649ea7fb1809bc1b51a049f48677'
           def api(path):
               return json.loads(subprocess.check_output(['gh', 'api', repository + path], timeout=60))
           run = api(f'/actions/runs/{run_id}')
           assert run['head_sha'] == source and run['status'] == 'completed' and run['conclusion'] == 'success'
           assert run['event'] == 'pull_request' and run['path'] == '.github/workflows/desktop.yml'
-          assert run['workflow_id'] == 400250394 and run['run_attempt'] == 1 and run['run_number'] == 262
+          assert run['workflow_id'] == 400250394 and run['run_attempt'] == 1 and run['run_number'] == 263
           artifact = api(f'/actions/artifacts/{artifact_id}')
           assert artifact['id'] == artifact_id and artifact['name'] == 'respire-linux-amd64' and not artifact['expired']
           assert artifact['workflow_run']['id'] == run_id and artifact['workflow_run']['head_sha'] == source
-          assert artifact['size_in_bytes'] == 11582712 and artifact['digest'] == 'sha256:' + artifact_sha256
+          assert artifact['size_in_bytes'] == 11583325 and artifact['digest'] == 'sha256:' + artifact_sha256
           raw = subprocess.check_output(['gh', 'api', repository + f'/actions/artifacts/{artifact_id}/zip'], timeout=120)
           assert len(raw) == artifact['size_in_bytes'] and hashlib.sha256(raw).hexdigest() == artifact_sha256
           import zipfile
@@ -205,7 +205,7 @@ jobs:
               assert len(members) == 4 and {item.filename for item in members} == {'LICENSE.txt', 'SHA256SUMS', 'THIRD_PARTY_NOTICES.txt', 'respire-linux-amd64.tar.gz'}
               assert all(not item.is_dir() and not item.flag_bits & 1 and item.file_size <= 32 * 1024 * 1024 for item in members)
               payload = bundle.read('respire-linux-amd64.tar.gz')
-          assert len(payload) == 11582855 and hashlib.sha256(payload).hexdigest() == archive_sha256
+          assert len(payload) == 11583919 and hashlib.sha256(payload).hexdigest() == archive_sha256
           with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
               member, = archive.getmembers()
               assert member.name == 'respire' and member.type == tarfile.REGTYPE and not member.pax_headers and member.size == 19183600
@@ -219,7 +219,7 @@ jobs:
               stream.write(binary)
           executable.chmod(0o700)
           (output / 'respire-linux-amd64.tar.gz').write_bytes(payload)
-          proof = dict(source_commit=source, release='host-owned-candidate', version='0.2.56-dev.262',
+          proof = dict(source_commit=source, release='host-owned-candidate', version='0.2.56-dev.263',
                        repository='risense-ai/respire-client2', workflow=run['path'], run_id=run_id, run_attempt=1,
                        artifact_id=artifact_id, artifact_sha256=artifact_sha256,
                        archive_sha256=archive_sha256, binary_sha256=binary_sha256)

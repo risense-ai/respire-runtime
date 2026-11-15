@@ -80,7 +80,10 @@ The runtime `/health` body carries, in addition to the existing fields:
 
 - `crates/protocol` in **this** repository is the source of truth; it is
   published to crates.io as `respire-protocol` by `publish-crates.yml`.
-- The crate version moves in lockstep with `PROTOCOL_V`.
+- The crate version identifies the shared types. Compatible schema additions may
+  publish a new crate without changing `PROTOCOL_V`; an incompatible wire change
+  requires an explicit protocol-version change. Neither version requires equal
+  CLI, Runtime, Client2 or Core product versions.
 - Both repositories consume only **published** versions of the crate; neither
   may vendor or path-dependency across the repository boundary.
 
