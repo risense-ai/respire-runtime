@@ -24,9 +24,9 @@ const business = {suite: 'g1-business', passed: true, test_executed: true, relea
     encrypted_write_committed: name === 'accepted-write', forced_operation_remains_unknown: name === 'explicit-force',
     business_before_stop_ms: 4201, business_held_after_stop_ms: 4202}))},
   owned_process_cleanup: {passed: true, forced: 0, forced_processes: []}, keyring: {passed: true, business_passed: true}};
-const launcher = {client2_source: '1734322b6c6dd543441a753f07a3517bee5e1231', g1_passed: false,
+const launcher = {client2_source: 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151', g1_passed: false,
   inputs: {cli_sha256: cliBinary, runtime_archive_sha256: archive, runtime_version: 'synthetic', ordinary_cli_cold_start: true, host_credentials: true},
-  desktop_headless: {enabled: true, binary_sha256: desktop, release: 'host-owned-candidate', artifact_id: 14114928434, run_id: '43597586002'},
+  desktop_headless: {enabled: true, binary_sha256: desktop, release: 'host-owned-candidate', artifact_id: 14157714821, run_id: '43705532188'},
   cases: ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started', 'reuse-cli-business-started',
     'desktop-owned', 'cli-host-sigterm', 'cli-host-sigkill'].map(name => ({name, passed: true, cleanup_exit: 0, synthetic_host_credential: true}))};
 verifyResults(business, launcher, bound);
@@ -45,7 +45,9 @@ for (const mutate of [
   (b) => {delete b.owned_process_cleanup.forced_processes;},
   (b) => {b.owned_process_cleanup.forced_processes = {};},
   (b) => {b.keyring.business_passed = false;},
+  (_b, l) => {l.client2_source = '0'.repeat(40);},
   (_b, l) => {l.desktop_headless.enabled = false;},
+  (_b, l) => {l.desktop_headless.binary_sha256 = '0'.repeat(64);},
   (_b, l) => {l.desktop_headless.artifact_id = 0;},
   (_b, l) => {l.desktop_headless.run_id = 'other';},
   (_b, l) => {l.inputs.cli_sha256 = '0'.repeat(64);},

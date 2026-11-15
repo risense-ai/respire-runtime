@@ -8,7 +8,7 @@ import {context, BUSINESS_CASES, STOP_CASES as CASES} from './produce-runtime-g1
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
-const pairedClient2 = '1734322b6c6dd543441a753f07a3517bee5e1231';
+const pairedClient2 = 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151';
 export {CASES};
 export const selected = [...new Set([
   ...Object.values(BUSINESS_CASES).flat(),
@@ -37,7 +37,7 @@ function inputs() {
     assert.equal(execFileSync('git', ['-C', path, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
   }
   assert.equal(bound.candidate.components.client2.source_sha, pairedClient2);
-  assert.equal(bound.candidate.components.client2.version, '0.2.56-dev.259');
+  assert.equal(bound.candidate.components.client2.version, '0.2.56-dev.262');
   const cliMeta = json(join('g1-input', 'cli-assets', `cli-build-${target}.json`));
   const cliArtifact = bound.candidate.components.cli.artifacts[target];
   assert.equal(cliMeta.git_sha, bound.candidate.components.cli.source_sha);
@@ -139,8 +139,8 @@ export function verifyResults(business, launcher, bound) {
   assert.equal(launcher.inputs.host_credentials, true);
   assert.equal(launcher.desktop_headless.enabled, true);
   assert.equal(launcher.desktop_headless.release, 'host-owned-candidate');
-  assert.equal(launcher.desktop_headless.artifact_id, 14114928434);
-  assert.equal(launcher.desktop_headless.run_id, '43597586002');
+  assert.equal(launcher.desktop_headless.artifact_id, 14157714821);
+  assert.equal(launcher.desktop_headless.run_id, '43705532188');
   assert.equal(launcher.desktop_headless.binary_sha256, bound.candidate.components.client2.artifacts[target].binary_sha256);
   const names = launcher.cases.map(item => item.name);
   assert.equal(new Set(names).size, names.length);

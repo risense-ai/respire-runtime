@@ -46,6 +46,16 @@ def accepted_write_checkpoints(captured):
 
 FINISH_STAGES = {"wait_requested", "exit_observed", "exit_verified", "receipt_read", "receipt_parsed",
                  "receipt_verified", "listener_verified", "lock_verified"}
+LISTENER_ERROR_KINDS = {
+    "NotFound", "PermissionDenied", "ConnectionRefused", "ConnectionReset", "HostUnreachable",
+    "NetworkUnreachable", "ConnectionAborted", "NotConnected", "AddrInUse", "AddrNotAvailable",
+    "NetworkDown", "BrokenPipe", "AlreadyExists", "WouldBlock", "NotADirectory", "IsADirectory",
+    "DirectoryNotEmpty", "ReadOnlyFilesystem", "FilesystemLoop", "StaleNetworkFileHandle", "InvalidInput",
+    "InvalidData", "TimedOut", "WriteZero", "StorageFull", "NotSeekable", "QuotaExceeded", "FileTooLarge",
+    "ResourceBusy", "ExecutableFileBusy", "Deadlock", "CrossesDevices", "TooManyLinks", "InvalidFilename",
+    "ArgumentListTooLong", "Interrupted", "Unsupported", "UnexpectedEof", "OutOfMemory", "InProgress",
+    "Other", "Uncategorized",
+}
 RESTART_EVENTS = {"restart_probe", "restart_managed", "restart_identity", "restart_stop", "restart_start",
                   "restart_ready", "event_file_missing", "event_file_unreadable", "event_file_invalid", "no_restart_event"}
 TIMING_STAGES = {"start", "caller_wait_complete", "receipt_verified", "quiet_period_verified",
@@ -67,8 +77,23 @@ def stop_failure_diagnostics(captured):
     lines = [line.removesuffix(b"\r") for line in captured.split(b"\n")[:-1]]
     if f"test {CASE} ... FAILED".encode() not in lines:
         return {}
-    finish, restart, timings, exits = [], [], [], []
+    finish, restart, timings, exits, listener_failures = [], [], [], [], []
+    listener_failure_invalid = False
     for line in lines:
+        if line.startswith(b"NATIVE_STOP_LISTENER_FAILURE "):
+            connected = re.fullmatch(rb"NATIVE_STOP_LISTENER_FAILURE outcome=connected probe_elapsed_ms=([0-9]{1,12})", line)
+            error = re.fullmatch(rb"NATIVE_STOP_LISTENER_FAILURE outcome=error kind=([A-Za-z]{1,32}) os_error=(None|Some\((-?[0-9]{1,10})\)) probe_elapsed_ms=([0-9]{1,12})", line)
+            if connected:
+                listener_failures.append({"outcome": "connected", "probe_elapsed_ms": int(connected[1])})
+            elif error and error[1].decode() in LISTENER_ERROR_KINDS:
+                os_error = int(error[3]) if error[3] is not None else None
+                if os_error is None or -(2 ** 31) <= os_error < 2 ** 31:
+                    listener_failures.append({"outcome": "error", "kind": error[1].decode(),
+                                              "os_error": os_error, "probe_elapsed_ms": int(error[4])})
+                else:
+                    listener_failure_invalid = True
+            else:
+                listener_failure_invalid = True
         match = re.fullmatch(rb"NATIVE_STOP_FINISH_CHECKPOINT stage=([a-z_]+) elapsed_ms=([0-9]{1,12})", line)
         if match and match[1].decode() in FINISH_STAGES:
             finish.append({"stage": match[1].decode(), "elapsed_ms": int(match[2])})
@@ -82,7 +107,8 @@ def stop_failure_diagnostics(captured):
         if match and int(match[1]) <= 255:
             exits.append(int(match[1]))
     result = {"finish_checkpoints": finish, "registered_restart_events": restart,
-              "owned_case_timings": timings, "registered_lifecycle_exit_codes": exits}
+              "owned_case_timings": timings, "registered_lifecycle_exit_codes": exits,
+              "listener_failures": listener_failures, "listener_failure_invalid": listener_failure_invalid}
     accepted = accepted_write_checkpoints(captured)
     if finish and "business_completed" in accepted and "runtime_stopped" not in accepted:
         result["finish_error_category"] = (
