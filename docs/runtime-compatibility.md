@@ -2,10 +2,18 @@
 
 ## Version selection
 
-Consumers resolve one exact Runtime version from a pinned compatibility
-manifest. `latest` is never a compatibility source. A release is installable
-only when runtime version, CLI version, Client2 version, protocol range,
-required capabilities, target, asset names, and source binding all match.
+Components match through the wire protocol and required capabilities, not equal
+product versions, SDK versions or source commits. The upgraded CLI obtains the
+current supported Runtime through its published download pin. Resolve and verify
+that release's target, assets and integrity before installation; a `latest`
+label alone does not prove compatibility. Candidate hashes identify tested
+artifacts and do not bind independently released components in production.
+
+Upgrade regression prepares data with each supported historical stack, upgrades
+the components, then verifies database migration, integrity and memory operations
+with the new compatible stack. Include database-changing DEV checkpoints; omit
+redundant DEV combinations with unchanged persistent formats. Running old clients
+against the new Runtime is not an acceptance requirement.
 
 ## Wire protocol
 
@@ -34,6 +42,10 @@ occurs only when an exact compatible stable exists. Otherwise the active dev
 combination remains active and is reported as dev.
 
 ## Legacy consumers
+
+The following describes historical installers and preservation checks. These
+clients supply upgrade databases; their old Runtime interfaces are not a support
+requirement for the coordinated DEV update.
 
 The old CLI consumers that treat `sha256` and `binary_sha256` as the same value
 cannot install canonical schema 2 archives whose hashes differ. They keep only
