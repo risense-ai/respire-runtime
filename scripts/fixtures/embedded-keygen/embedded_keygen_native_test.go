@@ -192,8 +192,16 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 	if json.Unmarshal(nextRaw, &afterActor) != nil || actor != afterActor {
 		t.Fatal("Start changed strong actor identity")
 	}
-	// Restart the serving image directly while native credentials still exist.
-	// Runtime must ignore those entries until its host supplies their material.
+	// Keep the synthetic issued key only in memory for the restart and identity probes.
+	var issued struct {
+		Summary struct {
+			Super string `json:"super"`
+		} `json:"summary"`
+	}
+	if json.Unmarshal(job.Envelope, &issued) != nil || issued.Summary.Super == "" {
+		t.Fatal("synthetic keygen did not return its issued key")
+	}
+	// Runtime must stay locked even when it inherits the correct key.
 	session, err := os.ReadFile(filepath.Join(h.DataDir, "session.json"))
 	if err != nil {
 		t.Fatal("session unavailable")
@@ -216,7 +224,7 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 	}
 	child := exec.Command(runtimeImage, "serve", "--data-dir", m.DataRoot, "--port", endpoint.Port())
 	configureCommand(child)
-	child.Env = append(os.Environ(), "RSRS_SUPER=synthetic-wrong-inherited-key")
+	child.Env = append(os.Environ(), "RSRS_SUPER="+issued.Summary.Super)
 	if err = child.Start(); err != nil {
 		t.Fatal("direct foreground Runtime failed to start")
 	}
@@ -271,15 +279,6 @@ func TestSourceNativeEmbeddedKeygen(t *testing.T) {
 	}
 	if err != nil || json.Unmarshal(lockedRaw, &lockedIdentity) != nil || lockedIdentity.Instance == "" || lockedIdentity.Generation == 0 {
 		t.Fatal("locked owner identity unavailable")
-	}
-	// Keep the synthetic issued key only in memory so each identity rejection uses a valid key.
-	var issued struct {
-		Summary struct {
-			Super string `json:"super"`
-		} `json:"summary"`
-	}
-	if json.Unmarshal(job.Envelope, &issued) != nil || issued.Summary.Super == "" {
-		t.Fatal("synthetic keygen did not return its issued key")
 	}
 	database, err := os.ReadFile(filepath.Join(m.DataRoot, "rsrs.db"))
 	if err != nil {
