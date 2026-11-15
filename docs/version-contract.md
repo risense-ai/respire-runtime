@@ -98,18 +98,37 @@ When a change touches the RPC contract:
 
 ## Current stage-one DEV scope
 
+The coordinated DEV update validates the new CLI, Runtime and Client2 together.
+Compatibility is determined by the shared protocol and required capabilities,
+not matching component version numbers, source commits or workflow runs. Exact
+candidate source and artifact identities are regression provenance only.
+
+Historical releases provide databases for upgrade testing: prepare data with the
+historical stack, upgrade the hosts and Runtime, then validate that data with the
+new stack. Latest applicable stable and historical stable database upgrades
+remain required. DEV-to-DEV upgrades are required for persistent-format changes;
+DEV revisions without such changes do not add a separate migration baseline.
+Old-client/new-Runtime and new-client/old-Runtime compatibility are not release
+requirements. See [Client2 upgrades](client2-split-compatibility.md).
+
+After the new Runtime release exists, update both the CLI download default and
+its minimum supported Runtime to this host-owned generation. Upgrading the CLI
+must not silently reuse dev.17 just because the old accept range includes it.
+Later Runtime releases may remain reusable when the protocol, capabilities and
+supported range match; no equal-version requirement is introduced.
+
 Runtime 2.0.0-dev.18 removes the embedded host command entry points. Both
 Client2 0.2.56 and 2.0.0-dev.5 still select their installed Runtime image for
 host operations and require the removed model catalog/progress RPCs. Upgrade
 those clients before selecting this Runtime; their historical compatibility
 checks do not establish compatibility with the pure Runtime.
 
-Frozen G1 instead binds the exact paired Client2 source
-`1734322b6c6dd543441a753f07a3517bee5e1231` and its unchanged Linux desktop
-artifact from successful Desktop client run `43597586002`, attempt 1. The
-embedded build identity is `0.2.56-dev.259`; this is unpublished candidate
-evidence, not a released-client claim. The producer authenticates the source,
-workflow, run, artifact ID, ZIP digest, archive digest and executable digest.
+The G1 freeze workflow authenticates the selected new Client2 candidate from its
+successful Desktop client workflow. Each frozen run records the actual source,
+build identity, workflow, run, artifact ID, ZIP digest, archive digest and
+executable digest. Confirm these identities against the selected candidate
+before acceptance. An unpublished input is not a released-client or passing G1
+claim, and a recorded source hash is not a production compatibility requirement.
 All seven lifecycle cases and process identity, RPC boundary and cleanup
 assertions remain required. Each ready-library case first runs public CLI
 keygen in the existing hosted private Secret Service fixture, stops the setup

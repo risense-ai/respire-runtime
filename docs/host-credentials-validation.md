@@ -7,6 +7,13 @@ the branches are synchronized with main, and implementation review is finished.
 
 ## Current evidence and CI scope (2026-11-15)
 
+The user's clarified acceptance target is a coordinated upgrade to the new
+protocol-compatible CLI, Runtime and Client2. Historical stacks are migration
+sources, not mixed-version compatibility targets. Database compatibility and
+integrity are the upgrade gate; obsolete host commands and old client/runtime
+combinations are outside this release's acceptance scope. Candidate source and
+artifact hashes identify evidence, not runtime component coupling.
+
 The sections below preserve the original draft checklist and historical baseline;
 its pending rows and original SDK/protocol/conflict notes are not a current status
 report. The current SDK lock selects Core SDK `2.0.0-dev.4`, and
@@ -22,9 +29,10 @@ published-product acceptance must be evaluated separately.
 
 CLI run `43660517611` passed its core integration but failed the account case in
 `runtime_smoke`: full logout with the published Runtime `2.0.0-dev.17` reopened
-the store without a session. Keep that assertion. This run tests the published
-pin, whereas the paired native suite tests the new Runtime source. A historical
-Runtime result must not substitute for paired-source or release acceptance.
+the store without a session. Keep that assertion for the new supported stack;
+this mixed old-Runtime/new-CLI run is not a coordinated upgrade acceptance
+result. The paired native suite tests the new Runtime source. A historical
+Runtime result must not substitute for new-stack or release acceptance.
 The CLI pin must not name an unpublished release.
 
 Measured warm-run times show runner allocation around two seconds, Runtime
@@ -67,6 +75,14 @@ adds Clone to in-memory SessionKeys. Consequently, the issue #285 DEV-to-DEV
 upgrade remains available with `legacy_dev_upgrade=true` on the manual native
 workflow, and is no longer repeated on every PR. This does not remove stable
 release migration or independent credential/lifecycle/business regressions.
+
+That comparison predates the current uncommitted storage migration: it installs
+revision triggers for retained `when_to_use` and `superseded_by` columns in
+upgraded databases. If included in the released DEV, that DEV becomes a
+persistent-schema checkpoint for subsequent upgrades. Do not register a
+nonexistent release as a mandatory download. CLI's historical checkpoint list
+already retains `v1.0.15-dev.10` and the unclassified older DEV format; those
+sources remain required while validating the current new stack.
 
 ## Dependency evidence (historical draft baseline)
 
