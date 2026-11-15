@@ -47,4 +47,27 @@ with tempfile.TemporaryDirectory(prefix="g1-memory-check-") as directory:
         else:
             refuses(lambda: fixture.unpack(archive, output, fixture.digest(archive)))
     assert not (root / "escape").exists()
+    managed = root / "managed"
+    managed.mkdir()
+    binary = managed / "rsrs-runtime.exe"
+    resource = managed / "provider.bin"
+    binary.write_bytes(b"runtime")
+    resource.write_bytes(b"provider")
+    inventory = {"rsrs-runtime-target.exe": {"size": 7, "sha256": fixture.digest(binary)},
+                 "provider.bin": {"size": 8, "sha256": fixture.digest(resource)},
+                 "core-notices/consumer/.coderabbit.yaml": {"size": 3, "sha256": "a" * 64}}
+    verify = lambda: fixture.verify_installed_payload(managed, binary, "rsrs-runtime-target.exe", inventory)
+    verify()
+    resource.write_bytes(b"tampered")
+    refuses(verify)
+    resource.write_bytes(b"provider")
+    resource.unlink()
+    refuses(verify)
+    resource.write_bytes(b"provider")
+    extra = managed / "unexpected.bin"
+    extra.write_bytes(b"extra")
+    refuses(verify)
+    extra.unlink()
+    (managed / "core-notices").mkdir()
+    refuses(verify)
 print("memory fixture rejects skipped coverage, duplicate cases, altered archives, traversal and links")

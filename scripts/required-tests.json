@@ -48,10 +48,10 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-memory.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-memory",
-        "job_name": "g1-native-memory",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
         "matrix": [
           "x86_64-pc-windows-msvc",
           "aarch64-pc-windows-msvc",
@@ -141,8 +141,7 @@
     {
       "id": "runtime.stop-clean-drained",
       "area": "stop-drain-modes",
-      "status": "missing",
-      "reason": "Existing real accepted-write and normal drain assertions cover standalone, CLI-supervised and Client2-owned processes. Candidate-bound Linux x64 reports are wired; producers for the other seven required native targets remain absent. Status stays missing; implementation status is not execution acceptance.",
+      "status": "implemented",
       "partial_asset_suite": [
         {
           "file": "scripts/smoke-runtime-release.mjs",
@@ -206,17 +205,26 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-business",
-        "job_name": "g1-native-business"
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
       }
     },
     {
       "id": "runtime.stop-forced-timeout",
       "area": "stop-drain-modes",
-      "status": "missing",
-      "reason": "Existing explicit-force assertions cover all three startup modes, exact stop identity, Core retirement, unknown unfinished operations and resource cleanup. Candidate-bound Linux x64 reports are wired; producers for the other seven required native targets remain absent. Status stays missing; implementation status is not execution acceptance.",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -247,17 +255,26 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-business",
-        "job_name": "g1-native-business"
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
       }
     },
     {
       "id": "runtime.stop-caller-timeout-drains",
       "area": "stop-drain-modes",
-      "status": "missing",
-      "reason": "Replaces the obsolete Runtime compatibility-timeout production requirement. Existing original Go caller tests verify caller timeout leaves Runtime draining, accepted writes complete without implicit kill, and explicit force remains separate. Candidate-bound Linux x64 reports are wired; producers for the other seven required native targets remain absent. Status stays missing; implementation status is not execution acceptance.",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -287,10 +304,20 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-business",
-        "job_name": "g1-native-business"
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
       }
     },
     {
@@ -344,10 +371,10 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-memory.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-memory",
-        "job_name": "g1-native-memory",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
         "matrix": [
           "x86_64-pc-windows-msvc",
           "aarch64-pc-windows-msvc",
@@ -411,10 +438,10 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-memory.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-memory",
-        "job_name": "g1-native-memory",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
         "matrix": [
           "x86_64-pc-windows-msvc",
           "aarch64-pc-windows-msvc",

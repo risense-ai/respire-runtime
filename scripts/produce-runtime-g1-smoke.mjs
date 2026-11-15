@@ -6,7 +6,7 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
-// This producer implements two suites only. Other registry entries remain missing.
+// Native smoke produces two suites; bundle also collects six suites from each native stop part.
 export const REQUIRED_CASES = {
   'runtime.mcp-initialize-tools-list': ['initialize', 'tools/list', 'tools/call:memory_status', 'same-process-after-call'],
   'runtime.client-json-bad-config': ['scoped-structured-invalid-config-envelope',
@@ -198,12 +198,11 @@ function bundle() {
   const parts = targets.map(target => ({target, cases: REQUIRED_CASES,
     part: `required-tests-report-part-${target}`, job: `g1-native-smoke (${target})`, raw: `required-tests-raw-runtime-native-${target}`}));
   assert.ok(targets.includes('x86_64-unknown-linux-gnu'), 'Business evidence requires the actual native Linux leg');
-  parts.push(...targets.map(target => ({target, cases: BUSINESS_CASES,
-    part: `required-tests-report-memory-${target}`, job: `g1-native-memory (${target})`,
-    raw: `required-tests-raw-runtime-memory-${target}`})));
-  parts.push({target: 'x86_64-unknown-linux-gnu', cases: STOP_CASES,
-    part: 'required-tests-report-business-x86_64-unknown-linux-gnu', job: 'g1-native-business',
-    raw: 'required-tests-raw-runtime-business-x86_64-unknown-linux-gnu'});
+  const stopCases = {...BUSINESS_CASES, ...STOP_CASES};
+  parts.push(...targets.map(target => ({target, cases: stopCases,
+    part: `required-tests-report-stop-${target}`, job: `g1-native-stop (${target})`,
+    raw: `required-tests-raw-runtime-stop-${target}`})));
+  // Linux account/launcher evidence remains separate; its duplicate stop reports are not collected.
   for (const part of parts) {
     const {target} = part;
     assert.match(target, /^[a-z0-9_-]+$/);
@@ -218,6 +217,7 @@ function bundle() {
     assert.equal(files.length, Object.keys(part.cases).length);
     let rawId;
     let rawHash;
+    let stopHash;
     for (const [id, names] of Object.entries(part.cases)) {
       const name = `${id}-${target}.json`;
       assert.ok(files.includes(name));
@@ -231,12 +231,12 @@ function bundle() {
         assert.equal(String(report[key]), String(expected));
       }
       assert.deepEqual(report.actual_native_sdk, candidate.components.runtime.artifacts[target].native_sdk);
-      if (part.cases === BUSINESS_CASES || part.cases === STOP_CASES) {
+      if (part.cases === stopCases) {
         assert.deepEqual(report.actual_cli_native_sdk, candidate.components.cli.artifacts[target].native_sdk);
-      }
-      if (part.cases === BUSINESS_CASES) {
-        assert.equal(report.producer, 'scripts/produce-runtime-g1-memory.mjs');
-        assert.match(report.memory_sha256 ?? '', /^[a-f0-9]{64}$/);
+        assert.equal(report.producer, 'scripts/produce-runtime-g1-stop.mjs');
+        assert.match(report.stop_sha256 ?? '', /^[a-f0-9]{64}$/);
+        if (stopHash) assert.equal(report.stop_sha256, stopHash, 'All six suites must bind the same verified stop execution');
+        stopHash = report.stop_sha256;
       }
       assert.deepEqual(report.cases.map(item => item.name).sort(), [...names].sort());
       assert.ok(report.cases.every(item => item.status === 'passed'));

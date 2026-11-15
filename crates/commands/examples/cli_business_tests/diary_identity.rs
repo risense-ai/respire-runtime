@@ -1431,13 +1431,14 @@ fn stop_native_worker_identity(pid: u32) -> anyhow::Result<Option<Value>> {
     #[cfg(windows)]
     {
         return Ok(respire_spawn::process_identity(pid)?.map(|identity|
-            json!({"birth":identity.birth,"image":identity.executable})));
+            json!({"birth":identity.birth.to_string(),"image":identity.executable})));
     }
     #[cfg(target_os = "linux")]
     {
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(3) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let fields: Vec<_> = stat[stat.rfind(')').context("worker stat name missing")? + 1..]

@@ -74,6 +74,20 @@ def verify_cases(text):
     return CASES
 
 
+def verify_installed_payload(directory, binary, archive_binary, inventory):
+    # CLI compact_version removes notices after authenticating the full archive.
+    assert not (directory / "core-notices").exists(), "Fresh managed Runtime retained archive-only notices"
+    expected = {}
+    for name, item in inventory.items():
+        if name.startswith("core-notices/"):
+            continue
+        path = binary if name == archive_binary else directory / name
+        assert digest(path) == item["sha256"] and path.stat().st_size == item["size"]
+        expected[path.relative_to(directory).as_posix()] = item
+    actual = {path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file()}
+    assert actual == set(expected), "Managed Runtime inventory differs from authenticated runtime files"
+
+
 def execute(request):
     root = Path(request["root"])
     assert root.is_absolute() and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve()
@@ -138,9 +152,7 @@ def execute(request):
         installed_dir = root / "installation/bin/runtime" / runtime_meta["runtime_version"]
         installed = installed_dir / ("rsrs-runtime" + suffix)
         assert digest(installed) == request["runtime_binary_sha256"]
-        for name, item in expected.items():
-            installed_path = installed if name == runtime_name else installed_dir / name
-            assert digest(installed_path) == item["sha256"] and installed_path.stat().st_size == item["size"]
+        verify_installed_payload(installed_dir, installed, runtime_name, expected)
         subprocess.run([str(cli), "--json", "model", "install-m3"], env=env, stdout=log, stderr=log, check=True)
         sys.path.insert(0, str(Path(".cli-source/scripts").resolve()))
         from dev_model_fixture import share_cpu_container

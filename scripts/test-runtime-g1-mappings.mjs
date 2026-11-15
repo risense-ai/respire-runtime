@@ -5,15 +5,13 @@ import {fileURLToPath} from 'node:url';
 import {REQUIRED_CASES, BUSINESS_CASES, STOP_CASES} from './produce-runtime-g1-smoke.mjs';
 import {TARGETS} from './sdk-ci-cache.mjs';
 
-// Validate draft mappings directly: missing status must not hide malformed
-// source/evidence declarations. This does not turn a missing suite into green.
+// Implemented means producer wiring exists; strict current-run reports still decide acceptance.
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const read = path => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n');
 const registry = JSON.parse(read('scripts/required-tests.json'));
 const workflow = read('.github/workflows/ci.yml');
 assert.equal(registry.tests.length, 8);
-assert.ok(registry.tests.every(item => Object.hasOwn({...REQUIRED_CASES, ...BUSINESS_CASES}, item.id)
-  ? item.status === 'implemented' : item.status === 'missing' && item.reason));
+assert.ok(registry.tests.every(item => item.status === 'implemented'));
 function job(name) {
   const start = workflow.indexOf(`\n  ${name}:\n`);
   assert.ok(start >= 0);
@@ -53,28 +51,27 @@ for (const [id, cases] of Object.entries(expected)) {
   assert.equal(item.evidence.workflow, '.github/workflows/ci.yml');
   const body = job(item.evidence.job);
   assert.ok(body.includes(`run: ${item.evidence.command_fragment}`) || body.includes(`          ${item.evidence.command_fragment}\n`));
-  if (Object.hasOwn(BUSINESS_CASES, id)) {
-    assert.equal(item.evidence.job, 'g1-native-memory');
-    assert.equal(item.evidence.job_name, 'g1-native-memory');
-    assert.deepEqual([...item.evidence.matrix].sort(), [...TARGETS].sort());
-    for (const target of TARGETS) assert.ok(body.includes(`target: ${target}`));
-    assert.ok(body.includes('path: g1-memory-report'));
-    assert.ok(body.includes('name: required-tests-report-memory-'));
-  } else if (Object.hasOwn(REQUIRED_CASES, id)) {
+  if (Object.hasOwn(REQUIRED_CASES, id)) {
     assert.equal(item.evidence.job, 'g1-native-smoke');
     assert.equal(item.evidence.job_name, 'g1-native-smoke');
     assert.deepEqual([...item.evidence.matrix].sort(), [...TARGETS].sort());
     for (const target of TARGETS) assert.ok(body.includes(`target: ${target}`));
     assert.ok(body.includes('path: g1-report'));
     assert.ok(body.includes('name: required-tests-report-part-'));
-  } else if (Object.hasOwn(STOP_CASES, id)) {
-    assert.equal(item.evidence.job_name, 'g1-native-business');
-    assert.equal(item.evidence.matrix, undefined, 'A plain job must not claim matrix job-name syntax');
+  } else if (Object.hasOwn({...BUSINESS_CASES, ...STOP_CASES}, id)) {
+    assert.equal(item.evidence.job, 'g1-native-stop');
+    assert.equal(item.evidence.job_name, 'g1-native-stop');
+    assert.deepEqual([...item.evidence.matrix].sort(), [...TARGETS].sort());
+    for (const target of TARGETS) assert.ok(body.includes(`target: ${target}`));
+    assert.ok(body.includes('path: g1-stop-report'));
+    assert.ok(body.includes('name: required-tests-report-stop-'));
   }
 }
 assert.ok(job('required-tests').includes("    if: ${{ always() && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}\n"));
 assert.ok(job('ci-complete').includes("assert.equal(env.REQUIRED_RESULT, requested ? 'success' : 'skipped',"));
-assert.ok(job('g1-report').includes('g1-native-memory'));
+assert.ok(!job('g1-report').includes('g1-native-memory'));
+assert.ok(!workflow.includes('\n  g1-native-memory:\n'));
+assert.ok(job('g1-report').includes('g1-native-stop'));
 assert.ok(job('g1-native-business').includes('G1_RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}'));
 assert.ok(job('g1-native-business').includes('G1_RAW_ARTIFACT_SHA256: ${{ steps.raw.outputs.artifact-digest }}'));
-console.log('8 suite mappings validated; 5 implemented suites and 3 missing stop suites; execution not certified');
+console.log('8 suite mappings validated; 8 implemented suites; current reports still required; execution not certified');
