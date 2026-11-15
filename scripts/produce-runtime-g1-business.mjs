@@ -10,7 +10,10 @@ import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 const target = 'x86_64-unknown-linux-gnu';
 const pairedClient2 = '1734322b6c6dd543441a753f07a3517bee5e1231';
 export {CASES};
-const selected = [...new Set(Object.values(CASES).flat())].sort();
+export const selected = [...new Set([
+  ...Object.values(CASES).flat(),
+  'account::authorization_preserves_and_commits_profiles',
+])].sort();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 function read(path) {
   const stat = lstatSync(path);
@@ -103,7 +106,7 @@ export function verifyResults(business, launcher, bound) {
     runtime_metadata_sha256: bound.metadata_sha256, sdk_lock_sha256: bound.sdk_lock_sha256,
     offline_installer_verified: true})) assert.equal(business[key], expected);
   assert.equal(business.release_acceptance, false, 'The wrapped fixture itself must retain its honest evidence class');
-  assert.equal(business.selected_case_count, 2);
+  assert.equal(business.selected_case_count, selected.length);
   for (const key of ['required_cases', 'passed_cases']) assert.deepEqual([...business[key]].sort(), selected);
   assert.deepEqual(business.missing_or_failed_cases, []);
   assert.equal(business.owned_process_cleanup.passed, true);
