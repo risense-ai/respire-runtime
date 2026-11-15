@@ -2315,8 +2315,6 @@ pub fn health_body() -> Value {
         "generation": crate::rpc_worker::wire_generation(),
         "protocol_range": {"minimum": PROTOCOL_V, "maximum": PROTOCOL_V},
         "capabilities": ["business_executor", "mcp_server"],
-        "runtime_unlock_schemas": [1, respire_protocol::credentials::RUNTIME_UNLOCK_SCHEMA_V2],
-        "provider_status": provider_status,
         "credential_state": if STORE_READY.load(Ordering::Acquire) { "available" } else { "required" },
         "snapshot_restore_id": SNAPSHOT_BOOT_ID.lock().ok().and_then(|slot|slot.clone()),
         "recall_statistics": recall_stats_status(),
@@ -2349,6 +2347,8 @@ pub fn health_body() -> Value {
         },
     });
     body["startup_complete"] = json!(startup_complete());
+    body["runtime_unlock_schemas"] = json!([1, respire_protocol::credentials::RUNTIME_UNLOCK_SCHEMA_V2]);
+    body["provider_status"] = json!(provider_status);
     body
 }
 
