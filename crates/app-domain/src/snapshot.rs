@@ -1101,7 +1101,6 @@ fn restore_operation_with_hook(
     let mut temporary_owned = false;
     let result = (|| -> Result<()> {
         hook("after_backups")?;
-        checkpoint_closed(&live)?;
         let mut input = fs::File::open(&source)?;
         let mut target = private_new(&temporary)?;
         temporary_owned = true;
@@ -1140,6 +1139,8 @@ fn restore_operation_with_hook(
             .open(&temporary)?
             .sync_all()?;
         hook("before_replace")?;
+        // Read-only schema checks can recreate WAL sidecars; close them before replacing live.
+        checkpoint_closed(&live)?;
         // A durable replacement can report an fsync error after rename, so mark
         // the attempt before calling it. Either outcome rolls back from image.
         replacement_attempted = true;
