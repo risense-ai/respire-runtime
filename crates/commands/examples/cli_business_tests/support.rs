@@ -73,7 +73,8 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
     let source_root = version_dir.parent().and_then(Path::parent)
         .context("Runtime fixture installation root missing")?;
     let receipt = source_root.join("runtime.json");
-    let selected: Value = serde_json::from_slice(&std::fs::read(&receipt)?)?;
+    let selection_bytes = std::fs::read(&receipt)?;
+    let selected: Value = serde_json::from_slice(&selection_bytes)?;
     let pin: Value = serde_json::from_slice(&std::fs::read(cli_source()?.join("runtime-pin.json"))?)?;
     let pinned = pin["required"].as_str().context("Runtime pin required missing")?;
     let version = if std::env::var_os("RSRS_RUNTIME_CANDIDATE_METADATA").is_some() {
@@ -85,7 +86,19 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
         && selected["release"]["metadata_json"].is_string()
         && source_root.join("runtime").join(&version) == version_dir,
         "Runtime fixture must be a verified managed installation");
-    let mut pending = vec![(version_dir.to_path_buf(), root.join("bin/runtime").join(&version))];
+    let version_receipt = source_root.join("runtime/.receipts").join(format!("{version}.json"));
+    anyhow::ensure!(version_receipt.canonicalize()? == version_receipt,
+        "Runtime version receipt must belong to the source installation without links");
+    let version_receipt_bytes = std::fs::read(&version_receipt)?;
+    anyhow::ensure!(serde_json::from_slice::<Value>(&version_receipt_bytes)? == selected,
+        "Runtime version receipt differs from the verified selection");
+    let copied_receipt = root.join("bin/runtime/.receipts").join(format!("{version}.json"));
+    std::fs::create_dir_all(root.join("bin/runtime/.receipts"))?;
+    let mut pending = vec![
+        (version_dir.to_path_buf(), root.join("bin/runtime").join(&version)),
+        (version_receipt, copied_receipt.clone()),
+        (receipt, root.join("bin/runtime.json")),
+    ];
     while let Some((source, target)) = pending.pop() {
         let metadata = std::fs::symlink_metadata(&source)?;
         anyhow::ensure!(!metadata.file_type().is_symlink(), "Runtime fixture contains a link");
@@ -106,8 +119,9 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
             std::fs::copy(source, target)?;
         }
     }
-    anyhow::ensure!(std::fs::symlink_metadata(&receipt)?.is_file(), "Runtime fixture receipt missing");
-    std::fs::copy(receipt, root.join("bin/runtime.json"))?;
+    anyhow::ensure!(std::fs::read(root.join("bin/runtime.json"))? == selection_bytes
+        && std::fs::read(copied_receipt)? == version_receipt_bytes,
+        "Runtime fixture receipts differ from the original installer bytes");
     stage_cli_fixture(&root.join("bin"))
 }
 
