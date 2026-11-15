@@ -13,7 +13,7 @@ esac
 root="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$root/target/musl-cache/$target"
 action="${2:-build}"
-case "$action" in build|key|pack) ;; *) echo 'invalid release cache action' >&2; exit 1 ;; esac
+case "$action" in build|candidate|key|pack) ;; *) echo 'invalid release cache action' >&2; exit 1 ;; esac
 image=rust:1.95.0-alpine3.23
 if ! docker image inspect "$image" >/dev/null 2>&1; then docker pull "$image"; fi
 image="$(docker image inspect "$image" --format '{{.Id}}')"
@@ -27,9 +27,13 @@ docker run --rm \
 if [ "$action" = key ]; then
   cat "$root/.rust-release-output" >> "${GITHUB_OUTPUT:?release key requires GITHUB_OUTPUT}"
 fi
-if [ "$action" != build ]; then exit 0; fi
+case "$action" in
+  build) profile=release ;;
+  candidate) profile=debug ;;
+  *) exit 0 ;;
+esac
 
-binary="$root/target/ci/$target/release/rsrs-runtime"
+binary="$root/target/ci/$target/$profile/rsrs-runtime"
 # A static ELF must have neither a dynamic loader nor shared-library imports.
 if readelf -l "$binary" | grep -q INTERP; then
   echo 'musl binary unexpectedly requires an ELF interpreter' >&2

@@ -144,8 +144,8 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
           export RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET"
           if [[ "$RUNTIME_TARGET" == *-musl ]]; then
-            bash scripts/build-linux-musl.sh "$RUNTIME_TARGET"
-            bash .cli-source/scripts/build-linux-musl.sh "$RUNTIME_TARGET"
+            bash scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate
+            bash .cli-source/scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate
           else
             cargo build --locked -p respire_runtime --bin rsrs-runtime --target "$RUNTIME_TARGET"
             cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target "$RUNTIME_TARGET" --target-dir .cli-source/target

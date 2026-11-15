@@ -126,7 +126,7 @@ function packagePart() {
   staged(join(cli, '.sdk', target), join(cli, 'scripts/stage-core-runtime.mjs'), cliPayload, target);
   const suffix = target.includes('windows') ? '.exe' : '';
   const runtimeName = `rsrs-runtime-${target}${suffix}`, cliName = `rsrs-${target}${suffix}`;
-  const build = target.includes('musl') ? `target/ci/${target}/release` : `target/${target}/debug`;
+  const build = target.includes('musl') ? `target/ci/${target}/debug` : `target/${target}/debug`;
   copyFileSync(ordinary('.', `${build}/rsrs-runtime${suffix}`), join(runtimePayload, runtimeName));
   copyFileSync(ordinary(cli, `${build}/rsrs${suffix}`), join(cliAssets, cliName));
   copyFileSync(join(runtimePayload, runtimeName), join(release, runtimeName));
