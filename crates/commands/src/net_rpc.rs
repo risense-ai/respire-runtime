@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 pub const DEFAULT_RPC_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RPC_PORT: u16 = 15169;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(all(test, unix))]
 const STOP_POLLS: usize = 40;
+#[cfg(all(test, unix))]
 const STOP_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -511,7 +513,8 @@ pub(crate) fn rpc_method_with_timeout(
 }
 
 /// A closed listener does not prove that the library holder has exited.
-pub fn wait_until_exited(pid: u32) -> Result<()> {
+#[cfg(all(test, unix))]
+fn wait_until_exited(pid: u32) -> Result<()> {
     for _ in 0..STOP_POLLS {
         if !process_is_running(pid)? {
             return Ok(());
