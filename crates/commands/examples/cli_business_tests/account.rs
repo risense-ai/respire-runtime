@@ -573,11 +573,11 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     } else {
         // Explicit rollback recovery must be able to unlock the retained source account.
         let salt = crypto::random_hex(16);
-        let (nonce, wrapped) = crypto::wrap_key(&[41_u8; 32],
-            &crypto::derive_rsrs_kek(&super_password, &salt)?)?;
+        let (nonce, wrapped) = crypto::wrap_key(&[43_u8; 32],
+            &crypto::derive_kek_v4(&super_password, &salt)?)?;
         serde_json::to_vec(&json!({"user":"original","addr":"https://previous.invalid",
             "vault_version":4,"kdf_salt":salt,
-            "wrapped_urk":format!("{}{wrapped}", crypto::RSRS_PREFIX),"urk_nonce":nonce}))?
+            "wrapped_urk":wrapped,"urk_nonce":nonce}))?
     };
     let session_bytes = session_bytes.as_slice();
     std::fs::write(original.join("session.json"), session_bytes)?;
