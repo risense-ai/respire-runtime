@@ -1515,6 +1515,12 @@ impl Fixture {
                     assert_eq!(health["credential_state"], "required");
                     let delivered = self.command(&["--json", "runtime", "unlock"]).output()?;
                     anyhow::ensure!(delivered.status.success(), "standalone stop fixture host key delivery failed");
+                    let receipt: Value = serde_json::from_slice(&delivered.stdout)?;
+                    let provider_status: respire_protocol::credentials::ProviderCredentialStatus =
+                        serde_json::from_value(receipt["summary"]["provider_status"].clone())?;
+                    eprintln!("NATIVE_STOP_PROVIDER_STATUS {}", serde_json::to_string(&provider_status)?);
+                    anyhow::ensure!(matches!(provider_status, respire_protocol::credentials::ProviderCredentialStatus::Ready),
+                        "standalone stop fixture provider credentials are not ready");
                     let unlocked = self.standalone_stop_health()?;
                     assert_eq!(unlocked["instance_id"], health["instance_id"]);
                     assert_eq!(unlocked["generation"], health["generation"]);

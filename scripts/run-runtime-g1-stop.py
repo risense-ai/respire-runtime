@@ -105,7 +105,17 @@ def stop_failure_diagnostics(captured):
         return {}
     finish, restart, timings, exits, listener_failures = [], [], [], [], []
     listener_failure_invalid = False
+    provider_statuses, provider_status_invalid = [], False
     for line in lines:
+        if line.startswith(b"NATIVE_STOP_PROVIDER_STATUS "):
+            status = re.fullmatch(rb'NATIVE_STOP_PROVIDER_STATUS \{"state":"(not_loaded|ready)"\}', line)
+            unavailable = re.fullmatch(rb'NATIVE_STOP_PROVIDER_STATUS \{"state":"unavailable","code":"(access_denied|platform_failure|backend_unavailable|invalid_configuration|ambiguous|bad_encoding)"\}', line)
+            if status:
+                provider_statuses.append({"state": status[1].decode()})
+            elif unavailable:
+                provider_statuses.append({"state": "unavailable", "code": unavailable[1].decode()})
+            else:
+                provider_status_invalid = True
         if line.startswith(b"NATIVE_STOP_LISTENER_FAILURE "):
             connected = re.fullmatch(rb"NATIVE_STOP_LISTENER_FAILURE outcome=connected probe_elapsed_ms=([0-9]{1,12})", line)
             error = re.fullmatch(rb"NATIVE_STOP_LISTENER_FAILURE outcome=error kind=([A-Za-z]{1,32}) os_error=(None|Some\((-?[0-9]{1,10})\)) probe_elapsed_ms=([0-9]{1,12})", line)
@@ -134,7 +144,8 @@ def stop_failure_diagnostics(captured):
             exits.append(int(match[1]))
     result = {"finish_checkpoints": finish, "registered_restart_events": restart,
               "owned_case_timings": timings, "registered_lifecycle_exit_codes": exits,
-              "listener_failures": listener_failures, "listener_failure_invalid": listener_failure_invalid}
+              "listener_failures": listener_failures, "listener_failure_invalid": listener_failure_invalid,
+              "provider_statuses": provider_statuses, "provider_status_invalid": provider_status_invalid}
     accepted = accepted_write_checkpoints(captured)
     if finish and "business_completed" in accepted and "runtime_stopped" not in accepted:
         result["finish_error_category"] = (

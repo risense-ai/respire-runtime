@@ -81,6 +81,18 @@ assert fixture.stop_failure_diagnostics(finish_failure.replace(b"thread 'test' p
 assert fixture.stop_failure_diagnostics(finish_failure.replace(b" ... FAILED", b" ... ok")) == {}
 assert "private-canary" not in json.dumps(diag)
 
+for status in ([{"state": "not_loaded"}, {"state": "ready"}]
+        + [{"state": "unavailable", "code": code} for code in (
+            "access_denied", "platform_failure", "backend_unavailable", "invalid_configuration",
+            "ambiguous", "bad_encoding")]):
+    marker = b"NATIVE_STOP_PROVIDER_STATUS " + json.dumps(status, separators=(",", ":")).encode() + b"\r\n"
+    observed = fixture.stop_failure_diagnostics(failed + marker)
+    assert observed["provider_statuses"] == [status] and not observed["provider_status_invalid"]
+    contaminated = fixture.stop_failure_diagnostics(failed + marker[:-2] + b" private-canary-secret\n"
+        + b'NATIVE_STOP_PROVIDER_STATUS {"state":"unavailable","code":"private-canary-secret"}\n')
+    assert contaminated["provider_statuses"] == [] and contaminated["provider_status_invalid"]
+    assert "private-canary" not in json.dumps(contaminated)
+
 for error, category in (
     ("systemctl current-user operation failed (exit 1)", "systemctl_failed"),
     ("launchctl current-user operation failed (exit 1)", "launchctl_failed"),
