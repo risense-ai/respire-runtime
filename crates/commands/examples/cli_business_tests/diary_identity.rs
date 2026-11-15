@@ -1493,7 +1493,17 @@ impl Fixture {
             anyhow::ensure!(self.child.as_mut().context("runtime child missing")?.try_wait()?.is_none(),
                 "standalone Runtime exited before readiness");
             if let Ok(health) = self.standalone_stop_health() {
-                if health["store_ready"] == true { return Ok(health); }
+                if health["startup_complete"] == true {
+                    assert_eq!(health["store_ready"], false, "standalone stop fixture unlocked without its host");
+                    assert_eq!(health["credential_state"], "required");
+                    let delivered = self.command(&["--json", "runtime", "unlock"]).output()?;
+                    anyhow::ensure!(delivered.status.success(), "standalone stop fixture host key delivery failed");
+                    let unlocked = self.standalone_stop_health()?;
+                    assert_eq!(unlocked["instance_id"], health["instance_id"]);
+                    assert_eq!(unlocked["generation"], health["generation"]);
+                    assert_eq!(unlocked["store_ready"], true, "standalone stop fixture remains locked");
+                    return Ok(unlocked);
+                }
             }
             anyhow::ensure!(std::time::Instant::now() < deadline, "standalone Runtime readiness timed out");
             std::thread::sleep(Duration::from_millis(50));
