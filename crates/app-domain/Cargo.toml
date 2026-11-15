@@ -11,6 +11,8 @@ publish = false
 [features]
 # Enabled only by app test dependencies to reuse their shared in-memory keyring.
 test-support = ["dep:keyring"]
+# Real cross-process fixtures must name and use the host's actual OS backend.
+native-credential-fixtures = ["test-support"]
 default = ["cpu-owned-ort-experiment"]
 native-fault-tests = ["respire_core_sdk/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]

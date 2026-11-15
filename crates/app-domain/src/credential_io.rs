@@ -147,7 +147,24 @@ impl Entry {
             keyring::Error::Invalid(_, _) => CredentialError::Invalid,
             _ => CredentialError::Unavailable,
         };
-        let entry = keyring::Entry::new(&self.service, &self.account).map_err(map_error)?;
+        let entry = {
+            // Mock fixtures keep the shared default builder; native fixtures select the recorded store.
+            #[cfg(feature = "native-credential-fixtures")]
+            {
+                match self.backend.as_str() {
+                    "native" => keyring::Entry::new(&self.service, &self.account),
+                    #[cfg(target_os = "linux")]
+                    "secret_service" => keyring::secret_service::default_credential_builder()
+                        .build(None, &self.service, &self.account).map(keyring::Entry::new_with_credential),
+                    #[cfg(target_os = "linux")]
+                    "kernel" => keyring::keyutils::default_credential_builder()
+                        .build(None, &self.service, &self.account).map(keyring::Entry::new_with_credential),
+                    _ => return Err(CredentialError::Unavailable),
+                }
+            }
+            #[cfg(not(feature = "native-credential-fixtures"))]
+            { keyring::Entry::new(&self.service, &self.account) }
+        }.map_err(map_error)?;
         match operation {
             CredentialOperation::Read => entry.get_password().map(Some).map_err(map_error),
             CredentialOperation::ReadConfigured => {

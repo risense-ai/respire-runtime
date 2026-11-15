@@ -138,7 +138,7 @@ function build(source, target, sourceSha, lockHash, output) {
     ...(release ? ['--release'] : [])];
   const roles = {};
   const definitions = [
-    ['business_tests', 'respire_commands', ['--example', 'cli_business_tests'], 'cli_business_tests', true, 'respire_app/cpu-owned-ort-experiment'],
+    ['business_tests', 'respire_commands', ['--example', 'cli_business_tests'], 'cli_business_tests', true, 'respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures'],
     // The facade re-exports snapshot; its unit tests belong to the domain crate.
     ['app_tests', 'respire_app_domain', ['--lib'], 'respire_app_domain', true, 'cpu-owned-ort-experiment'],
     ['storage_tests', 'respire_storage', ['--lib'], 'respire_storage', true, 'respire_core_sdk/cpu-owned-ort-experiment'],

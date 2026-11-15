@@ -609,7 +609,7 @@ jobs:
           test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
           test -n "$EXPECTED_ARCHIVE_KEY" && test "$EXPECTED_ARCHIVE_KEY" = "$MATCHED_ARCHIVE_KEY"
           node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
-          cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-business-harness-build.jsonl"
+          cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-business-harness-build.jsonl"
           node scripts/stage-core-runtime.mjs target/debug/examples
       - name: Execute the existing exact business cases and original Client2 on frozen product bytes
         run: |
@@ -775,6 +775,11 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `cli_sha=${sha}\n`);
           NODE
       - uses: actions/checkout@v5
+        env:
+          # Probe verification compares checkout files with the exact Git blob bytes.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: input
         with:
           repository: risense-ai/respire-cli
           ref: ${{ steps.combination.outputs.cli_sha }}
@@ -898,7 +903,7 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
           node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
           node scripts/sdk-ci-cache.mjs observe "$G1_HARNESS_TARGET"
-          cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-stop-harness-build.jsonl"
+          cargo test --locked -p respire_commands --features respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures --example cli_business_tests --no-run --message-format=json --target-dir target > "$RUNNER_TEMP/g1-stop-harness-build.jsonl"
           node scripts/stage-core-runtime.mjs target/debug/examples
       - name: Execute pure stop cases on original frozen products
         run: |

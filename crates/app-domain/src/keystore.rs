@@ -9,33 +9,33 @@ const VAULT_SERVICE: &str = "rsrs";
 
 #[derive(Clone, Copy)]
 enum Backend {
-    #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
+    #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
     Native,
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
     SecretService,
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
     Kernel,
 }
 
 impl Backend {
     fn name(self) -> &'static str {
         match self {
-            #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
+            #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
             Self::Native => "native",
-            #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+            #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
             Self::SecretService => "secret_service",
-            #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+            #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
             Self::Kernel => "kernel",
         }
     }
 }
 
 fn backends() -> &'static [Backend] {
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
     {
         &[Backend::SecretService, Backend::Kernel]
     }
-    #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
+    #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
     {
         &[Backend::Native]
     }

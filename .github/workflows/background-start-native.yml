@@ -150,7 +150,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          cargo test --locked -p respire_commands --example cli_business_tests --no-run --message-format=json > "$RUNNER_TEMP/paired-account-harness.jsonl"
+          cargo test --locked -p respire_commands --features respire_app_domain/native-credential-fixtures --example cli_business_tests --no-run --message-format=json > "$RUNNER_TEMP/paired-account-harness.jsonl"
       - name: Exercise account authorization and sync with the exact paired sources
         if: runner.os == 'Linux'
         run: |
