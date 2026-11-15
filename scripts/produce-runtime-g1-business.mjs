@@ -165,6 +165,8 @@ function run() {
     '--cli', bound.cli, '--runtime', bound.runtime, '--harness', bound.harness,
     '--suite', 'g1-business', '--runtime-archive', archive, '--runtime-metadata', metadata], {stdio: 'inherit'});
   assert.ifError(result.error);
+  const businessBytes = read(join(root, 'result.json'));
+  writeFileSync(join(directory, 'business.json'), businessBytes, {flag: 'wx'});
   assert.equal(result.status, 0, 'Real isolated business execution failed');
   const launcherPath = join(directory, 'client2-launcher.json');
   const go = execFileSync('which', ['go'], {encoding: 'utf8'}).trim();
@@ -186,11 +188,9 @@ function run() {
   for (const key of ['passed', 'business_passed', 'business_credential_cleanup_passed']) assert.equal(credentialCheck[key], true);
   assert.equal(credentialCheck.keyring_cleanup.passed, true);
   writeFileSync(join(directory, 'launcher-keyring.json'), launcherKeyringBytes, {flag: 'wx'});
-  const businessBytes = read(join(root, 'result.json'));
   const launcherBytes = read(launcherPath);
   verifyResults(JSON.parse(businessBytes), JSON.parse(launcherBytes), bound);
   inputs(); // Recheck the source, SDK and package bytes after all executions.
-  writeFileSync(join(directory, 'business.json'), businessBytes, {flag: 'wx'});
   writeFileSync(join(directory, 'candidate.json'), bound.bytes, {flag: 'wx'});
   save(join(directory, 'execution.json'), {schema: 1, evidence_class: 'candidate-native-raw', gate: 'not-evaluated',
     repository: process.env.GITHUB_REPOSITORY, source_sha: process.env.GITHUB_SHA,

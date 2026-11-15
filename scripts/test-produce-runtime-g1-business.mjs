@@ -31,6 +31,7 @@ const launcher = {client2_source: '1734322b6c6dd543441a753f07a3517bee5e1231', g1
     'desktop-owned', 'cli-host-sigterm', 'cli-host-sigkill'].map(name => ({name, passed: true, cleanup_exit: 0, synthetic_host_credential: true}))};
 verifyResults(business, launcher, bound);
 for (const mutate of [
+  (b) => {b.passed = false;},
   (b) => {b.selected_case_count = 3;},
   (b) => {b.selected_native_stop = false;},
   (b) => {b.standalone_stop.observations.pop();},
@@ -57,4 +58,4 @@ for (const mutate of [
   mutate(b, l);
   assert.throws(() => verifyResults(b, l, bound));
 }
-console.log('22 synthetic business combination checks passed; no native acceptance executed');
+console.log('23 synthetic business combination checks passed; no native acceptance executed');
