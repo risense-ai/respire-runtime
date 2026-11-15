@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import textwrap
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("stop_fixture", Path(__file__).with_name("run-runtime-g1-stop.py"))
 fixture = importlib.util.module_from_spec(spec)
@@ -149,6 +149,21 @@ assert "private-canary" not in json.dumps(nesting)
 for report in (invalid, invalid_encoding, invalid_envelope, unclassified, missing):
     assert "private-canary" not in json.dumps(report)
 
+health_events = [(view, stage) for view in ("host", "runtime") for stage in ("requested", "verified")]
+client2_health = failed + b"".join(
+    f"CLIENT2_STOP_HEALTH_CHECKPOINT view={view} stage={stage}\r\n".encode()
+    for view, stage in health_events)
+diag = fixture.stop_failure_diagnostics(client2_health)
+assert diag["client2_health_checkpoints"] == [{"view": view, "stage": stage} for view, stage in health_events]
+assert not diag["client2_health_checkpoint_invalid"]
+for event in (b"view=private-canary stage=requested", b"view=host stage=private-canary",
+              b"view=host stage=verified private-canary", b"view=host stage=verified\xff"):
+    diag = fixture.stop_failure_diagnostics(client2_health + b"CLIENT2_STOP_HEALTH_CHECKPOINT " + event + b"\n")
+    assert diag["client2_health_checkpoint_invalid"] and "private-canary" not in json.dumps(diag)
+for message, category in fixture.CLIENT2_ERRORS.items():
+    diag = fixture.stop_failure_diagnostics(failed + f"Error: {message}\n".encode())
+    assert diag["client2_identity_error_categories"] == [category]
+
 previous = Path.cwd()
 with tempfile.TemporaryDirectory(prefix="g1-stop-failure-check-") as directory:
     try:
@@ -217,6 +232,61 @@ with tempfile.TemporaryDirectory(prefix="g1-stop-failure-check-") as directory:
         assert "private-canary" not in json.dumps(report)
     finally:
         os.chdir(previous)
+
+with tempfile.TemporaryDirectory(prefix="g1-stop-mode-check-") as directory:
+    root = Path(directory)
+    request = dict(root=str(root), target="x86_64-pc-windows-msvc", harness="harness",
+        client2_source_sha="source", cli_source_sha="cli-source", source_sha="runtime-source",
+        runtime_archive="runtime.tar.gz", runtime_metadata="runtime.json", harness_sha256="binary",
+        cli_binary_sha256="binary", runtime_binary_sha256="binary")
+    memory = SimpleNamespace(MODEL_HASHES={}, digest=lambda _: "binary", execute=lambda _: {
+        "passed": True, "offline_installer_verified": True, "model_sha256": {}})
+    original = SimpleNamespace(CLIENT2_OWNED_SOURCE_SHA="source",
+        standalone_stop_checks=Mock(return_value={"passed": True}),
+        owned_stop_checks=Mock(return_value=[{"case": case} for case in ("normal", "caller-timeout", "explicit-force")]),
+        build_owned_stop_probe=Mock(side_effect=lambda args, mode_root, log, **kwargs:
+            (mode_root / "probe", {"mode": args.owned_stop_mode, "probe_binary_sha256": "binary"})))
+    manager = SimpleNamespace(configure_env=lambda env: env,
+        cleanup=lambda: {"passed": True, "remaining_entries": []})
+    native = SimpleNamespace(backend=SimpleNamespace(create=lambda _: manager),
+        roundtrips=lambda _, values: values.update({str(index): {} for index in range(8)}))
+    success = f"test {fixture.CASE} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n".encode()
+    outputs = [success + marker for marker in (b"NATIVE_STOP_RAW baseline\n", b"NATIVE_REGISTERED_STOP_RAW owned\n",
+                                           b"NATIVE_CLIENT2_STOP_RAW owned\n")]
+    with patch.object(fixture, "load", side_effect=[memory, original, native, native, native]), \
+         patch.object(fixture, "environment", return_value={"RSRS_CLI_BIN": "cli", "RSRS_RUNTIME_BIN": "runtime"}), \
+         patch.object(fixture.subprocess, "run", side_effect=[SimpleNamespace(returncode=0, stdout=value) for value in outputs]), \
+         patch.object(fixture.sys, "platform", "win32"):
+        result = fixture.execute_stages(request, {"timings_ms": {}})
+    assert result["passed"] and tuple(result["modes"]) == fixture.MODES
+    original.standalone_stop_checks.assert_called_once_with(outputs[0], "binary")
+    assert [call.args for call in original.owned_stop_checks.call_args_list] == [
+        (outputs[1], "registered", "binary", "binary"), (outputs[2], "client2-owned", "binary", "binary")]
+    for mode in fixture.MODES:
+        part = result["modes"][mode]
+        assert ("standalone" in part) == (mode == "standalone")
+        assert len(part["observations"]) == (0 if mode == "standalone" else 3)
+        if mode != "standalone":
+            assert part["source_binding"]["mode"] == mode
+    builds = original.build_owned_stop_probe.call_args_list
+    assert [call.args[1] for call in builds] == [root / "stop-registered", root / "stop-client2-owned"]
+    assert all(call.kwargs == {"cache_root": root / "owned-stop-go-cache"} for call in builds)
+    for index, mode in enumerate(fixture.MODES):
+        isolated = root / ("wrong-evidence-" + mode)
+        isolated.mkdir()
+        invalid = list(outputs)
+        invalid[index] += (b"NATIVE_REGISTERED_STOP_RAW wrong-mode\n" if mode == "standalone"
+                           else b"NATIVE_STOP_RAW duplicated-baseline\n")
+        with patch.object(fixture, "load", side_effect=[memory, original, native, native, native]), \
+             patch.object(fixture, "environment", return_value={"RSRS_CLI_BIN": "cli", "RSRS_RUNTIME_BIN": "runtime"}), \
+             patch.object(fixture.subprocess, "run", side_effect=[SimpleNamespace(returncode=0, stdout=value) for value in invalid]), \
+             patch.object(fixture.sys, "platform", "win32"):
+            try:
+                fixture.execute_stages(dict(request, root=str(isolated)), {"timings_ms": {}})
+            except AssertionError as error:
+                assert str(error) == "Unexpected stop mode evidence"
+            else:
+                raise AssertionError("Wrong-mode evidence was accepted: " + mode)
 
 with tempfile.TemporaryDirectory(prefix="g1-stop-checkpoint-check-") as directory:
     try:

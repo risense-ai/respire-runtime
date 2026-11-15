@@ -3,12 +3,12 @@ import {CASES, selected, verifyResults} from './produce-runtime-g1-stop.mjs';
 
 // Synthetic refusal checks, never native acceptance evidence.
 const digest = 'a'.repeat(64);
-const identity = {target: 'aarch64-unknown-linux-musl', source_sha: 'b'.repeat(40),
+const identity = {target: 'aarch64-unknown-linux-gnu', source_sha: 'b'.repeat(40),
   cli_source_sha: 'c'.repeat(40), client2_source_sha: 'd'.repeat(40), run_id: '13', run_attempt: '2',
   actual_cli_native_sdk: {version: '2.0.0-dev.4', archive_sha256: digest, manifest_sha256: 'e'.repeat(64)},
   cli_sdk_lock_sha256: 'f'.repeat(64)};
 const standalone = {passed: true, observations: ['normal', 'explicit-force', 'accepted-write'].map(name => ({case: name}))};
-const mode = name => ({passed: true, standalone,
+const mode = name => ({passed: true,
   credential: {passed: true, credential_before_passed: true, credential_after_passed: true,
     business_passed: true, business_credential_cleanup_passed: true, keyring_cleanup: {passed: true}},
   source_binding: {client2_source_sha: identity.client2_source_sha, probe_fixture_cli_sha: identity.cli_source_sha,
@@ -18,14 +18,15 @@ const mode = name => ({passed: true, standalone,
     probe_fixture_sha256: Object.fromEntries(['diagnostics_darwin.go', 'diagnostics_other.go', 'host_operations.go', 'main.go']
       .map(file => [`scripts/fixtures/client2-v0256-probe/${file}`, digest]))},
   observations: ['normal', 'caller-timeout', 'explicit-force'].map(item => ({case: item,
-    startup_mode: name === 'registered' ? 'cli-supervised' : 'client2-owned', provider_http_status: 200,
+    startup_mode: name === 'registered' ? 'cli-supervised' : 'client2-owned',
+    ...(name === 'client2-owned' ? {actor_lane: 'cli-host-runtime-core'} : {}), provider_http_status: 200,
     provider_requests: 1, credential_cleanup_verified: true, business_sender: 'modern-harness',
     stop_sender: name === 'registered' ? (item === 'normal' ? 'modern-cli' : 'original-go-client2-managed') : 'original-go-client2',
     encrypted_write_committed: item !== 'explicit-force', forced_operation_remains_unknown: item === 'explicit-force',
     caller_timeout_ms: item === 'normal' ? null : 40000}))});
 const result = {schema: 1, passed: true, test_executed: true, offline_installer_verified: true,
   release_acceptance: false, target: identity.target, identity,
-  modes: {standalone: {passed: true, standalone}, registered: mode('registered'), 'client2-owned': mode('client2-owned')},
+  modes: {standalone: {passed: true, standalone, observations: [], source_binding: null}, registered: mode('registered'), 'client2-owned': mode('client2-owned')},
   model_sha256: {
     'tokenizer.json': '6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
     'onnx/model_quantized.onnx': '0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
@@ -57,6 +58,8 @@ for (const mutate of [
   r => { r.prepared_memory.private_log = 'private-canary'; },
   r => { delete r.modes.registered; },
   r => { r.modes['client2-owned'].observations.pop(); },
+  r => { delete r.modes['client2-owned'].observations[0].actor_lane; },
+  r => { r.modes['client2-owned'].observations[0].actor_lane = 'same-image-runtime'; },
   r => { r.modes.registered.credential.keyring_cleanup.passed = false; },
   r => { r.modes.registered.credential.credential_after_passed = false; },
   r => { r.modes.registered.credential.business_credential_cleanup_passed = false; },
@@ -68,7 +71,12 @@ for (const mutate of [
   r => { r.modes.registered.observations[1].caller_timeout_ms = 1; },
   r => { r.modes.registered.observations[2].forced_operation_remains_unknown = false; },
   r => { r.modes.standalone.standalone.observations.pop(); },
-  r => { r.target = 'aarch64-unknown-linux-gnu'; },
+  r => { delete r.modes.standalone.standalone; },
+  r => { r.modes.standalone.observations = structuredClone(r.modes.registered.observations); },
+  r => { r.modes.standalone.source_binding = structuredClone(r.modes.registered.source_binding); },
+  r => { r.modes.registered.standalone = structuredClone(r.modes.standalone.standalone); },
+  r => { r.modes['client2-owned'].standalone = null; },
+  r => { r.target = 'aarch64-unknown-linux-musl'; },
   r => { r.model_sha256 = {}; },
 ]) {
   const bad = structuredClone(result);

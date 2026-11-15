@@ -97,11 +97,14 @@ export function verifyResults(result, identity) {
   for (const mode of ['standalone', 'registered', 'client2-owned']) {
     const part = result.modes[mode];
     assert.equal(part.passed, true);
-    assert.equal(part.standalone.passed, true);
-    assert.deepEqual(part.standalone.observations.map(row => row.case).sort(), ['accepted-write', 'explicit-force', 'normal']);
     if (mode === 'standalone') {
+      assert.equal(part.standalone.passed, true);
+      assert.deepEqual(part.standalone.observations.map(row => row.case).sort(), ['accepted-write', 'explicit-force', 'normal']);
+      assert.deepEqual(part.observations, []);
+      assert.equal(part.source_binding, null);
       for (const row of part.standalone.observations) observed.push(`standalone:${row.case}`);
     } else {
+      assert.ok(!Object.hasOwn(part, 'standalone'), 'Owned modes must not repeat or reuse standalone evidence');
       const binding = part.source_binding;
       assert.equal(binding.client2_source_sha, identity.client2_source_sha);
       assert.equal(binding.probe_fixture_cli_sha, identity.cli_source_sha);
@@ -124,6 +127,7 @@ export function verifyResults(result, identity) {
       for (const row of part.observations) {
         const startup = mode === 'registered' ? 'cli-supervised' : 'client2-owned';
         assert.equal(row.startup_mode, startup);
+        if (mode === 'client2-owned') assert.equal(row.actor_lane, 'cli-host-runtime-core');
         assert.equal(row.provider_http_status, 200);
         assert.equal(row.provider_requests, 1);
         assert.equal(row.credential_cleanup_verified, true);

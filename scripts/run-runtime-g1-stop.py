@@ -97,6 +97,22 @@ LIFECYCLE_ERRORS = {
     "Runtime V2 unlock receipt reports a locked library": "unlock_receipt_locked",
     "Runtime provider credential receipt mismatch": "unlock_provider_status_mismatch",
 }
+CLIENT2_ERRORS = {
+    "Client2-owned image mismatch": "image_mismatch",
+    "Client2-owned Runtime image mismatch": "runtime_image_mismatch",
+    "Client2-owned scope root mismatch": "root_mismatch",
+    "Client2-owned Runtime identity changed": "runtime_identity_changed",
+    "Client2-owned CLI host binding mismatch": "host_binding_mismatch",
+    "Client2-owned host and Runtime binding mismatch": "host_runtime_binding_mismatch",
+    "Client2-owned OS image mismatch": "os_image_mismatch",
+    "Client2-owned process birth mismatch": "process_birth_mismatch",
+    "Client2-owned process parent or identity changed": "process_identity_changed",
+    "Client2-owned CLI host image mismatch": "host_image_mismatch",
+    "Client2-owned Runtime release mismatch": "runtime_release_mismatch",
+    "Client2-owned host and Runtime must be separate processes": "actors_not_separate",
+    "Client2-owned actor changed during verification": "actor_changed",
+    "Client2-owned process parent inspection failed": "parent_inspection_failed",
+}
 
 
 def stop_failure_diagnostics(captured):
@@ -106,7 +122,14 @@ def stop_failure_diagnostics(captured):
     finish, restart, timings, exits, listener_failures = [], [], [], [], []
     listener_failure_invalid = False
     provider_statuses, provider_status_invalid = [], False
+    client2_health, client2_health_invalid = [], False
     for line in lines:
+        if line.startswith(b"CLIENT2_STOP_HEALTH_CHECKPOINT"):
+            health = re.fullmatch(rb"CLIENT2_STOP_HEALTH_CHECKPOINT view=(host|runtime) stage=(requested|verified)", line)
+            if health:
+                client2_health.append({"view": health[1].decode(), "stage": health[2].decode()})
+            else:
+                client2_health_invalid = True
         if line.startswith(b"NATIVE_STOP_PROVIDER_STATUS "):
             status = re.fullmatch(rb'NATIVE_STOP_PROVIDER_STATUS \{"state":"(not_loaded|ready)"\}', line)
             unavailable = re.fullmatch(rb'NATIVE_STOP_PROVIDER_STATUS \{"state":"unavailable","code":"(access_denied|platform_failure|backend_unavailable|invalid_configuration|ambiguous|bad_encoding)"\}', line)
@@ -145,7 +168,10 @@ def stop_failure_diagnostics(captured):
     result = {"finish_checkpoints": finish, "registered_restart_events": restart,
               "owned_case_timings": timings, "registered_lifecycle_exit_codes": exits,
               "listener_failures": listener_failures, "listener_failure_invalid": listener_failure_invalid,
-              "provider_statuses": provider_statuses, "provider_status_invalid": provider_status_invalid}
+              "provider_statuses": provider_statuses, "provider_status_invalid": provider_status_invalid,
+              "client2_health_checkpoints": client2_health, "client2_health_checkpoint_invalid": client2_health_invalid,
+              "client2_identity_error_categories": [code for text, code in CLIENT2_ERRORS.items()
+                  if b"Error: " + text.encode() in lines]}
     accepted = accepted_write_checkpoints(captured)
     if finish and "business_completed" in accepted and "runtime_stopped" not in accepted:
         result["finish_error_category"] = (
@@ -285,7 +311,8 @@ def execute_stages(request, state):
                     stable_business_cli_metadata=None, stable_business_runtime_archive=None, require_native_stop=False)
                 started = time.monotonic()
                 try:
-                    probe, binding = original.build_owned_stop_probe(args, mode_root, log)
+                    probe, binding = original.build_owned_stop_probe(args, mode_root, log,
+                        cache_root=root / "owned-stop-go-cache")
                 finally:
                     state["timings_ms"]["probe_build_" + mode] = round((time.monotonic() - started) * 1000)
                 mode_env.update(RSRS_TEST_NATIVE_OWNED_STOP=mode, RSRS_CLIENT2_PROBE_BIN=str(probe))
@@ -326,10 +353,16 @@ def execute_stages(request, state):
                     raise subprocess.CalledProcessError(process.returncode, ["native-stop-harness"])
                 state["stage"] = "stop_assertions"
                 passed_case(process.stdout)
-                standalone = original.standalone_stop_checks(process.stdout, request["runtime_binary_sha256"])
-                assert standalone["passed"]
+                markers = {"standalone": (b"NATIVE_STOP_RAW ", b"NATIVE_ACCEPTED_WRITE_RAW "),
+                           "registered": (b"NATIVE_REGISTERED_STOP_RAW ",),
+                           "client2-owned": (b"NATIVE_CLIENT2_STOP_RAW ",)}
+                assert not any(marker in process.stdout for other, values in markers.items()
+                               if other != mode for marker in values), "Unexpected stop mode evidence"
                 observations = []
-                if mode != "standalone":
+                if mode == "standalone":
+                    standalone = original.standalone_stop_checks(process.stdout, request["runtime_binary_sha256"])
+                    assert standalone["passed"]
+                else:
                     assert memory.digest(probe) == binding["probe_binary_sha256"]
                     observations = original.owned_stop_checks(process.stdout, mode, binding["probe_binary_sha256"], request["runtime_binary_sha256"])
                 if sys.platform == "linux":
@@ -350,8 +383,10 @@ def execute_stages(request, state):
                     state["stage"] = previous_stage
                     credential = {"passed": True, "credential_before_passed": True,
                                   "credential_after_passed": True, "keyring_cleanup": cleanup}
-            result["modes"][mode] = {"passed": True, "standalone": standalone,
+            result["modes"][mode] = {"passed": True,
                 "observations": observations, "source_binding": binding, "credential": credential}
+            if mode == "standalone":
+                result["modes"][mode]["standalone"] = standalone
         state.update(stage="final_identity", mode=None)
         for name, sha in memory.MODEL_HASHES.items():
             assert memory.digest(root / "model" / name) == sha
