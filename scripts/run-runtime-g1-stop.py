@@ -255,14 +255,14 @@ def execute_stages(request, state):
             credential = None
             try:
                 state["stage"] = "credential_setup"
-                if sys.platform == "linux" and mode != "standalone":
+                if sys.platform == "linux":
                     wrapper = [sys.executable, "-B", str(Path(".cli-source/scripts/dev-secret-service-keyring-selftest.py").resolve()),
                                "--root", str(mode_root / "credentials"), "--timeout", "6600"]
                     if mode == "registered":
                         command = [*wrapper, "--hosted-user-bus", "--", *command]
                     else:
                         command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private", *wrapper, "--", *command]
-                elif mode != "standalone":
+                else:
                     native = load("g1_stop_native_" + mode, Path(".cli-source/scripts/dev-migration-keyring-selftest.py"))
                     manager = native.backend.create(mode_root / "credentials")
                     mode_env = manager.configure_env(mode_env)
@@ -291,15 +291,15 @@ def execute_stages(request, state):
                 if mode != "standalone":
                     assert memory.digest(probe) == binding["probe_binary_sha256"]
                     observations = original.owned_stop_checks(process.stdout, mode, binding["probe_binary_sha256"], request["runtime_binary_sha256"])
-                    if sys.platform == "linux":
-                        credential = json.loads((mode_root / "credentials/business-keyring-selftest.json").read_bytes())
-                        assert credential["passed"] and credential["business_passed"] and credential["business_credential_cleanup_passed"]
-                        assert credential["keyring_cleanup"]["passed"]
-                    else:
-                        state["stage"] = "credential_after"
-                        after = {}
-                        native.roundtrips(manager, after)
-                        assert len(after) == 8
+                if sys.platform == "linux":
+                    credential = json.loads((mode_root / "credentials/business-keyring-selftest.json").read_bytes())
+                    assert credential["passed"] and credential["business_passed"] and credential["business_credential_cleanup_passed"]
+                    assert credential["keyring_cleanup"]["passed"]
+                else:
+                    state["stage"] = "credential_after"
+                    after = {}
+                    native.roundtrips(manager, after)
+                    assert len(after) == 8
             finally:
                 if manager is not None:
                     previous_stage = state["stage"]

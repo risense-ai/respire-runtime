@@ -201,13 +201,18 @@ with tempfile.TemporaryDirectory(prefix="g1-stop-checkpoint-check-") as director
         process = SimpleNamespace(returncode=101, stdout=finish_failure)
         with patch.object(fixture, "load", side_effect=[memory, original]), \
              patch.object(fixture, "environment", return_value={}), \
-             patch.object(fixture.subprocess, "run", return_value=process):
+             patch.object(fixture.subprocess, "run", return_value=process) as native_run, \
+             patch.object(fixture.sys, "platform", "linux"):
             try:
                 fixture.execute(request)
             except subprocess.CalledProcessError as error:
                 assert error.returncode == 101 and error.cmd == ["native-stop-harness"]
             else:
                 raise AssertionError("Stop failure was swallowed")
+        command = native_run.call_args.args[0]
+        assert command[:4] == ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private"]
+        assert "dev-secret-service-keyring-selftest.py" in command[6]
+        assert command[-5:] == ["harness", fixture.CASE, "--exact", "--test-threads=1", "--show-output"]
         report = json.loads(Path("g1-stop-raw/failure.json").read_bytes())
         assert report["exit_code"] == 101 and report["stage"] == "stop_harness"
         assert report["diagnostics"]["accepted_write_checkpoints"] == stages[:-2]
