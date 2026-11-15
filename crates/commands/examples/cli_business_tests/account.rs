@@ -567,13 +567,24 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     } else {
         support::install_runtime_fixture(&root)?;
     }
-    let session_bytes = br#"{"user":"original","addr":"https://previous.invalid"}"#;
+    let super_password = crypto::generate_secret_key();
+    let session_bytes = if support::legacy_cli()?.is_some() {
+        br#"{"user":"original","addr":"https://previous.invalid"}"#.to_vec()
+    } else {
+        // Explicit rollback recovery must be able to unlock the retained source account.
+        let salt = crypto::random_hex(16);
+        let (nonce, wrapped) = crypto::wrap_key(&[41_u8; 32],
+            &crypto::derive_rsrs_kek(&super_password, &salt)?)?;
+        serde_json::to_vec(&json!({"user":"original","addr":"https://previous.invalid",
+            "vault_version":4,"kdf_salt":salt,
+            "wrapped_urk":format!("{}{wrapped}", crypto::RSRS_PREFIX),"urk_nonce":nonce}))?
+    };
+    let session_bytes = session_bytes.as_slice();
     std::fs::write(original.join("session.json"), session_bytes)?;
     let config_bytes = serde_json::to_vec(
         &json!({"data_dir":original,"api_base":"https://previous.invalid","addr":"http://config.invalid","custom":"preserve"}),
     )?;
     std::fs::write(root.join("client.json"), &config_bytes)?;
-    let super_password = crypto::generate_secret_key();
     let salt = crypto::random_hex(16);
     let urk = [42_u8; 32];
     let (nonce, wrapped) = crypto::wrap_key(&urk, &crypto::derive_kek_v4(&super_password, &salt)?)?;
