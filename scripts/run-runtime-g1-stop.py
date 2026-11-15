@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 
@@ -43,6 +44,76 @@ def accepted_write_checkpoints(captured):
     return [ACCEPTED_WRITE_CHECKPOINTS[line] for line in lines if line in ACCEPTED_WRITE_CHECKPOINTS]
 
 
+FINISH_STAGES = {"wait_requested", "exit_observed", "exit_verified", "receipt_read", "receipt_parsed",
+                 "receipt_verified", "listener_verified", "lock_verified"}
+RESTART_EVENTS = {"restart_probe", "restart_managed", "restart_identity", "restart_stop", "restart_start",
+                  "restart_ready", "event_file_missing", "event_file_unreadable", "event_file_invalid", "no_restart_event"}
+TIMING_STAGES = {"start", "caller_wait_complete", "receipt_verified", "quiet_period_verified",
+                 "recovery_requested", "recovery_started", "recovery_stopped", "complete"}
+RESTART_ERRORS = {
+    "runtime restart blocked: owner health is unavailable": "owner_health_unavailable",
+    "runtime restart blocked: stale owner could not be verified": "stale_owner_unverified",
+    "runtime maintenance is incomplete": "maintenance_incomplete",
+    "maintenance owner changed": "maintenance_owner_changed",
+    "unknown existing startup registration": "registration_unknown",
+    "systemd user session unavailable": "systemd_unavailable",
+    "owned autostart registration is missing": "registration_missing",
+    "host runtime exited before readiness": "runtime_exited_before_ready",
+    "host runtime did not become ready": "runtime_not_ready",
+}
+
+
+def stop_failure_diagnostics(captured):
+    lines = [line.removesuffix(b"\r") for line in captured.split(b"\n")[:-1]]
+    if f"test {CASE} ... FAILED".encode() not in lines:
+        return {}
+    finish, restart, timings, exits = [], [], [], []
+    for line in lines:
+        match = re.fullmatch(rb"NATIVE_STOP_FINISH_CHECKPOINT stage=([a-z_]+) elapsed_ms=([0-9]{1,12})", line)
+        if match and match[1].decode() in FINISH_STAGES:
+            finish.append({"stage": match[1].decode(), "elapsed_ms": int(match[2])})
+        match = re.fullmatch(rb"REGISTERED_RESTART_EVENT stage=([a-z_]+)", line)
+        if match and match[1].decode() in RESTART_EVENTS:
+            restart.append(match[1].decode())
+        match = re.fullmatch(rb"OWNED_STOP_TIMING case=(normal|caller-timeout|explicit-force) stage=([a-z_]+) elapsed_ms=([0-9]{1,12})", line)
+        if match and match[2].decode() in TIMING_STAGES:
+            timings.append({"case": match[1].decode(), "stage": match[2].decode(), "elapsed_ms": int(match[3])})
+        match = re.fullmatch(rb"REGISTERED_LIFECYCLE_EXIT code=([0-9]{1,3})", line)
+        if match and int(match[1]) <= 255:
+            exits.append(int(match[1]))
+    result = {"finish_checkpoints": finish, "registered_restart_events": restart,
+              "owned_case_timings": timings, "registered_lifecycle_exit_codes": exits}
+    accepted = accepted_write_checkpoints(captured)
+    if finish and "business_completed" in accepted and "runtime_stopped" not in accepted:
+        result["finish_error_category"] = (
+            "exit_timeout" if b"Runtime did not finish native stop" in captured else
+            "assertion" if b"panicked at" in captured else
+            "returned_error" if any(line.startswith(b"Error: ") for line in lines) else "unclassified")
+    if restart:
+        private = re.search(rb"REGISTERED_LIFECYCLE_PRIVATE_STDOUT\r?\n(.*?)\r?\nREGISTERED_LIFECYCLE_PRIVATE_STDERR\r?\n",
+                            captured, re.S)
+        if not private:
+            categories = ["private_output_missing"]
+        else:
+            try:
+                envelope = json.loads(private[1])
+            except UnicodeDecodeError:
+                categories = ["invalid_encoding"]
+            except RecursionError:
+                categories = ["nesting_limit"]
+            except ValueError:
+                categories = ["invalid_json"]
+            else:
+                errors = envelope.get("errors") if isinstance(envelope, dict) else None
+                if not isinstance(errors, list) or not all(isinstance(error, str) for error in errors):
+                    categories = ["invalid_envelope"]
+                else:
+                    categories = [name for text, name in RESTART_ERRORS.items()
+                                  if any(text in error for error in errors)] or ["unclassified"]
+        result["registered_restart_error_categories"] = categories
+    return result
+
+
 def environment(root, request):
     env = {key: value for key, value in os.environ.items() if key.upper() in (
         "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "RUNNER_TEMP", "GITHUB_ACTIONS",
@@ -67,6 +138,8 @@ def environment(root, request):
 def failure_record(request, state, error):
     stage = state["stage"]
     diagnostics = dict(state.get("diagnostics", {}))
+    if "timings_ms" in state:
+        diagnostics["elapsed_ms"] = dict(state["timings_ms"])
     if stage == "preparation" and isinstance(error, subprocess.CalledProcessError):
         command = error.cmd if isinstance(error.cmd, (list, tuple)) else []
         if command[1:4] == ["--json", "runtime", "install"]:
@@ -99,10 +172,12 @@ def failure_record(request, state, error):
 
 
 def execute(request):
-    state = {"stage": "preparation", "mode": None}
+    state = {"stage": "preparation", "mode": None, "timings_ms": {}}
+    started = time.monotonic()
     try:
         return execute_stages(request, state)
     except Exception as error:
+        state["timings_ms"]["total"] = round((time.monotonic() - started) * 1000)
         # Only fixed stages and the original allowlist parser's result are public.
         output = Path("g1-stop-raw")
         output.mkdir(exist_ok=True)
@@ -114,7 +189,11 @@ def execute(request):
 
 def execute_stages(request, state):
     memory = load("g1_stop_frozen_preparation", Path(__file__).with_name("run-runtime-g1-memory.py"))
-    prepared = memory.execute(request)
+    started = time.monotonic()
+    try:
+        prepared = memory.execute(request)
+    finally:
+        state["timings_ms"]["preparation"] = round((time.monotonic() - started) * 1000)
     assert prepared["passed"] and prepared["offline_installer_verified"] and prepared["model_sha256"] == memory.MODEL_HASHES
     state["stage"] = "stop_source_binding"
     root = Path(request["root"])
@@ -139,7 +218,11 @@ def execute_stages(request, state):
                     runtime_archive=Path(request["runtime_archive"]), runtime_metadata=Path(request["runtime_metadata"]),
                     official_cli_metadata=None, legacy_stable_contracts=False, stable_business_cli=None,
                     stable_business_cli_metadata=None, stable_business_runtime_archive=None, require_native_stop=False)
-                probe, binding = original.build_owned_stop_probe(args, mode_root, log)
+                started = time.monotonic()
+                try:
+                    probe, binding = original.build_owned_stop_probe(args, mode_root, log)
+                finally:
+                    state["timings_ms"]["probe_build_" + mode] = round((time.monotonic() - started) * 1000)
                 mode_env.update(RSRS_TEST_NATIVE_OWNED_STOP=mode, RSRS_CLIENT2_PROBE_BIN=str(probe))
             command = [request["harness"], CASE, "--exact", "--test-threads=1", "--show-output"]
             manager = None
@@ -161,13 +244,18 @@ def execute_stages(request, state):
                     native.roundtrips(manager, before)
                     assert len(before) == 8
                 state["stage"] = "stop_harness"
-                process = subprocess.run(command, env=mode_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                started = time.monotonic()
+                try:
+                    process = subprocess.run(command, env=mode_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                finally:
+                    state["timings_ms"]["harness_" + mode] = round((time.monotonic() - started) * 1000)
                 log.write(process.stdout)
                 log.flush()
                 if process.returncode != 0:
                     state["subprocess_exit_code"] = process.returncode
                     state["diagnostics"] = original.safe_failure_diagnostics(process.stdout, [CASE])
                     state["diagnostics"]["accepted_write_checkpoints"] = accepted_write_checkpoints(process.stdout)
+                    state["diagnostics"].update(stop_failure_diagnostics(process.stdout))
                     raise subprocess.CalledProcessError(process.returncode, ["native-stop-harness"])
                 state["stage"] = "stop_assertions"
                 passed_case(process.stdout)

@@ -1541,16 +1541,24 @@ impl Fixture {
     }
 
     fn finish_standalone_stop(&mut self, health: &Value, operation: &Value, forced: bool) -> anyhow::Result<Value> {
+        let started = std::time::Instant::now();
+        let checkpoint = |stage: &str| eprintln!("NATIVE_STOP_FINISH_CHECKPOINT stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+        checkpoint("wait_requested");
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let status = loop {
             if let Some(status) = self.child.as_mut().context("runtime child missing")?.try_wait()? { break status; }
             anyhow::ensure!(std::time::Instant::now() < deadline, "Runtime did not finish native stop");
             std::thread::sleep(Duration::from_millis(50));
         };
+        checkpoint("exit_observed");
         self.child.take();
         assert_eq!(status.code(), Some(if forced { 1 } else { 0 }));
-        let receipt: Value = serde_json::from_slice(&std::fs::read(self.home.path().join("data/runtime")
-            .join(format!("stop-{}.json", health["instance_id"].as_str().context("instance missing")?)))?)?;
+        checkpoint("exit_verified");
+        let receipt_bytes = std::fs::read(self.home.path().join("data/runtime")
+            .join(format!("stop-{}.json", health["instance_id"].as_str().context("instance missing")?)))?;
+        checkpoint("receipt_read");
+        let receipt: Value = serde_json::from_slice(&receipt_bytes)?;
+        checkpoint("receipt_parsed");
         assert_eq!(receipt["schema_version"], 1);
         assert_eq!(receipt["protocol_version"], 1);
         assert_eq!(receipt["operation_id"], *operation);
@@ -1558,13 +1566,16 @@ impl Fixture {
             assert_eq!(receipt[key], health[key], "final stop identity changed: {key}");
         }
         assert_eq!(receipt["state"], if forced { "forced_timeout" } else { "drained" });
+        checkpoint("receipt_verified");
         match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", self.port).parse()?, Duration::from_secs(2)) {
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
             other => anyhow::bail!("stopped listener did not refuse a fresh connection: {other:?}"),
         }
+        checkpoint("listener_verified");
         // This harness process is distinct from the Runtime owner; use the actual file-lock API.
         let ownership = respire::lock::LibraryLock::acquire(&self.home.path().join("data"), Duration::from_secs(1))?;
         drop(ownership);
+        checkpoint("lock_verified");
         Ok(receipt)
     }
 }
@@ -1975,6 +1986,50 @@ fn owned_stop_checkpoint(startup_mode: &str, case: &str, stage: &str) {
     eprintln!("OWNED_STOP_CHECKPOINT {}", json!({"startup_mode":startup_mode,"case":case,"stage":stage}));
 }
 
+fn registered_restart_diagnostics(root: &Path) {
+    let path = root.join("runtime/autostart/events.jsonl");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let stage = if error.kind() == std::io::ErrorKind::NotFound { "event_file_missing" } else { "event_file_unreadable" };
+            eprintln!("REGISTERED_RESTART_EVENT stage={stage}");
+            return;
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        eprintln!("REGISTERED_RESTART_EVENT stage=event_file_invalid");
+        return;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            eprintln!("REGISTERED_RESTART_EVENT stage=event_file_unreadable");
+            return;
+        }
+    };
+    let mut stages = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+        let value: Value = match serde_json::from_slice(line) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("REGISTERED_RESTART_EVENT stage=event_file_invalid");
+                return;
+            }
+        };
+        if let Some(stage) = value.get("event").and_then(Value::as_str) {
+            if matches!(stage, "restart_probe" | "restart_managed" | "restart_identity" | "restart_stop" | "restart_start" | "restart_ready") {
+                stages.push(stage.to_owned());
+            }
+        }
+    }
+    if stages.is_empty() {
+        eprintln!("REGISTERED_RESTART_EVENT stage=no_restart_event");
+    }
+    for stage in &stages {
+        eprintln!("REGISTERED_RESTART_EVENT stage={stage}");
+    }
+}
+
 fn assert_owned_stop_lock_held(root: &Path, backend_pid: u32, backend_identity: &Value) -> anyhow::Result<()> {
     anyhow::ensure!(backend_pid != std::process::id(), "lock check must run outside the backend process");
     anyhow::ensure!(stop_native_worker_identity(backend_pid)?.as_ref() == Some(backend_identity),
@@ -2025,6 +2080,9 @@ impl RegisteredStopFixture {
     fn run(&self, args: &[&str]) -> anyhow::Result<Value> {
         let output = self.command(args)?.output()?;
         if !output.status.success() {
+            if let Some(code) = output.status.code() {
+                eprintln!("REGISTERED_LIFECYCLE_EXIT code={code}");
+            }
             // Only the private libtest capture receives command output; public reports use fixed codes.
             eprintln!("\nREGISTERED_LIFECYCLE_PRIVATE_STDOUT\n{}\nREGISTERED_LIFECYCLE_PRIVATE_STDERR\n{}\nREGISTERED_LIFECYCLE_PRIVATE_END",
                 String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -2093,7 +2151,14 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
     anyhow::ensure!(probe.is_file(), "original Go probe is not a file");
     let probe_digest = format!("{:x}", Sha256::digest(std::fs::read(&probe)?));
     for mode in ["normal", "caller-timeout", "explicit-force"] {
-    let checkpoint = |stage| owned_stop_checkpoint("registered", mode, stage);
+    let case_started = std::time::Instant::now();
+    let checkpoint = |stage| {
+        owned_stop_checkpoint("registered", mode, stage);
+        if matches!(stage, "start" | "caller_wait_complete" | "receipt_verified" | "quiet_period_verified"
+            | "recovery_requested" | "recovery_started" | "recovery_stopped" | "complete") {
+            eprintln!("OWNED_STOP_TIMING case={mode} stage={stage} elapsed_ms={}", case_started.elapsed().as_millis());
+        }
+    };
     checkpoint("start");
     let fixture = Fixture::new()?;
     checkpoint("fixture_created");
@@ -2326,7 +2391,10 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
     checkpoint("write_verified");
     let recovery = if mode != "normal" {
     checkpoint("recovery_requested");
-        owned.run(&["--json", "runtime", "restart"])?;
+        if let Err(error) = owned.run(&["--json", "runtime", "restart"]) {
+            registered_restart_diagnostics(&root);
+            return Err(error);
+        }
     checkpoint("recovery_started");
         let recovered = owned.health()?;
         assert_eq!(recovered["store_ready"], true);

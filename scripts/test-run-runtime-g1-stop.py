@@ -61,6 +61,63 @@ assert fixture.accepted_write_checkpoints(captured) == stages
 assert fixture.accepted_write_checkpoints(captured.replace(b" ... FAILED", b" ... ok")) == []
 assert fixture.accepted_write_checkpoints(captured.replace(fixture.CASE.encode(), b"other_case")) == []
 
+accepted_failure = failed + b"".join(
+    f"NATIVE_ACCEPTED_WRITE_CHECKPOINT stage={stage}\n".encode() for stage in stages[:-2]
+)
+finish_failure = accepted_failure + (
+    b"NATIVE_STOP_FINISH_CHECKPOINT stage=wait_requested elapsed_ms=0\r\n"
+    b"NATIVE_STOP_FINISH_CHECKPOINT stage=exit_observed elapsed_ms=100\n"
+    b"NATIVE_STOP_FINISH_CHECKPOINT stage=private_canary elapsed_ms=1\n"
+    b"NATIVE_STOP_FINISH_CHECKPOINT stage=receipt_read elapsed_ms=1 private-canary-secret\n"
+    b"thread 'test' panicked at private-canary-path\n"
+)
+diag = fixture.stop_failure_diagnostics(finish_failure)
+assert diag["finish_checkpoints"] == [{"stage": "wait_requested", "elapsed_ms": 0},
+                                      {"stage": "exit_observed", "elapsed_ms": 100}]
+assert diag["finish_error_category"] == "assertion"
+assert fixture.stop_failure_diagnostics(finish_failure.replace(b"thread 'test' panicked at", b"Error: Runtime did not finish native stop"))["finish_error_category"] == "exit_timeout"
+assert fixture.stop_failure_diagnostics(finish_failure.replace(b"thread 'test' panicked at", b"Error:"))["finish_error_category"] == "returned_error"
+assert fixture.stop_failure_diagnostics(finish_failure.replace(b"thread 'test' panicked at", b"unknown failure"))["finish_error_category"] == "unclassified"
+assert fixture.stop_failure_diagnostics(finish_failure.replace(b" ... FAILED", b" ... ok")) == {}
+assert "private-canary" not in json.dumps(diag)
+
+restart_failure = failed + (
+    b"REGISTERED_LIFECYCLE_EXIT code=1\nREGISTERED_LIFECYCLE_EXIT code=999\n"
+    b"REGISTERED_LIFECYCLE_PRIVATE_STDOUT\n"
+    b'{"errors":["runtime restart blocked: stale owner could not be verified: private-canary-path"]}\n'
+    b"REGISTERED_LIFECYCLE_PRIVATE_STDERR\nprivate-canary-secret\nREGISTERED_LIFECYCLE_PRIVATE_END\n"
+    b"REGISTERED_RESTART_EVENT stage=restart_probe\nREGISTERED_RESTART_EVENT stage=restart_start\n"
+    b"REGISTERED_RESTART_EVENT stage=private_canary\n"
+    b"OWNED_STOP_TIMING case=explicit-force stage=recovery_requested elapsed_ms=12345\n"
+    b"OWNED_STOP_TIMING case=private-canary stage=complete elapsed_ms=5\n"
+    b"OWNED_STOP_TIMING case=normal stage=complete elapsed_ms=5 private-canary\n"
+    b"REGISTERED_RESTART_EVENT stage=restart_ready"
+)
+diag = fixture.stop_failure_diagnostics(restart_failure)
+assert diag["registered_restart_events"] == ["restart_probe", "restart_start"]
+assert diag["registered_lifecycle_exit_codes"] == [1]
+assert diag["registered_restart_error_categories"] == ["stale_owner_unverified"]
+assert diag["owned_case_timings"] == [{"case": "explicit-force", "stage": "recovery_requested", "elapsed_ms": 12345}]
+assert "private-canary" not in json.dumps(diag)
+invalid = fixture.stop_failure_diagnostics(restart_failure.replace(b'"errors":', b'"bad-json":invalid,'))
+assert invalid["registered_restart_error_categories"] == ["invalid_json"]
+invalid_encoding = fixture.stop_failure_diagnostics(restart_failure.replace(b"private-canary-path", b"\xff"))
+assert invalid_encoding["registered_restart_error_categories"] == ["invalid_encoding"]
+invalid_envelope = fixture.stop_failure_diagnostics(restart_failure.replace(b'"errors":[', b'"errors":{"data":[').replace(b'private-canary-path"]}', b'private-canary-path"]}}'))
+assert invalid_envelope["registered_restart_error_categories"] == ["invalid_envelope"]
+unclassified = fixture.stop_failure_diagnostics(restart_failure.replace(b"runtime restart blocked: stale owner could not be verified", b"unknown private-canary error"))
+assert unclassified["registered_restart_error_categories"] == ["unclassified"]
+missing = fixture.stop_failure_diagnostics(restart_failure.replace(b"REGISTERED_LIFECYCLE_PRIVATE_STDOUT", b"private-canary"))
+assert missing["registered_restart_error_categories"] == ["private_output_missing"]
+deep = (failed + b"REGISTERED_LIFECYCLE_PRIVATE_STDOUT\n" + b"[" * 2000 + b"]" * 2000
+        + b"\nREGISTERED_LIFECYCLE_PRIVATE_STDERR\nREGISTERED_RESTART_EVENT stage=no_restart_event\n")
+with patch.object(fixture.json, "loads", side_effect=RecursionError("private-canary")):
+    nesting = fixture.stop_failure_diagnostics(deep)
+assert nesting["registered_restart_error_categories"] == ["nesting_limit"]
+assert "private-canary" not in json.dumps(nesting)
+for report in (invalid, invalid_encoding, invalid_envelope, unclassified, missing):
+    assert "private-canary" not in json.dumps(report)
+
 previous = Path.cwd()
 with tempfile.TemporaryDirectory(prefix="g1-stop-failure-check-") as directory:
     try:
@@ -141,7 +198,7 @@ with tempfile.TemporaryDirectory(prefix="g1-stop-checkpoint-check-") as director
             "passed": True, "offline_installer_verified": True, "model_sha256": {}})
         original = SimpleNamespace(CLIENT2_OWNED_SOURCE_SHA="source",
             safe_failure_diagnostics=lambda *_: {"failure_codes": {}})
-        process = SimpleNamespace(returncode=101, stdout=captured)
+        process = SimpleNamespace(returncode=101, stdout=finish_failure)
         with patch.object(fixture, "load", side_effect=[memory, original]), \
              patch.object(fixture, "environment", return_value={}), \
              patch.object(fixture.subprocess, "run", return_value=process):
@@ -153,7 +210,12 @@ with tempfile.TemporaryDirectory(prefix="g1-stop-checkpoint-check-") as director
                 raise AssertionError("Stop failure was swallowed")
         report = json.loads(Path("g1-stop-raw/failure.json").read_bytes())
         assert report["exit_code"] == 101 and report["stage"] == "stop_harness"
-        assert report["diagnostics"]["accepted_write_checkpoints"] == stages
+        assert report["diagnostics"]["accepted_write_checkpoints"] == stages[:-2]
+        assert report["diagnostics"]["finish_checkpoints"][-1] == {"stage": "exit_observed", "elapsed_ms": 100}
+        assert report["diagnostics"]["finish_error_category"] == "assertion"
+        elapsed = report["diagnostics"]["elapsed_ms"]
+        assert set(elapsed) == {"preparation", "harness_standalone", "total"}
+        assert all(type(value) is int and value >= 0 for value in elapsed.values())
         assert "private-canary" not in json.dumps(report)
     finally:
         os.chdir(previous)
