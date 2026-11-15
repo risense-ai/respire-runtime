@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-cli
-          ref: a1c6bcb30df4ec2ac86607a8db1e6bf5dad2857a
+          ref: ad2dd86f7e1dc2404c12d61d0055c0b77e6cab15
           path: .cli-source
           persist-credentials: false
       - name: Build the fixed CLI compatibility consumer

@@ -13,6 +13,7 @@ export {CASES};
 export const selected = [...new Set([
   ...Object.values(CASES).flat(),
   'account::authorization_preserves_and_commits_profiles',
+  'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay',
 ])].sort();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 function read(path) {
@@ -109,6 +110,21 @@ export function verifyResults(business, launcher, bound) {
   assert.equal(business.selected_case_count, selected.length);
   for (const key of ['required_cases', 'passed_cases']) assert.deepEqual([...business[key]].sort(), selected);
   assert.deepEqual(business.missing_or_failed_cases, []);
+  assert.equal(business.selected_native_stop, true);
+  assert.equal(business.standalone_stop.passed, true);
+  const stops = business.standalone_stop.observations;
+  assert.deepEqual(stops.map(item => item.case).sort(), ['accepted-write', 'explicit-force', 'normal']);
+  for (const item of stops) {
+    const forced = item.case === 'explicit-force';
+    assert.equal(item.startup_mode, 'standalone');
+    assert.equal(item.provider_requests, 1);
+    assert.equal(item.final_state, forced ? 'forced_timeout' : 'drained');
+    assert.equal(item.encrypted_write_committed, item.case === 'accepted-write');
+    assert.equal(item.forced_operation_remains_unknown, forced);
+    assert.ok(Number.isSafeInteger(item.business_before_stop_ms) && item.business_before_stop_ms > 4000);
+    assert.ok(Number.isSafeInteger(item.business_held_after_stop_ms)
+      && item.business_held_after_stop_ms > (forced ? 0 : 4000));
+  }
   assert.equal(business.owned_process_cleanup.passed, true);
   assert.equal(business.owned_process_cleanup.forced, 0);
   assert.deepEqual(business.owned_process_cleanup.forced_processes, []);

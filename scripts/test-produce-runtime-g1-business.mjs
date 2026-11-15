@@ -17,7 +17,13 @@ const business = {suite: 'g1-business', passed: true, test_executed: true, relea
   cli_binary_sha256: cliBinary, runtime_binary_sha256: binary, runtime_archive_sha256: archive,
   runtime_metadata_sha256: bound.metadata_sha256, sdk_lock_sha256: bound.sdk_lock_sha256,
   offline_installer_verified: true, selected_case_count: names.length, required_cases: names, passed_cases: names,
-  missing_or_failed_cases: [], owned_process_cleanup: {passed: true, forced: 0, forced_processes: []}, keyring: {passed: true, business_passed: true}};
+  missing_or_failed_cases: [], selected_native_stop: true,
+  standalone_stop: {passed: true, observations: ['normal', 'explicit-force', 'accepted-write'].map(name => ({
+    case: name, startup_mode: 'standalone', provider_requests: 1,
+    final_state: name === 'explicit-force' ? 'forced_timeout' : 'drained',
+    encrypted_write_committed: name === 'accepted-write', forced_operation_remains_unknown: name === 'explicit-force',
+    business_before_stop_ms: 4201, business_held_after_stop_ms: 4202}))},
+  owned_process_cleanup: {passed: true, forced: 0, forced_processes: []}, keyring: {passed: true, business_passed: true}};
 const launcher = {client2_source: '1734322b6c6dd543441a753f07a3517bee5e1231', g1_passed: false,
   inputs: {cli_sha256: cliBinary, runtime_archive_sha256: archive, runtime_version: 'synthetic', ordinary_cli_cold_start: true, host_credentials: true},
   desktop_headless: {enabled: true, binary_sha256: desktop, release: 'host-owned-candidate', artifact_id: 14114928434, run_id: '43597586002'},
@@ -25,7 +31,10 @@ const launcher = {client2_source: '1734322b6c6dd543441a753f07a3517bee5e1231', g1
     'desktop-owned', 'cli-host-sigterm', 'cli-host-sigkill'].map(name => ({name, passed: true, cleanup_exit: 0, synthetic_host_credential: true}))};
 verifyResults(business, launcher, bound);
 for (const mutate of [
-  (b) => {b.selected_case_count = 2;},
+  (b) => {b.selected_case_count = 3;},
+  (b) => {b.selected_native_stop = false;},
+  (b) => {b.standalone_stop.observations.pop();},
+  (b) => {b.standalone_stop.observations[0].business_held_after_stop_ms = 4000;},
   (b) => {b.run_attempt = '1';},
   (b) => {b.runtime_archive_sha256 = '0'.repeat(64);},
   (b) => {b.passed_cases = b.passed_cases.slice(1);},
@@ -48,4 +57,4 @@ for (const mutate of [
   mutate(b, l);
   assert.throws(() => verifyResults(b, l, bound));
 }
-console.log('19 synthetic business combination checks passed; no native acceptance executed');
+console.log('22 synthetic business combination checks passed; no native acceptance executed');
