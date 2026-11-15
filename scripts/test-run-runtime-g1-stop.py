@@ -262,6 +262,7 @@ with tempfile.TemporaryDirectory(prefix="g1-stop-mode-check-") as directory:
     original.standalone_stop_checks.assert_called_once_with(outputs[0], "binary")
     assert [call.args for call in original.owned_stop_checks.call_args_list] == [
         (outputs[1], "registered", "binary", "binary"), (outputs[2], "client2-owned", "binary", "binary")]
+    assert all(call.kwargs == {"cli_sha256": "binary"} for call in original.owned_stop_checks.call_args_list)
     for mode in fixture.MODES:
         part = result["modes"][mode]
         assert ("standalone" in part) == (mode == "standalone")

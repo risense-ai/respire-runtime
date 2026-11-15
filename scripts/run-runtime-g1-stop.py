@@ -364,7 +364,8 @@ def execute_stages(request, state):
                     assert standalone["passed"]
                 else:
                     assert memory.digest(probe) == binding["probe_binary_sha256"]
-                    observations = original.owned_stop_checks(process.stdout, mode, binding["probe_binary_sha256"], request["runtime_binary_sha256"])
+                    observations = original.owned_stop_checks(process.stdout, mode, binding["probe_binary_sha256"], request["runtime_binary_sha256"],
+                        cli_sha256=request["cli_binary_sha256"])
                 if sys.platform == "linux":
                     credential = json.loads((mode_root / "credentials/business-keyring-selftest.json").read_bytes())
                     assert credential["passed"] and credential["business_passed"] and credential["business_credential_cleanup_passed"]

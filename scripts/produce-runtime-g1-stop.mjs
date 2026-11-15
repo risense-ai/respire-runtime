@@ -127,7 +127,7 @@ export function verifyResults(result, identity) {
       for (const row of part.observations) {
         const startup = mode === 'registered' ? 'cli-supervised' : 'client2-owned';
         assert.equal(row.startup_mode, startup);
-        if (mode === 'client2-owned') assert.equal(row.actor_lane, 'cli-host-runtime-core');
+        if (mode === 'client2-owned') assert.equal(row.actor_lane, 'client2-cli-runtime-core');
         assert.equal(row.provider_http_status, 200);
         assert.equal(row.provider_requests, 1);
         assert.equal(row.credential_cleanup_verified, true);
