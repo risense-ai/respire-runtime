@@ -83,6 +83,8 @@ assert "private-canary" not in json.dumps(diag)
 
 for error, category in (
     ("systemctl current-user operation failed (exit 1)", "systemctl_failed"),
+    ("launchctl current-user operation failed (exit 1)", "launchctl_failed"),
+    ("Windows current-user operation failed (exit 1)", "windows_manager_failed"),
     ("host session credential read failed (BackendUnavailable)", "session_credential_read_failed"),
 ):
     startup_failure = (failed + b"REGISTERED_LIFECYCLE_EXIT code=1\n"

@@ -76,6 +76,8 @@ LIFECYCLE_ERRORS = {
     "startup registration did not complete": "registration_incomplete",
     "systemctl current-user operation failed": "systemctl_failed",
     "busctl current-user operation failed": "busctl_failed",
+    "launchctl current-user operation failed": "launchctl_failed",
+    "Windows current-user operation failed": "windows_manager_failed",
     "current-user service manager program unavailable": "manager_program_unavailable",
     "could not invoke current-user service manager": "manager_invoke_failed",
     "current-user service manager request timed out": "manager_timed_out",
