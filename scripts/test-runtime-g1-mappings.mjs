@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {REQUIRED_CASES, BUSINESS_CASES, STOP_CASES} from './produce-runtime-g1-smoke.mjs';
+import {REQUIRED_CASES, BUSINESS_CASES, STOP_CASES, CLIENT2_STOP_CASES, CLIENT2_STOP_TARGETS, stopCasesForTarget} from './produce-runtime-g1-smoke.mjs';
 import {TARGETS} from './sdk-ci-cache.mjs';
 
 // Implemented means producer wiring exists; strict current-run reports still decide acceptance.
@@ -10,7 +10,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const read = path => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n');
 const registry = JSON.parse(read('scripts/required-tests.json'));
 const workflow = read('.github/workflows/ci.yml');
-assert.equal(registry.tests.length, 8);
+assert.equal(registry.tests.length, 11);
 assert.ok(registry.tests.every(item => item.status === 'implemented'));
 function job(name) {
   const start = workflow.indexOf(`\n  ${name}:\n`);
@@ -20,18 +20,28 @@ function job(name) {
   return end < 0 ? tail : tail.slice(0, end + 1);
 }
 assert.deepEqual(STOP_CASES, {
-  'runtime.stop-clean-drained': ['standalone:accepted-write', 'standalone:normal', 'cli-supervised:normal', 'client2-owned:normal'],
-  'runtime.stop-forced-timeout': ['standalone:explicit-force', 'cli-supervised:explicit-force', 'client2-owned:explicit-force'],
-  'runtime.stop-caller-timeout-drains': ['cli-supervised:caller-timeout', 'client2-owned:caller-timeout'],
+  'runtime.stop-clean-drained': ['standalone:accepted-write', 'standalone:normal', 'cli-supervised:normal'],
+  'runtime.stop-forced-timeout': ['standalone:explicit-force', 'cli-supervised:explicit-force'],
+  'runtime.stop-caller-timeout-drains': ['cli-supervised:caller-timeout'],
 });
+assert.deepEqual(CLIENT2_STOP_CASES, {
+  'runtime.client2-stop-clean-drained': ['client2-owned:normal'],
+  'runtime.client2-stop-forced-timeout': ['client2-owned:explicit-force'],
+  'runtime.client2-stop-caller-timeout-drains': ['client2-owned:caller-timeout'],
+});
+assert.deepEqual(CLIENT2_STOP_TARGETS, TARGETS.filter(target => !target.endsWith('-musl')));
+for (const target of TARGETS) {
+  assert.equal(Object.values(stopCasesForTarget(target)).flat().length, target.endsWith('-musl') ? 6 : 9);
+}
+assert.throws(() => stopCasesForTarget('foreign-target'));
 assert.ok(!registry.tests.some(item => item.id === 'runtime.stop-compatibility-timeout'));
-const expected = {...REQUIRED_CASES, ...BUSINESS_CASES, ...STOP_CASES};
+const expected = {...REQUIRED_CASES, ...BUSINESS_CASES, ...STOP_CASES, ...CLIENT2_STOP_CASES};
 for (const [id, cases] of Object.entries(expected)) {
   const item = registry.tests.find(item => item.id === id);
   assert.ok(item);
   assert.equal(item.coverage, 'real-artifact');
   assert.deepEqual(item.required_cases, cases);
-  assert.deepEqual([...item.required_targets].sort(), [...TARGETS].sort());
+  assert.deepEqual([...item.required_targets].sort(), [...(Object.hasOwn(CLIENT2_STOP_CASES, id) ? CLIENT2_STOP_TARGETS : TARGETS)].sort());
   assert.ok(Array.isArray(item.source_suite) && item.source_suite.length > 0);
   for (const suite of item.source_suite) {
     assert.ok(suite.file && !suite.file.startsWith('/') && !suite.file.includes('..'));
@@ -58,7 +68,7 @@ for (const [id, cases] of Object.entries(expected)) {
     for (const target of TARGETS) assert.ok(body.includes(`target: ${target}`));
     assert.ok(body.includes('path: g1-report'));
     assert.ok(body.includes('name: required-tests-report-part-'));
-  } else if (Object.hasOwn({...BUSINESS_CASES, ...STOP_CASES}, id)) {
+  } else if (Object.hasOwn({...BUSINESS_CASES, ...STOP_CASES, ...CLIENT2_STOP_CASES}, id)) {
     assert.equal(item.evidence.job, 'g1-native-stop');
     assert.equal(item.evidence.job_name, 'g1-native-stop');
     assert.deepEqual([...item.evidence.matrix].sort(), [...TARGETS].sort());
@@ -74,4 +84,4 @@ assert.ok(!workflow.includes('\n  g1-native-memory:\n'));
 assert.ok(job('g1-report').includes('g1-native-stop'));
 assert.ok(job('g1-native-business').includes('G1_RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}'));
 assert.ok(job('g1-native-business').includes('G1_RAW_ARTIFACT_SHA256: ${{ steps.raw.outputs.artifact-digest }}'));
-console.log('8 suite mappings validated; 8 implemented suites; current reports still required; execution not certified');
+console.log('11 suite mappings validated; Runtime/CLI eight targets and Client2 six targets; current reports still required; execution not certified');

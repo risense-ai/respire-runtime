@@ -36,7 +36,7 @@ result.prepared_memory = {schema: 1, passed: true, test_executed: true, release_
   offline_installer_verified: true, target: identity.target, identity, model_sha256: structuredClone(result.model_sha256),
   passed_cases: ['diary_identity::remember_public_payload_covers_created_appended_and_merged',
     'diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once']};
-assert.equal(Object.keys(CASES).length, 6);
+assert.equal(Object.keys(CASES).length, 9);
 assert.equal(selected.length, 9);
 const verified = verifyResults(result, identity);
 assert.deepEqual(Object.keys(verified).sort(), Object.keys(CASES).sort());
@@ -57,6 +57,7 @@ for (const mutate of [
   r => { r.prepared_memory.offline_installer_verified = false; },
   r => { r.prepared_memory.private_log = 'private-canary'; },
   r => { delete r.modes.registered; },
+  r => { delete r.modes['client2-owned']; },
   r => { r.modes['client2-owned'].observations.pop(); },
   r => { delete r.modes['client2-owned'].observations[0].actor_lane; },
   r => { r.modes['client2-owned'].observations[0].actor_lane = 'same-image-runtime'; },
@@ -100,4 +101,26 @@ for (const mutate of [
   mutate(bad);
   assert.throws(() => verifyResults(bad, frontendIdentity));
 }
-console.log('six-suite producer retains native evidence checks and rejects missing or substituted frontend null identity');
+for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl']) {
+  const muslIdentity = {...frontendIdentity, target};
+  const musl = structuredClone(frontend);
+  musl.target = target;
+  musl.identity = muslIdentity;
+  musl.prepared_memory.target = target;
+  musl.prepared_memory.identity = muslIdentity;
+  delete musl.modes['client2-owned'];
+  const reports = verifyResults(musl, muslIdentity);
+  assert.equal(Object.keys(reports).length, 6);
+  assert.ok(!Object.values(reports).flat().some(row => row.name.startsWith('client2-owned:')));
+  for (const mutate of [
+    value => {value.modes['client2-owned'] = mode('client2-owned');},
+    value => {delete value.modes.registered;},
+    value => {value.modes.registered.observations.pop();},
+    value => {value.modes.standalone.standalone.observations.pop();},
+  ]) {
+    const bad = structuredClone(musl);
+    mutate(bad);
+    assert.throws(() => verifyResults(bad, muslIdentity));
+  }
+}
+console.log('target-specific stop producer rejects missing modes, fabricated Client2 musl evidence and substituted frontend null identity');

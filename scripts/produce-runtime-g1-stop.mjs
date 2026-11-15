@@ -4,13 +4,13 @@ import {execFileSync} from 'node:child_process';
 import {lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {context, STOP_CASES, BUSINESS_CASES} from './produce-runtime-g1-smoke.mjs';
+import {context, STOP_CASES, CLIENT2_STOP_CASES, CLIENT2_STOP_TARGETS, stopCasesForTarget, BUSINESS_CASES} from './produce-runtime-g1-smoke.mjs';
 import {verifyResults as verifyMemoryResults} from './produce-runtime-g1-memory.mjs';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 import {observeConsumerSdk} from './freeze-runtime-g1-candidate.mjs';
 
-export const CASES = {...BUSINESS_CASES, ...STOP_CASES};
-export const selected = [...new Set(Object.values(STOP_CASES).flat())].sort();
+export const CASES = {...BUSINESS_CASES, ...STOP_CASES, ...CLIENT2_STOP_CASES};
+export const selected = [...new Set(Object.values({...STOP_CASES, ...CLIENT2_STOP_CASES}).flat())].sort();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const read = path => {
   assert.ok(lstatSync(path).isFile() && !lstatSync(path).isSymbolicLink());
@@ -92,9 +92,11 @@ export function verifyResults(result, identity) {
   assert.deepEqual(Object.keys(result.prepared_memory).sort(), ['schema', 'passed', 'test_executed',
     'release_acceptance', 'offline_installer_verified', 'target', 'identity', 'passed_cases', 'model_sha256'].sort());
   verifyMemoryResults(result.prepared_memory, identity);
-  assert.deepEqual(Object.keys(result.modes).sort(), ['client2-owned', 'registered', 'standalone']);
+  const stopCases = stopCasesForTarget(identity.target);
+  const modes = ['standalone', 'registered', ...(CLIENT2_STOP_TARGETS.includes(identity.target) ? ['client2-owned'] : [])];
+  assert.deepEqual(Object.keys(result.modes).sort(), [...modes].sort());
   const observed = [];
-  for (const mode of ['standalone', 'registered', 'client2-owned']) {
+  for (const mode of modes) {
     const part = result.modes[mode];
     assert.equal(part.passed, true);
     if (mode === 'standalone') {
@@ -142,13 +144,13 @@ export function verifyResults(result, identity) {
       }
     }
   }
-  assert.deepEqual(observed.sort(), selected);
+  assert.deepEqual(observed.sort(), Object.values(stopCases).flat().sort());
   assert.deepEqual(result.model_sha256, {
     'tokenizer.json': '6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
     'onnx/model_quantized.onnx': '0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
     'onnx/model_quantized.cpu-v1.ort': '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff',
   });
-  return Object.fromEntries(Object.entries(CASES).map(([id, names]) => {
+  return Object.fromEntries(Object.entries({...BUSINESS_CASES, ...stopCases}).map(([id, names]) => {
     const actual = Object.hasOwn(BUSINESS_CASES, id) ? result.prepared_memory.passed_cases : observed;
     assert.ok(names.every(name => actual.includes(name)), `Missing executed cases for ${id}`);
     return [id, names.map(name => ({name: actual.find(value => value === name), status: 'passed'}))];
@@ -188,7 +190,7 @@ function report() {
   assert.match(process.env.G1_RAW_ARTIFACT_SHA256 ?? '', /^[a-f0-9]{64}$/);
   mkdirSync('g1-stop-report/reports', {recursive: true});
   writeFileSync('g1-stop-report/candidate.json', bound.bytes, {flag: 'wx'});
-  for (const id of Object.keys(CASES)) save(join('g1-stop-report/reports', `${id}-${bound.target}.json`), {
+  for (const id of Object.keys(verifiedCases)) save(join('g1-stop-report/reports', `${id}-${bound.target}.json`), {
     schema: 2, test_id: id, target: bound.target, status: 'passed', coverage: 'real-artifact',
     cases: verifiedCases[id], source_sha: identity.source_sha,
     repository: execution.repository, run_id: identity.run_id, run_attempt: identity.run_attempt,

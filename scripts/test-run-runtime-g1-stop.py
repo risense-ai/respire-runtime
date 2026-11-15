@@ -29,6 +29,24 @@ refuses(text.replace(b"1 passed", b"0 passed"))
 refuses(text.replace(fixture.CASE.encode(), b"other_case"))
 refuses(text + f"test {fixture.CASE} ... ok\n".encode())
 assert fixture.MODES == ("standalone", "registered", "client2-owned")
+assert len(fixture.CLIENT2_STOP_TARGETS) == 6
+registry = json.loads(Path(__file__).with_name("required-tests.json").read_bytes())
+for item in registry["tests"]:
+    if item["id"].startswith("runtime.client2-stop-"):
+        assert tuple(item["required_targets"]) == fixture.CLIENT2_STOP_TARGETS
+    elif item["id"].startswith("runtime.stop-"):
+        assert set(item["required_targets"]) == {*fixture.CLIENT2_STOP_TARGETS,
+            "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"}
+for target in fixture.CLIENT2_STOP_TARGETS:
+    assert fixture.modes_for_target(target) == fixture.MODES
+for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"):
+    assert fixture.modes_for_target(target) == ("standalone", "registered")
+try:
+    fixture.modes_for_target("unknown-target")
+except AssertionError:
+    pass
+else:
+    raise AssertionError("Unknown stop target accepted")
 request = {"target": "aarch64-pc-windows-msvc", "harness": "private-canary-harness"}
 state = {"stage": "preparation", "mode": None}
 for command, expected in [
@@ -272,6 +290,22 @@ with tempfile.TemporaryDirectory(prefix="g1-stop-mode-check-") as directory:
     builds = original.build_owned_stop_probe.call_args_list
     assert [call.args[1] for call in builds] == [root / "stop-registered", root / "stop-client2-owned"]
     assert all(call.kwargs == {"cache_root": root / "owned-stop-go-cache"} for call in builds)
+    for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"):
+        isolated = root / target
+        isolated.mkdir()
+        original.build_owned_stop_probe.reset_mock()
+        original.owned_stop_checks.reset_mock()
+        # All product and credential calls remain mocked; only target selection executes.
+        with patch.object(fixture, "load", side_effect=[memory, original, native, native]), \
+             patch.object(fixture, "environment", return_value={"RSRS_CLI_BIN": "cli", "RSRS_RUNTIME_BIN": "runtime"}), \
+             patch.object(fixture.subprocess, "run", side_effect=[SimpleNamespace(returncode=0, stdout=value) for value in outputs[:2]]) as calls, \
+             patch.object(fixture.sys, "platform", "win32"):
+            musl = fixture.execute_stages(dict(request, root=str(isolated), target=target), {"timings_ms": {}})
+        assert musl["passed"] and tuple(musl["modes"]) == ("standalone", "registered")
+        assert calls.call_count == 2
+        assert original.build_owned_stop_probe.call_count == 1
+        assert original.build_owned_stop_probe.call_args.args[0].owned_stop_mode == "registered"
+        assert original.owned_stop_checks.call_count == 1
     for index, mode in enumerate(fixture.MODES):
         isolated = root / ("wrong-evidence-" + mode)
         isolated.mkdir()

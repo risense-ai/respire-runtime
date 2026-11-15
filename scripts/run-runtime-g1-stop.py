@@ -16,6 +16,18 @@ from types import SimpleNamespace
 
 CASE = "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay"
 MODES = ("standalone", "registered", "client2-owned")
+CLIENT2_STOP_TARGETS = (
+    "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+    "aarch64-apple-darwin", "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+)
+
+
+def modes_for_target(target):
+    assert target in (*CLIENT2_STOP_TARGETS, "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl")
+    return MODES if target in CLIENT2_STOP_TARGETS else ("standalone", "registered")
+
+
 ACCEPTED_WRITE_CHECKPOINTS = {
     f"NATIVE_ACCEPTED_WRITE_CHECKPOINT stage={stage}".encode(): stage
     for stage in ("fixture_requested", "fixture_ready", "seed_ready", "runtime_ready",
@@ -295,7 +307,7 @@ def execute_stages(request, state):
               "offline_installer_verified": True, "target": request["target"], "identity": request,
               "model_sha256": memory.MODEL_HASHES, "prepared_memory": prepared, "modes": {}}
     with (root / "stop-private.log").open("wb") as log:
-        for mode in MODES:
+        for mode in modes_for_target(request["target"]):
             state.update(stage="mode_preparation", mode=mode)
             mode_root = root / ("stop-" + mode)
             mode_root.mkdir()

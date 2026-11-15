@@ -183,8 +183,7 @@
       "required_cases": [
         "standalone:accepted-write",
         "standalone:normal",
-        "cli-supervised:normal",
-        "client2-owned:normal"
+        "cli-supervised:normal"
       ],
       "coverage": "real-artifact",
       "required_targets": [
@@ -220,6 +219,53 @@
           "aarch64-unknown-linux-musl"
         ]
       }
+    },
+    {
+      "id": "runtime.client2-stop-clean-drained",
+      "area": "stop-drain-modes",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "client2-owned:normal"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      },
+      "scope": "Client2-owned stop on its six supported desktop targets; Linux requires GNU release metadata. Runtime/CLI stop remains required on all eight targets."
     },
     {
       "id": "runtime.stop-forced-timeout",
@@ -233,8 +279,7 @@
       "report_schema": "required-execution/v2",
       "required_cases": [
         "standalone:explicit-force",
-        "cli-supervised:explicit-force",
-        "client2-owned:explicit-force"
+        "cli-supervised:explicit-force"
       ],
       "coverage": "real-artifact",
       "required_targets": [
@@ -272,6 +317,53 @@
       }
     },
     {
+      "id": "runtime.client2-stop-forced-timeout",
+      "area": "stop-drain-modes",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "client2-owned:explicit-force"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      },
+      "scope": "Client2-owned stop on its six supported desktop targets; Linux requires GNU release metadata. Runtime/CLI stop remains required on all eight targets."
+    },
+    {
       "id": "runtime.stop-caller-timeout-drains",
       "area": "stop-drain-modes",
       "status": "implemented",
@@ -282,8 +374,7 @@
       ],
       "report_schema": "required-execution/v2",
       "required_cases": [
-        "cli-supervised:caller-timeout",
-        "client2-owned:caller-timeout"
+        "cli-supervised:caller-timeout"
       ],
       "coverage": "real-artifact",
       "required_targets": [
@@ -319,6 +410,53 @@
           "aarch64-unknown-linux-musl"
         ]
       }
+    },
+    {
+      "id": "runtime.client2-stop-caller-timeout-drains",
+      "area": "stop-drain-modes",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "client2-owned:caller-timeout"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      },
+      "scope": "Client2-owned stop on its six supported desktop targets; Linux requires GNU release metadata. Runtime/CLI stop remains required on all eight targets."
     },
     {
       "id": "runtime.idempotency-same-fingerprint-once",

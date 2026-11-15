@@ -4,9 +4,9 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
+import {TARGETS, auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
-// Native smoke produces two suites; bundle also collects six suites from each native stop part.
+// Native smoke produces two suites; stop parts add business and target-specific stop suites.
 export const REQUIRED_CASES = {
   'runtime.mcp-initialize-tools-list': ['initialize', 'tools/list', 'tools/call:memory_status', 'same-process-after-call'],
   'runtime.client-json-bad-config': ['scoped-structured-invalid-config-envelope',
@@ -18,14 +18,26 @@ export const BUSINESS_CASES = {
   'runtime.idempotency-same-fingerprint-once': ['diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once'],
   'runtime.idempotency-conflict': ['diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once'],
 };
-// Native child cases are mandatory even though one Rust test drives all modes.
+// Client2 supports six desktop targets; its Linux installer requires GNU metadata.
+export const CLIENT2_STOP_TARGETS = [
+  'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc',
+  'aarch64-apple-darwin', 'x86_64-apple-darwin',
+  'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu',
+];
 export const STOP_CASES = {
-  'runtime.stop-clean-drained': ['standalone:accepted-write', 'standalone:normal',
-    'cli-supervised:normal', 'client2-owned:normal'],
-  'runtime.stop-forced-timeout': ['standalone:explicit-force',
-    'cli-supervised:explicit-force', 'client2-owned:explicit-force'],
-  'runtime.stop-caller-timeout-drains': ['cli-supervised:caller-timeout', 'client2-owned:caller-timeout'],
+  'runtime.stop-clean-drained': ['standalone:accepted-write', 'standalone:normal', 'cli-supervised:normal'],
+  'runtime.stop-forced-timeout': ['standalone:explicit-force', 'cli-supervised:explicit-force'],
+  'runtime.stop-caller-timeout-drains': ['cli-supervised:caller-timeout'],
 };
+export const CLIENT2_STOP_CASES = {
+  'runtime.client2-stop-clean-drained': ['client2-owned:normal'],
+  'runtime.client2-stop-forced-timeout': ['client2-owned:explicit-force'],
+  'runtime.client2-stop-caller-timeout-drains': ['client2-owned:caller-timeout'],
+};
+export function stopCasesForTarget(target) {
+  assert.ok(TARGETS.includes(target), 'Unsupported native stop target');
+  return {...STOP_CASES, ...(CLIENT2_STOP_TARGETS.includes(target) ? CLIENT2_STOP_CASES : {})};
+}
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const read = path => {
   const stat = lstatSync(path);
@@ -199,8 +211,7 @@ function bundle() {
   const parts = targets.map(target => ({target, cases: REQUIRED_CASES,
     part: `required-tests-report-part-${target}`, job: `g1-native-smoke (${target})`, raw: `required-tests-raw-runtime-native-${target}`}));
   assert.ok(targets.includes('x86_64-unknown-linux-gnu'), 'Business evidence requires the actual native Linux leg');
-  const stopCases = {...BUSINESS_CASES, ...STOP_CASES};
-  parts.push(...targets.map(target => ({target, cases: stopCases,
+  parts.push(...targets.map(target => ({target, cases: {...BUSINESS_CASES, ...stopCasesForTarget(target)}, stop: true,
     part: `required-tests-report-stop-${target}`, job: `g1-native-stop (${target})`,
     raw: `required-tests-raw-runtime-stop-${target}`})));
   // Linux account/launcher evidence remains separate; its duplicate stop reports are not collected.
@@ -232,11 +243,11 @@ function bundle() {
         assert.equal(String(report[key]), String(expected));
       }
       assert.deepEqual(report.actual_native_sdk, candidate.components.runtime.artifacts[target].native_sdk);
-      if (part.cases === stopCases) {
+      if (part.stop) {
         assert.deepEqual(report.actual_cli_native_sdk, candidate.components.cli.artifacts[target].native_sdk);
         assert.equal(report.producer, 'scripts/produce-runtime-g1-stop.mjs');
         assert.match(report.stop_sha256 ?? '', /^[a-f0-9]{64}$/);
-        if (stopHash) assert.equal(report.stop_sha256, stopHash, 'All six suites must bind the same verified stop execution');
+        if (stopHash) assert.equal(report.stop_sha256, stopHash, 'All stop-part suites must bind the same verified execution');
         stopHash = report.stop_sha256;
       }
       assert.deepEqual(report.cases.map(item => item.name).sort(), [...names].sort());

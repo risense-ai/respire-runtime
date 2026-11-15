@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {STOP_CASES, BUSINESS_CASES} from './produce-runtime-g1-smoke.mjs';
+import {BUSINESS_CASES, stopCasesForTarget} from './produce-runtime-g1-smoke.mjs';
 import {TARGETS} from './sdk-ci-cache.mjs';
 import {createHash} from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
@@ -41,6 +41,8 @@ const mutations = [
   ['stop case missing', (part) => {part.reports.find(report => report.test_id === 'runtime.stop-clean-drained').cases.pop();}, false, 'stop'],
   ['force case missing', (part) => {part.reports.find(report => report.test_id === 'runtime.stop-forced-timeout').cases.pop();}, false, 'stop'],
   ['caller timeout case missing', (part) => {part.reports.find(report => report.test_id === 'runtime.stop-caller-timeout-drains').cases.pop();}, false, 'stop'],
+  ['Client2 stop report missing', (part) => {part.reports = part.reports.filter(report => report.test_id !== 'runtime.client2-stop-clean-drained');}, false, 'stop'],
+  ['fabricated Client2 musl report', (part) => {part.reports.push({...part.reports[0], test_id: 'runtime.client2-stop-clean-drained', cases: [{name: 'client2-owned:normal', status: 'passed'}]});}, false, 'musl-stop'],
   ['stop report missing', (part) => {part.reports = part.reports.filter(report => report.test_id !== 'runtime.stop-clean-drained');}, false, 'stop'],
   ['memory suite missing from stop part', (part) => {part.reports = part.reports.filter(report => report.test_id !== 'runtime.business-memory-write-read');}, false, 'stop'],
   ['memory case missing', (part) => {part.reports.find(report => report.test_id === 'runtime.business-memory-write-read').cases.pop();}, false, 'stop'],
@@ -75,7 +77,7 @@ for (const [name, mutate, passed, kind = 'native'] of mutations) {
     mkdirSync(join(directory, 'reports'), {recursive: true});
     writeFileSync(join(directory, 'candidate.json'), part.candidate);
     for (const report of part.reports) writeFileSync(join(directory, 'reports', `${report.test_id}-${target}.json`), JSON.stringify(report));
-    const stop = {candidate: candidateBytes, reports: Object.entries({...BUSINESS_CASES, ...STOP_CASES}).map(([test_id, names]) => ({
+    const stop = {candidate: candidateBytes, reports: Object.entries({...BUSINESS_CASES, ...stopCasesForTarget(target)}).map(([test_id, names]) => ({
       schema: 2, test_id, target, status: 'passed', coverage: 'real-artifact', source_sha: sha,
       repository: 'risense-ai/respire-runtime', run_id: '17', run_attempt: '2', candidate_sha256: digest,
       job_name: `g1-native-stop (${target})`, actual_native_sdk: sdk, actual_cli_native_sdk: cliSdk,
@@ -84,7 +86,7 @@ for (const [name, mutate, passed, kind = 'native'] of mutations) {
       artifact_name: `required-tests-raw-runtime-stop-${target}-17-2`,
       cases: names.map(name => ({name, status: 'passed'})),
     }))};
-    if (kind === 'stop' && index === 1) mutate(stop);
+    if ((kind === 'stop' && index === 1) || (kind === 'musl-stop' && target === 'x86_64-unknown-linux-musl')) mutate(stop);
     if (!stop.omit) {
       const stopDirectory = join(root, 'g1-parts', `required-tests-report-stop-${target}-17-2`);
       mkdirSync(join(stopDirectory, 'reports'), {recursive: true});
@@ -105,7 +107,7 @@ for (const [name, mutate, passed, kind = 'native'] of mutations) {
   assert.equal(result.status === 0, passed, `Synthetic case ${name}: unexpected assembly outcome`);
   if (passed) {
     assert.ok(readFileSync(join(root, 'g1-final/candidate.json')).equals(candidateBytes));
-    assert.equal(readdirSync(join(root, 'g1-final/reports')).length, targets.length * (Object.keys(suites).length + Object.keys(BUSINESS_CASES).length + Object.keys(STOP_CASES).length));
+    assert.equal(readdirSync(join(root, 'g1-final/reports')).length, targets.reduce((count, target) => count + Object.keys(suites).length + Object.keys(BUSINESS_CASES).length + Object.keys(stopCasesForTarget(target)).length, 0));
   }
 }
 console.log(`${mutations.length} synthetic producer assembly checks passed; no product or native acceptance executed`);
