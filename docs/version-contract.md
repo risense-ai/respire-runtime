@@ -98,15 +98,22 @@ When a change touches the RPC contract:
 
 ## Current stage-one DEV scope
 
-Runtime 2.0.0-dev.18 removes the embedded host command entry points. Client2
-0.2.56 selects its installed Runtime image for host operations, so it cannot
-launch this pure Runtime or manage its components. Upgrade that Client2 before
-selecting this Runtime. The frozen original-desktop compatibility baseline is
-Client2 2.0.0-dev.5, whose unchanged host delegates those operations to the CLI.
-G1 retains all seven lifecycle cases, the original released desktop bytes,
-process identity, RPC boundary and cleanup assertions. This baseline change
-does not establish compatibility with Client2 0.2.56 or interactive Keychain
-authorization. The paired current Client2 also requires its own native checks.
+Runtime 2.0.0-dev.18 removes the embedded host command entry points. Both
+Client2 0.2.56 and 2.0.0-dev.5 still select their installed Runtime image for
+host operations and require the removed model catalog/progress RPCs. Upgrade
+those clients before selecting this Runtime; their historical compatibility
+checks do not establish compatibility with the pure Runtime.
+
+Frozen G1 instead binds the exact paired Client2 source
+`1734322b6c6dd543441a753f07a3517bee5e1231` and its unchanged Linux desktop
+artifact from successful Desktop client run `43597586002`, attempt 1. The
+embedded build identity is `0.2.56-dev.259`; this is unpublished candidate
+evidence, not a released-client claim. The producer authenticates the source,
+workflow, run, artifact ID, ZIP digest, archive digest and executable digest.
+All seven lifecycle cases and process identity, RPC boundary and cleanup
+assertions remain required. Current Windows/credential checks and published
+upgrade acceptance remain separate. Interactive Keychain authorization is not
+established by this evidence.
 
 Runtime 1.0.21-dev.3 and later provide a standalone doctor that
 executes Runtime-owned store, asset/backend, index and optional bounded remote

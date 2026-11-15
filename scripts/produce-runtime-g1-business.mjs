@@ -8,7 +8,7 @@ import {context, BUSINESS_CASES as CASES} from './produce-runtime-g1-smoke.mjs';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
-const oldClient2 = 'be682108c555a3e5a788ad74217e088bcb25170b';
+const pairedClient2 = '1734322b6c6dd543441a753f07a3517bee5e1231';
 export {CASES};
 const selected = [...new Set(Object.values(CASES).flat())].sort();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -28,12 +28,12 @@ function inputs() {
   assert.equal(process.env.GITHUB_JOB, 'g1-native-business');
   const cliSource = resolve('.cli-source');
   const client2Source = resolve('.client2-source');
-  for (const [path, sha] of [[cliSource, bound.candidate.components.cli.source_sha], [client2Source, oldClient2]]) {
+  for (const [path, sha] of [[cliSource, bound.candidate.components.cli.source_sha], [client2Source, pairedClient2]]) {
     assert.equal(execFileSync('git', ['-C', path, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), sha);
     assert.equal(execFileSync('git', ['-C', path, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
   }
-  assert.equal(bound.candidate.components.client2.source_sha, oldClient2);
-  assert.equal(bound.candidate.components.client2.version, '2.0.0-dev.5');
+  assert.equal(bound.candidate.components.client2.source_sha, pairedClient2);
+  assert.equal(bound.candidate.components.client2.version, '0.2.56-dev.259');
   const cliMeta = json(join('g1-input', 'cli-assets', `cli-build-${target}.json`));
   const cliArtifact = bound.candidate.components.cli.artifacts[target];
   assert.equal(cliMeta.git_sha, bound.candidate.components.cli.source_sha);
@@ -76,7 +76,7 @@ function inputs() {
   // Verify the already-hashed original archives themselves contain the exact
   // payload bytes that will execute, not independently supplied loose files.
   execFileSync('python3', ['scripts/verify-business-archive-payloads.py'], {stdio: 'pipe'});
-  // The existing launcher also requires its own fixed original desktop hash;
+  // The existing launcher also requires the fixed paired desktop hash;
   // arbitrary binaries cannot replace the Go Manager/desktop acceptance input.
   const runtime = resolve('release-assets', `rsrs-runtime-${target}`);
   assert.equal(hash(read(runtime)), bound.metadata.binary_sha256);
@@ -111,13 +111,16 @@ export function verifyResults(business, launcher, bound) {
   assert.deepEqual(business.owned_process_cleanup.forced_processes, []);
   assert.equal(business.keyring.passed, true);
   assert.equal(business.keyring.business_passed, true);
-  assert.equal(launcher.client2_source, oldClient2);
+  assert.equal(launcher.client2_source, pairedClient2);
   assert.equal(launcher.g1_passed, false);
   assert.equal(launcher.inputs.cli_sha256, business.cli_binary_sha256);
   assert.equal(launcher.inputs.runtime_archive_sha256, business.runtime_archive_sha256);
   assert.equal(launcher.inputs.runtime_version, bound.metadata.runtime_version);
   assert.equal(launcher.inputs.ordinary_cli_cold_start, true);
   assert.equal(launcher.desktop_headless.enabled, true);
+  assert.equal(launcher.desktop_headless.release, 'host-owned-candidate');
+  assert.equal(launcher.desktop_headless.artifact_id, 14114928434);
+  assert.equal(launcher.desktop_headless.run_id, '43597586002');
   assert.equal(launcher.desktop_headless.binary_sha256, bound.candidate.components.client2.artifacts[target].binary_sha256);
   const names = launcher.cases.map(item => item.name);
   assert.equal(new Set(names).size, names.length);
@@ -147,11 +150,11 @@ function run() {
   const go = execFileSync('which', ['go'], {encoding: 'utf8'}).trim();
   const launcher = spawnSync('python3', [join(bound.cliSource, 'scripts/test-client2-launcher-compat.py'),
     '--cli', bound.cli, '--runtime-archive', archive, '--runtime-version', bound.metadata.runtime_version,
-    '--client2-source', bound.client2Source, '--client2-baseline', 'v2.0.0-dev.5',
+    '--client2-source', bound.client2Source, '--client2-baseline', 'host-owned-candidate',
     '--go', go, '--desktop-executable', bound.desktop,
     '--ordinary-cli-cold-start', '--report', launcherPath], {stdio: 'inherit'});
   assert.ifError(launcher.error);
-  assert.equal(launcher.status, 0, 'Original Client2 execution failed');
+  assert.equal(launcher.status, 0, 'Paired Client2 execution failed');
   const businessBytes = read(join(root, 'result.json'));
   const launcherBytes = read(launcherPath);
   verifyResults(JSON.parse(businessBytes), JSON.parse(launcherBytes), bound);

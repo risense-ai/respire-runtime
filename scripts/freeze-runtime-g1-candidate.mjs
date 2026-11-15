@@ -8,7 +8,7 @@ import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 // This creates inputs, never acceptance reports. No SDK archive is uploaded.
 export const FREEZE_TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin'];
-const client2Source = 'be682108c555a3e5a788ad74217e088bcb25170b';
+const client2Source = '1734322b6c6dd543441a753f07a3517bee5e1231';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function ordinary(root, name) {
   assert.ok(typeof name === 'string' && name && !/[\\:\0]/.test(name));
@@ -158,7 +158,7 @@ export function assembleCandidate(parts, expected, artifacts) {
   assert.deepEqual(parts.map(part => part.target).sort(), [...FREEZE_TARGETS].sort());
   const components = {runtime: {source_sha: expected.source_sha, version: parts[0].runtime_version, artifacts: {}},
     cli: {source_sha: expected.cli_source_sha, version: parts[0].cli_version, artifacts: {}},
-    client2: {source_sha: client2Source, version: '2.0.0-dev.5', artifacts: {}}};
+    client2: {source_sha: client2Source, version: '0.2.56-dev.259', artifacts: {}}};
   for (const part of parts) {
     validatePart(part, expected, part.target);
     assert.equal(part.runtime_version, components.runtime.version); assert.equal(part.cli_version, components.cli.version);

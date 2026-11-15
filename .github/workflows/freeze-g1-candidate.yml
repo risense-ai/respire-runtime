@@ -98,7 +98,7 @@ jobs:
           export RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET"
           cargo build --locked -p respire_runtime --bin rsrs-runtime
           cargo build --locked --manifest-path .cli-source/Cargo.toml -p respire --target-dir .cli-source/target
-      - name: Authenticate the exact original Linux desktop artifact
+      - name: Authenticate the exact paired Linux desktop CI artifact
         if: runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -106,29 +106,36 @@ jobs:
           python3 - <<'PY'
           import hashlib, io, json, os, pathlib, subprocess, tarfile
           repository = 'repos/risense-ai/respire-client2'
-          source = 'be682108c555a3e5a788ad74217e088bcb25170b'
-          release_id, asset_id = 441652519, 735418491
-          archive_sha256 = '69707b8a65df1f46e73b4ea5ddc33235c861a0870f8d0260f261437228c7356a'
-          binary_sha256 = 'dc74596d983ab7b99c6b6872d8438cfb2f2e7060b93f9a9ef13db629b6a5d7a2'
+          source = '1734322b6c6dd543441a753f07a3517bee5e1231'
+          run_id, artifact_id = 43597586002, 14114928434
+          artifact_sha256 = 'f024dd1bc98767e2c5eae77e6dc98c5b550c7fe6194b8ff9023fa6f96f1be73c'
+          archive_sha256 = '056ec02a840f37bdb1eaeed1fc0825a9ac69ea9c301146615f459f1ef21f3b90'
+          binary_sha256 = '40e0c58472358b69d4b56b43c1c1ef7bfd7eb30cc3c6eff516ad5ec702beb626'
           def api(path):
               return json.loads(subprocess.check_output(['gh', 'api', repository + path], timeout=60))
-          release = api('/releases/tags/v2.0.0-dev.5')
-          assert release['id'] == release_id and release['tag_name'] == 'v2.0.0-dev.5'
-          assert not release['draft'] and release['prerelease']
-          tag = api('/git/ref/tags/v2.0.0-dev.5')
-          assert tag['object']['type'] == 'commit' and tag['object']['sha'] == source
-          asset, = [item for item in release['assets'] if item['id'] == asset_id]
-          assert asset['name'] == 'respire-linux-amd64.tar.gz' and asset['state'] == 'uploaded'
-          assert asset['size'] == 11564066 and asset['digest'] == 'sha256:' + archive_sha256
-          payload = subprocess.check_output(['gh', 'api', '-H', 'Accept: application/octet-stream',
-              repository + f'/releases/assets/{asset_id}'], timeout=120)
-          assert len(payload) == asset['size'] and hashlib.sha256(payload).hexdigest() == archive_sha256
+          run = api(f'/actions/runs/{run_id}')
+          assert run['head_sha'] == source and run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['event'] == 'pull_request' and run['path'] == '.github/workflows/desktop.yml'
+          assert run['workflow_id'] == 400250394 and run['run_attempt'] == 1 and run['run_number'] == 259
+          artifact = api(f'/actions/artifacts/{artifact_id}')
+          assert artifact['id'] == artifact_id and artifact['name'] == 'respire-linux-amd64' and not artifact['expired']
+          assert artifact['workflow_run']['id'] == run_id and artifact['workflow_run']['head_sha'] == source
+          assert artifact['size_in_bytes'] == 11578126 and artifact['digest'] == 'sha256:' + artifact_sha256
+          raw = subprocess.check_output(['gh', 'api', repository + f'/actions/artifacts/{artifact_id}/zip'], timeout=120)
+          assert len(raw) == artifact['size_in_bytes'] and hashlib.sha256(raw).hexdigest() == artifact_sha256
+          import zipfile
+          with zipfile.ZipFile(io.BytesIO(raw)) as bundle:
+              members = bundle.infolist()
+              assert len(members) == 4 and {item.filename for item in members} == {'LICENSE.txt', 'SHA256SUMS', 'THIRD_PARTY_NOTICES.txt', 'respire-linux-amd64.tar.gz'}
+              assert all(not item.is_dir() and not item.flag_bits & 1 and item.file_size <= 32 * 1024 * 1024 for item in members)
+              payload = bundle.read('respire-linux-amd64.tar.gz')
+          assert len(payload) == 11578477 and hashlib.sha256(payload).hexdigest() == archive_sha256
           with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
               member, = archive.getmembers()
-              assert member.name == 'respire' and member.type == tarfile.REGTYPE and member.size == 19138480
+              assert member.name == 'respire' and member.type == tarfile.REGTYPE and not member.pax_headers and member.size == 19175344
               with archive.extractfile(member) as stream:
                   binary = stream.read(member.size + 1)
-          assert len(binary) == 19138480 and hashlib.sha256(binary).hexdigest() == binary_sha256
+          assert len(binary) == 19175344 and hashlib.sha256(binary).hexdigest() == binary_sha256
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'legacy-desktop'
           output.mkdir(mode=0o700)
           executable = output / 'respire'
@@ -136,8 +143,10 @@ jobs:
               stream.write(binary)
           executable.chmod(0o700)
           (output / 'respire-linux-amd64.tar.gz').write_bytes(payload)
-          proof = dict(source_commit=source, release='v2.0.0-dev.5', release_id=release_id,
-                       asset_id=asset_id, archive_sha256=archive_sha256, binary_sha256=binary_sha256)
+          proof = dict(source_commit=source, release='host-owned-candidate', version='0.2.56-dev.259',
+                       repository='risense-ai/respire-client2', workflow=run['path'], run_id=run_id, run_attempt=1,
+                       artifact_id=artifact_id, artifact_sha256=artifact_sha256,
+                       archive_sha256=archive_sha256, binary_sha256=binary_sha256)
           (output / 'desktop-source.json').write_text(json.dumps(proof) + '\n')
           PY
       - name: Package original source-fixture bytes before freezing
