@@ -41,6 +41,33 @@ credentials through the host. A separate direct-Runtime case must prove locked
 startup without host input. Old Client2 binaries that require removed host RPCs
 are historical fixtures, not supported consumers of the pure Runtime.
 
+## Follow-up packaging failure and migration scope
+
+Frozen G1 run `43662361394` passed source tests, both native smoke targets and
+its original business subset. Its launcher cases failed before credential setup:
+the frozen Runtime sidecar omitted `offline_keygen_handoff`, although the actual
+Runtime and published-release producer support it. The freeze producer now
+retains that capability, and the existing contract check verifies both producers.
+The CLI fixture also completes keygen's paused handoff through public Runtime
+start before stopping its setup owner. CLI source is now
+`51afe9a4adeac7ea3e79610dadd82013db508df3`. New exact-source G1 is required.
+
+Runtime source `c389bd369bf3a55529ccd1c472ee61eff8d208fa` passed all eight
+builds and eight native regression jobs in nonpublishing run `43662682478`.
+This is evidence for that source only; it is not a published DEV acceptance.
+
+Migration coverage follows database formats: formal release upgrades remain
+required, and a DEV that changes persistent schema or encoding becomes an
+additional mandatory source. Unknown historical DEV formats remain covered.
+Runtime DEV 1 through 17 have identical storage and crypto trees
+(`ed03246f14b2dc6af68b2b4c13fdf87789e06829` and
+`ecdb99048c9532c44654b3660ee8b9f9915493d3`). Core SDK DEV 1 through 4 have
+identical transport and crypto sources. The current Runtime crypto change only
+adds Clone to in-memory SessionKeys. Consequently, the issue #285 DEV-to-DEV
+upgrade remains available with `legacy_dev_upgrade=true` on the manual native
+workflow, and is no longer repeated on every PR. This does not remove stable
+release migration or independent credential/lifecycle/business regressions.
+
 ## Dependency evidence (historical draft baseline)
 
 The original working baseline pins Core SDK `1.0.2-dev.23`. For

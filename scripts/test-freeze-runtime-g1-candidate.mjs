@@ -87,4 +87,11 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   assert.ok(workflow.includes('artifact-id'));
   assert.ok(workflow.includes('artifact-digest'));
   assert.ok(workflow.includes('G1: not evaluated'));
+  const producer = readFileSync(new URL('./freeze-runtime-g1-candidate.mjs', import.meta.url), 'utf8');
+  const release = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  for (const capability of ['business_executor', 'mcp_server', 'offline_keygen_handoff']) {
+    const declaration = `${capability}: '1'`;
+    assert.ok(producer.includes(declaration), `Frozen installer metadata is missing ${capability}`);
+    assert.ok(release.includes(declaration), `Published installer metadata is missing ${capability}`);
+  }
 });

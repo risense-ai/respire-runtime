@@ -134,7 +134,7 @@ function packagePart() {
     archive_sha256: digest(bytes(release, runtimeArchive)), binary_file: runtimeName,
     binary_sha256: digest(bytes(release, runtimeName)), source_commit: context.source_sha,
     compat: {min_cli: cliVersion, max_cli: '*'}, protocol_range: {minimum: 1, maximum: 1},
-    capabilities: {business_executor: '1', mcp_server: '1'}, files: inventory,
+    capabilities: {business_executor: '1', mcp_server: '1', offline_keygen_handoff: '1'}, files: inventory,
     candidate: {kind: 'unpublished-source-fixture', cli_source_sha: context.cli_source_sha, cli_binary_sha256: cliHash}});
   save(join(cliAssets, `cli-build-${target}.json`), {version: cliVersion, git_sha: context.cli_source_sha,
     target, binary_file: cliName, binary_sha256: cliHash, runtime_file: cliArchive,
