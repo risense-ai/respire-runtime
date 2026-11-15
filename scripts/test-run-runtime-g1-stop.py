@@ -81,6 +81,21 @@ assert fixture.stop_failure_diagnostics(finish_failure.replace(b"thread 'test' p
 assert fixture.stop_failure_diagnostics(finish_failure.replace(b" ... FAILED", b" ... ok")) == {}
 assert "private-canary" not in json.dumps(diag)
 
+for error, category in (
+    ("systemctl current-user operation failed (exit 1)", "systemctl_failed"),
+    ("host session credential read failed (BackendUnavailable)", "session_credential_read_failed"),
+):
+    startup_failure = (failed + b"REGISTERED_LIFECYCLE_EXIT code=1\n"
+        + b"REGISTERED_LIFECYCLE_PRIVATE_STDOUT\n"
+        + json.dumps({"errors": [error + ": private-canary-secret"]}).encode()
+        + b"\nREGISTERED_LIFECYCLE_PRIVATE_STDERR\nprivate-canary-path\nREGISTERED_LIFECYCLE_PRIVATE_END\n")
+    startup = fixture.stop_failure_diagnostics(startup_failure)
+    assert startup["registered_lifecycle_exit_codes"] == [1]
+    assert startup["registered_restart_events"] == []
+    assert startup["registered_lifecycle_error_categories"] == [category]
+    assert "registered_restart_error_categories" not in startup
+    assert "private-canary" not in json.dumps(startup)
+
 restart_failure = failed + (
     b"REGISTERED_LIFECYCLE_EXIT code=1\nREGISTERED_LIFECYCLE_EXIT code=999\n"
     b"REGISTERED_LIFECYCLE_PRIVATE_STDOUT\n"
@@ -97,6 +112,7 @@ diag = fixture.stop_failure_diagnostics(restart_failure)
 assert diag["registered_restart_events"] == ["restart_probe", "restart_start"]
 assert diag["registered_lifecycle_exit_codes"] == [1]
 assert diag["registered_restart_error_categories"] == ["stale_owner_unverified"]
+assert diag["registered_lifecycle_error_categories"] == diag["registered_restart_error_categories"]
 assert diag["owned_case_timings"] == [{"case": "explicit-force", "stage": "recovery_requested", "elapsed_ms": 12345}]
 assert "private-canary" not in json.dumps(diag)
 invalid = fixture.stop_failure_diagnostics(restart_failure.replace(b'"errors":', b'"bad-json":invalid,'))

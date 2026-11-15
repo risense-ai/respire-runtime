@@ -71,6 +71,30 @@ RESTART_ERRORS = {
     "host runtime exited before readiness": "runtime_exited_before_ready",
     "host runtime did not become ready": "runtime_not_ready",
 }
+LIFECYCLE_ERRORS = {
+    **RESTART_ERRORS,
+    "startup registration did not complete": "registration_incomplete",
+    "systemctl current-user operation failed": "systemctl_failed",
+    "busctl current-user operation failed": "busctl_failed",
+    "current-user service manager program unavailable": "manager_program_unavailable",
+    "could not invoke current-user service manager": "manager_invoke_failed",
+    "current-user service manager request timed out": "manager_timed_out",
+    "systemd unit load state is unavailable or unexpected": "systemd_load_state_invalid",
+    "unknown systemd user unit path": "systemd_unit_path_mismatch",
+    "systemd loaded working directory differs": "systemd_working_directory_mismatch",
+    "unknown systemd drop-in override": "systemd_dropin_rejected",
+    "systemd loaded executable changed": "systemd_executable_mismatch",
+    "systemd loaded arguments changed": "systemd_arguments_mismatch",
+    "owned runtime did not confirm store readiness": "store_not_ready",
+    "Runtime session credentials are unavailable": "session_credentials_unavailable",
+    "host session credential read failed": "session_credential_read_failed",
+    "unsupported session credential backend": "session_credential_backend_unsupported",
+    "Runtime V2 unlock rejected": "unlock_rejected",
+    "Runtime V2 unlock transport failed": "unlock_transport_failed",
+    "invalid Runtime V2 unlock receipt": "unlock_receipt_invalid",
+    "Runtime V2 unlock receipt reports a locked library": "unlock_receipt_locked",
+    "Runtime provider credential receipt mismatch": "unlock_provider_status_mismatch",
+}
 
 
 def stop_failure_diagnostics(captured):
@@ -115,7 +139,7 @@ def stop_failure_diagnostics(captured):
             "exit_timeout" if b"Runtime did not finish native stop" in captured else
             "assertion" if b"panicked at" in captured else
             "returned_error" if any(line.startswith(b"Error: ") for line in lines) else "unclassified")
-    if restart:
+    if exits or restart:
         private = re.search(rb"REGISTERED_LIFECYCLE_PRIVATE_STDOUT\r?\n(.*?)\r?\nREGISTERED_LIFECYCLE_PRIVATE_STDERR\r?\n",
                             captured, re.S)
         if not private:
@@ -134,9 +158,11 @@ def stop_failure_diagnostics(captured):
                 if not isinstance(errors, list) or not all(isinstance(error, str) for error in errors):
                     categories = ["invalid_envelope"]
                 else:
-                    categories = [name for text, name in RESTART_ERRORS.items()
+                    categories = [name for text, name in LIFECYCLE_ERRORS.items()
                                   if any(text in error for error in errors)] or ["unclassified"]
-        result["registered_restart_error_categories"] = categories
+        result["registered_lifecycle_error_categories"] = categories
+        if restart:
+            result["registered_restart_error_categories"] = categories
     return result
 
 
