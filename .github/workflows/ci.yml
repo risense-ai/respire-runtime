@@ -597,6 +597,18 @@ jobs:
           key: ${{ steps.sdk.outputs.archive_key }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
+      - name: Resolve native harness dependency identity
+        id: rust-native
+        env:
+          RUST_CI_FEATURES: respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures
+        run: node scripts/rust-ci-cache.mjs key native "$RUNTIME_TARGET"
+      - uses: actions/cache/restore@v4
+        id: rust-native-restore
+        with:
+          path: .rust-native-cache
+          key: ${{ steps.rust-native.outputs.key }}
+      - name: Restore third-party harness compilation only
+        run: node scripts/rust-ci-cache.mjs restore native "$RUNTIME_TARGET"
       - name: Build only the actual current-source Runtime business harness
         env:
           EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
@@ -639,6 +651,14 @@ jobs:
           path: g1-business-report
           if-no-files-found: error
           retention-days: 7
+      - name: Remove workspace products after native execution
+        if: success() && steps.rust-native-restore.outputs.cache-hit != 'true'
+        run: node scripts/rust-ci-cache.mjs pack native "$RUNTIME_TARGET"
+      - uses: actions/cache/save@v4
+        if: success() && steps.rust-native-restore.outputs.cache-hit != 'true'
+        with:
+          path: .rust-native-cache
+          key: ${{ steps.rust-native.outputs.key }}
 
   g1-native-stop:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
@@ -897,6 +917,18 @@ jobs:
         run: |
           node scripts/test-produce-runtime-g1-stop.mjs
           python -B scripts/test-run-runtime-g1-stop.py
+      - name: Resolve native harness dependency identity
+        id: rust-native
+        env:
+          RUST_CI_FEATURES: respire_app/cpu-owned-ort-experiment,respire_app_domain/native-credential-fixtures
+        run: node scripts/rust-ci-cache.mjs key native "${G1_HARNESS_TARGET:-$RUNTIME_TARGET}"
+      - uses: actions/cache/restore@v4
+        id: rust-native-restore
+        with:
+          path: .rust-native-cache
+          key: ${{ steps.rust-native.outputs.key }}
+      - name: Restore third-party harness compilation only
+        run: node scripts/rust-ci-cache.mjs restore native "${G1_HARNESS_TARGET:-$RUNTIME_TARGET}"
       - name: Build only the source business harness with its native host SDK
         run: |
           set -euo pipefail
@@ -933,6 +965,14 @@ jobs:
           path: g1-stop-report
           if-no-files-found: error
           retention-days: 7
+      - name: Remove workspace products after native execution
+        if: success() && steps.rust-native-restore.outputs.cache-hit != 'true'
+        run: node scripts/rust-ci-cache.mjs pack native "$G1_HARNESS_TARGET"
+      - uses: actions/cache/save@v4
+        if: success() && steps.rust-native-restore.outputs.cache-hit != 'true'
+        with:
+          path: .rust-native-cache
+          key: ${{ steps.rust-native.outputs.key }}
 
   g1-report:
     if: ${{ !cancelled() && needs.g1-native-smoke.result == 'success' && needs.g1-native-business.result == 'success' && needs.g1-native-stop.result == 'success' }}

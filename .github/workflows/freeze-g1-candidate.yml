@@ -162,6 +162,38 @@ jobs:
           test -n "$EXPECTED_ARCHIVE" && test "$EXPECTED_ARCHIVE" = "$MATCHED_ARCHIVE"
           test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
           node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"
+      # Alpine candidate builds retain their existing container path; this cache is native-host only.
+      - name: Resolve Runtime native dependency identity
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        id: rust-runtime
+        env:
+          RUST_CI_FEATURES: default
+        run: node scripts/rust-ci-cache.mjs key native "$RUNTIME_TARGET"
+      - name: Resolve CLI native dependency identity independently
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        id: rust-cli
+        working-directory: .cli-source
+        env:
+          RUST_CI_FEATURES: default
+        run: node ../scripts/rust-ci-cache.mjs key native "$RUNTIME_TARGET"
+      - uses: actions/cache/restore@v4
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        id: rust-runtime-restore
+        with:
+          path: .rust-native-cache
+          key: ${{ steps.rust-runtime.outputs.key }}
+      - uses: actions/cache/restore@v4
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        id: rust-cli-restore
+        with:
+          path: .cli-source/.rust-native-cache
+          key: ${{ steps.rust-cli.outputs.key }}
+      - name: Restore each consumer's third-party compilation only
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        run: |
+          set -euo pipefail
+          node scripts/rust-ci-cache.mjs restore native "$RUNTIME_TARGET"
+          (cd .cli-source && node ../scripts/rust-ci-cache.mjs restore native "$RUNTIME_TARGET")
       - name: Build the exact two checked-out consumers without credentials
         run: |
           set -euo pipefail
@@ -234,6 +266,27 @@ jobs:
           path: freeze-part/
           if-no-files-found: error
           retention-days: 1
+      - name: Remove Runtime workspace products after packaging
+        if: success() && !endsWith(matrix.target, '-musl') && steps.rust-runtime-restore.outputs.cache-hit != 'true'
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.target }}
+        run: node scripts/rust-ci-cache.mjs pack native "$RUNTIME_TARGET"
+      - uses: actions/cache/save@v4
+        if: success() && !endsWith(matrix.target, '-musl') && steps.rust-runtime-restore.outputs.cache-hit != 'true'
+        with:
+          path: .rust-native-cache
+          key: ${{ steps.rust-runtime.outputs.key }}
+      - name: Remove CLI workspace products after packaging
+        if: success() && !endsWith(matrix.target, '-musl') && steps.rust-cli-restore.outputs.cache-hit != 'true'
+        working-directory: .cli-source
+        env:
+          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.cli-source/.sdk/${{ matrix.target }}
+        run: node ../scripts/rust-ci-cache.mjs pack native "$RUNTIME_TARGET"
+      - uses: actions/cache/save@v4
+        if: success() && !endsWith(matrix.target, '-musl') && steps.rust-cli-restore.outputs.cache-hit != 'true'
+        with:
+          path: .cli-source/.rust-native-cache
+          key: ${{ steps.rust-cli.outputs.key }}
 
   freeze:
     needs: [package]

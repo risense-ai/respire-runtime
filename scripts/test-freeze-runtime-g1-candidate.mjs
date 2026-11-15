@@ -161,7 +161,23 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   const workflow = readFileSync(new URL('../.github/workflows/freeze-g1-candidate.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   // The parent script directory is scripts/, so resolve through the repository root.
   assert.ok(workflow.includes('contents: read\n  actions: read'));
-  assert.doesNotMatch(workflow, /secrets\.|actions\/cache\/save|contents: write|actions: write/);
+  assert.doesNotMatch(workflow, /secrets\.|contents: write|actions: write/);
+  const saves = workflow.split('      - uses: actions/cache/save@v4\n').slice(1);
+  assert.equal(saves.length, 2);
+  for (const body of saves) {
+    const step = body.split('\n      - ')[0].split('\n  freeze:')[0];
+    assert.match(step, /if: success\(\) && !endsWith\(matrix.target, '-musl'\)/);
+    assert.match(step, /path: (?:\.cli-source\/)?\.rust-native-cache\n/);
+    assert.doesNotMatch(step, /path: .*\.sdk/);
+  }
+  const rustCache = readFileSync(new URL('./rust-ci-cache.mjs', import.meta.url), 'utf8');
+  assert.ok(rustCache.includes("['deps', 'build', '.fingerprint']"));
+  assert.ok(rustCache.includes("['clean', ...(native ? ['--profile', 'dev'] : ['--release'])"));
+  assert.ok(rustCache.includes("manifest.files.filter(file => file.path.startsWith('runtime/'))"));
+  assert.ok(rustCache.includes('rmSync(path.join(output, where, name), {force: true})'));
+  assert.ok(workflow.indexOf('path: freeze-part/') < workflow.indexOf('pack native'));
+  assert.ok(workflow.includes('node ../scripts/rust-ci-cache.mjs key native'));
+  assert.ok(workflow.includes('node ../scripts/rust-ci-cache.mjs pack native'));
   assert.ok(workflow.includes('fail-on-cache-miss: true'));
   assert.ok(workflow.includes('archive-key "$RUNTIME_TARGET"'));
   assert.ok(workflow.includes('node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"'));
@@ -192,6 +208,14 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
     assert.ok(body.indexOf('id: cli-payload') < body.indexOf('mv ".sdk/$RUNTIME_TARGET"'));
     assert.ok(body.indexOf('mv ".sdk/$RUNTIME_TARGET"') < body.indexOf('id: payload'));
     assert.doesNotMatch(body, /cmp sdk\/core-sdk.lock.json \.cli-source|copytree|cp -a \.sdk/);
+  }
+  for (const body of [business, stop]) {
+    assert.ok(body.includes('node scripts/rust-ci-cache.mjs key native'));
+    assert.ok(body.indexOf('restore native') < body.indexOf('cargo test --locked -p respire_commands'));
+    assert.ok(body.indexOf('pack native') > body.indexOf('node scripts/produce-runtime-g1-'));
+    assert.ok(body.indexOf('pack native') > body.indexOf('path: g1-'));
+    assert.match(body, /if: success\(\) && steps.rust-native-restore.outputs.cache-hit != 'true'/);
+    assert.ok(body.includes('node scripts/stage-core-runtime.mjs target/debug/examples'));
   }
   const smokeMatrix = ci.slice(ci.indexOf('  g1-native-smoke:'), ci.indexOf('  g1-native-business:'));
   for (const target of FREEZE_TARGETS) {
