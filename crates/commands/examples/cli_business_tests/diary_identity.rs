@@ -1417,6 +1417,22 @@ impl Drop for HeldClassifyProvider {
     }
 }
 
+fn stop_native_listener_open(port: u16, _timeout: Duration) -> std::io::Result<bool> {
+    #[cfg(windows)]
+    {
+        // Windows can time out connecting to a closed loopback port; query the OS table instead.
+        respire_commands::net_rpc::windows_listener_pid_on(port).map(|pid| pid.is_some())
+    }
+    #[cfg(not(windows))]
+    {
+        match std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), _timeout) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 fn stop_native_post(url: &str, request: &Value) -> anyhow::Result<(u16, Value)> {
     let response = match ureq::AgentBuilder::new().try_proxy_from_env(false).build()
         .post(url).timeout(Duration::from_secs(90))
@@ -1568,15 +1584,20 @@ impl Fixture {
         assert_eq!(receipt["state"], if forced { "forced_timeout" } else { "drained" });
         checkpoint("receipt_verified");
         let listener_started = std::time::Instant::now();
-        match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", self.port).parse()?, Duration::from_secs(2)) {
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
+        match stop_native_listener_open(self.port, Duration::from_secs(2)) {
+            Ok(false) => {},
             other => {
                 match &other {
-                    Ok(_) => eprintln!("NATIVE_STOP_LISTENER_FAILURE outcome=connected probe_elapsed_ms={}", listener_started.elapsed().as_millis()),
+                    Ok(_) => {
+                        #[cfg(windows)]
+                        eprintln!("NATIVE_STOP_LISTENER_FAILURE outcome=error kind=AddrInUse os_error=None probe_elapsed_ms={}", listener_started.elapsed().as_millis());
+                        #[cfg(not(windows))]
+                        eprintln!("NATIVE_STOP_LISTENER_FAILURE outcome=connected probe_elapsed_ms={}", listener_started.elapsed().as_millis());
+                    },
                     Err(error) => eprintln!("NATIVE_STOP_LISTENER_FAILURE outcome=error kind={:?} os_error={:?} probe_elapsed_ms={}",
                         error.kind(), error.raw_os_error(), listener_started.elapsed().as_millis()),
                 }
-                anyhow::bail!("stopped listener did not refuse a fresh connection: {other:?}");
+                anyhow::bail!("stopped listener is open or its state is unproved: {other:?}");
             }
         }
         checkpoint("listener_verified");
@@ -2385,10 +2406,8 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
     // Exceed both the 10s systemd/launchd delay and 60s Task Scheduler retry interval.
     let quiet = std::time::Instant::now() + Duration::from_secs(65);
     while std::time::Instant::now() < quiet {
-        match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", fixture.port).parse()?, Duration::from_secs(1)) {
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
-            other => anyhow::bail!("registered owner resurrected or listener state unproved: {other:?}"),
-        }
+        anyhow::ensure!(!stop_native_listener_open(fixture.port, Duration::from_secs(1))?,
+            "registered owner resurrected: stopped port has a local listener");
         std::thread::sleep(Duration::from_millis(250));
     }
     assert_eq!(owned.run(&["--json", "runtime", "autostart", "status"])?["runtime"]["running"], false);
@@ -2606,8 +2625,8 @@ impl Client2OwnedStopFixture {
         anyhow::ensure!(!self.start_attempted || self.identity_observation_complete,
             "Client2 actor observation incomplete; preserve root and credential for explicit recovery");
         if let Some(expected) = self.observed_host.as_ref() {
-            match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", fixture.port).parse()?, Duration::from_secs(1)) {
-                Ok(_) => {
+            match stop_native_listener_open(fixture.port, Duration::from_secs(1)) {
+                Ok(true) => {
                     let observed = self.health(false)?;
                     for key in ["pid", "exe", "installation_root", "data_dir"] {
                         anyhow::ensure!(observed[key] == expected[key], "Client2-owned cleanup target changed");
@@ -2615,7 +2634,7 @@ impl Client2OwnedStopFixture {
                     let output = self.command("stop")?.output()?;
                     anyhow::ensure!(output.status.success(), "original Go owned cleanup failed");
                 },
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
+                Ok(false) => {},
                 Err(error) => return Err(error.into()),
             }
         }
@@ -2844,10 +2863,8 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
             assert_eq!(unfinished.iter().filter(|item| item["operation_id"] == request["operation_id"] && item["result"] == "unknown").count(), 1);
         } else { assert_eq!(final_receipt["unfinished"], json!([])); }
         checkpoint("receipt_verified");
-        match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", fixture.port).parse()?, Duration::from_secs(1)) {
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
-            other => anyhow::bail!("Client2-owned stopped listener did not refuse: {other:?}"),
-        }
+        anyhow::ensure!(!stop_native_listener_open(fixture.port, Duration::from_secs(1))?,
+            "Client2-owned stopped port still has a local listener");
         let lock = respire::lock::LibraryLock::acquire(&root, Duration::from_secs(1))?; drop(lock);
         if mode == "explicit-force" { write.assert_uncommitted(fixture)?; }
         else { write.assert_committed(fixture)?; }

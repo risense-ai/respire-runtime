@@ -141,6 +141,48 @@ pub fn port_is_open_on(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
+/// Query the local TCP table without treating a failed query as an absent listener.
+#[cfg(windows)]
+pub fn windows_listener_pid_on(port: u16) -> std::io::Result<Option<u32>> {
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!("netstat TCP listener query failed: {}", out.status)));
+    }
+    windows_listener_pid_from_netstat(&out.stdout, port)
+}
+
+#[cfg(windows)]
+fn windows_listener_pid_from_netstat(stdout: &[u8], port: u16) -> std::io::Result<Option<u32>> {
+    let needle = format!(":{port}");
+    let mut owner = None;
+    for line in stdout.split(|byte| *byte == b'\n') {
+        let line = line.trim_ascii_start();
+        // Localized headings use the OEM code page; TCP data rows use ASCII fields.
+        if line.split(|byte| byte.is_ascii_whitespace()).next() != Some(&b"TCP"[..]) {
+            continue;
+        }
+        let text = std::str::from_utf8(line)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let fields: Vec<_> = text.split_whitespace().collect();
+        if fields.len() != 5 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid TCP table row"));
+        }
+        let pid = fields[4].parse::<u32>()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if fields[3] == "LISTENING" {
+            if pid == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "TCP listener PID is zero"));
+            }
+            if fields[1].ends_with(&needle) && owner.is_none() {
+                owner = Some(pid);
+            }
+        }
+    }
+    Ok(owner)
+}
+
 pub fn pid_listening_on(port: u16) -> Option<u32> {
     #[cfg(windows)]
     {
@@ -1156,6 +1198,37 @@ mod tests {
         let port = listener.local_addr().map_err(|err| err.to_string())?.port();
         if !port_is_open_on(port) {
             return Err(format!("listener on {port} should be open"));
+        }
+        #[cfg(windows)]
+        {
+            let localized = b"\r\n\xbb\xee\xb6\xaf\xc1\xac\xbd\xd3\r\n  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  1234\r\n  TCP  [::1]:43211  [::]:0  TIME_WAIT  0\r\n";
+            if windows_listener_pid_from_netstat(localized, 43210).map_err(|err| err.to_string())? != Some(1234) {
+                return Err("localized headings hid a valid TCP listener".into());
+            }
+            if windows_listener_pid_from_netstat(localized, 43211).map_err(|err| err.to_string())?.is_some() {
+                return Err("TIME_WAIT was treated as a listener".into());
+            }
+            for invalid in [
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  invalid\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  \xff\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  0\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  1234\r\n  TCP  127.0.0.1:43211  0.0.0.0:0  LISTENING  invalid\r\n"[..],
+            ] {
+                match windows_listener_pid_from_netstat(invalid, 43210) {
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {},
+                    other => return Err(format!("invalid TCP row was not rejected: {other:?}")),
+                }
+            }
+            let owner = windows_listener_pid_on(port).map_err(|err| err.to_string())?;
+            if owner != Some(std::process::id()) {
+                return Err(format!("listener on {port} has unexpected owner: {owner:?}"));
+            }
+            drop(listener);
+            let owner = windows_listener_pid_on(port).map_err(|err| err.to_string())?;
+            if owner.is_some() {
+                return Err(format!("closed listener on {port} still has an owner: {owner:?}"));
+            }
         }
         Ok(())
     }
