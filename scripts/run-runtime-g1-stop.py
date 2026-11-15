@@ -15,6 +15,12 @@ from types import SimpleNamespace
 
 CASE = "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay"
 MODES = ("standalone", "registered", "client2-owned")
+ACCEPTED_WRITE_CHECKPOINTS = {
+    f"NATIVE_ACCEPTED_WRITE_CHECKPOINT stage={stage}".encode(): stage
+    for stage in ("fixture_requested", "fixture_ready", "seed_ready", "runtime_ready",
+                  "provider_received", "identity_bound", "stop_accepted", "provider_released",
+                  "business_completed", "runtime_stopped", "write_verified")
+}
 
 
 def load(name, path):
@@ -28,6 +34,13 @@ def passed_case(captured):
     text = captured.decode()
     assert len(re.findall(r"^test " + re.escape(CASE) + r" \.\.\. ok\s*$", text, re.M)) == 1
     assert re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", text), "Missing real stop coverage"
+
+
+def accepted_write_checkpoints(captured):
+    lines = [line.removesuffix(b"\r") for line in captured.split(b"\n")[:-1]]
+    if f"test {CASE} ... FAILED".encode() not in lines:
+        return []
+    return [ACCEPTED_WRITE_CHECKPOINTS[line] for line in lines if line in ACCEPTED_WRITE_CHECKPOINTS]
 
 
 def environment(root, request):
@@ -53,6 +66,7 @@ def environment(root, request):
 
 def failure_record(request, state, error):
     stage = state["stage"]
+    diagnostics = dict(state.get("diagnostics", {}))
     if stage == "preparation" and isinstance(error, subprocess.CalledProcessError):
         command = error.cmd if isinstance(error.cmd, (list, tuple)) else []
         if command[1:4] == ["--json", "runtime", "install"]:
@@ -61,13 +75,27 @@ def failure_record(request, state, error):
             stage = "preparation_model_install"
         elif command and command[0] == request["harness"]:
             stage = "preparation_harness"
+    if (request["target"] == "x86_64-apple-darwin" and isinstance(error, subprocess.CalledProcessError)
+            and error.cmd == [request["harness"], "--list"] and error.returncode == -6):
+        try:
+            private_log = (Path(request["root"]) / "private.log").read_bytes()
+        except OSError:
+            diagnostics["log_markers"] = ["unreadable"]
+        else:
+            markers = {
+                "dyld_library_not_loaded": b"Library not loaded:",
+                "dyld_symbol_not_found": b"Symbol not found:",
+                "libcxx_uncaught_exception": b"libc++abi: terminating due to uncaught exception",
+                "assertion_failed": b"Assertion failed:",
+            }
+            diagnostics["log_markers"] = [name for name, text in markers.items() if text in private_log] or ["unclassified"]
     return {"schema": 1, "passed": False, "stage": stage, "mode": state["mode"],
             "target": request["target"],
             "error_type": "subprocess_exit" if isinstance(error, subprocess.CalledProcessError) else
                           "assertion" if isinstance(error, AssertionError) else
                           "os_error" if isinstance(error, OSError) else "unexpected_error",
             "exit_code": error.returncode if isinstance(error, subprocess.CalledProcessError) else state.get("subprocess_exit_code"),
-            "diagnostics": state.get("diagnostics", {})}
+            "diagnostics": diagnostics}
 
 
 def execute(request):
@@ -139,6 +167,7 @@ def execute_stages(request, state):
                 if process.returncode != 0:
                     state["subprocess_exit_code"] = process.returncode
                     state["diagnostics"] = original.safe_failure_diagnostics(process.stdout, [CASE])
+                    state["diagnostics"]["accepted_write_checkpoints"] = accepted_write_checkpoints(process.stdout)
                     raise subprocess.CalledProcessError(process.returncode, ["native-stop-harness"])
                 state["stage"] = "stop_assertions"
                 passed_case(process.stdout)

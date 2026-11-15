@@ -1701,9 +1701,13 @@ impl StopWriteEvidence {
 
 fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=fixture_requested");
     let mut fixture = Fixture::new()?;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=fixture_ready");
     let write = StopWriteEvidence::seed(&fixture)?;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=seed_ready");
     let health = fixture.start_standalone_for_stop()?;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=runtime_ready");
     assert!(health["managed_id"].is_null());
     let mut provider = write.provider()?;
     let rpc_url = format!("http://127.0.0.1:{}/api/rpc", fixture.port);
@@ -1717,6 +1721,7 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     let business = std::thread::spawn(move || stop_native_post(&url, &original));
     provider.received.recv_timeout(Duration::from_secs(30))
         .context("real Core causal classification did not reach the held provider")?;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=provider_received");
     let held_at = std::time::Instant::now();
     let active = fixture.standalone_stop_health()?;
     assert!(active["control"]["admitted"].as_array().context("admission list missing")?.iter()
@@ -1727,6 +1732,7 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     if let Some(parent) = worker_identity.get("parent") { assert_eq!(*parent, health["pid"]); }
     assert!(active["inference"]["worker_pending_calls"].as_u64().is_some_and(|count| count > 0));
     assert!(active["inference"]["worker_host_callbacks_active"].as_u64().is_some_and(|count| count > 0));
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=identity_bound");
     std::thread::sleep(Duration::from_millis(4200));
     assert!(!business.is_finished());
     let business_before_stop_ms = held_at.elapsed().as_millis();
@@ -1738,6 +1744,7 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     assert_eq!(status, 200);
     assert_eq!(accepted["state"], "accepted");
     assert!(accepted["deadline_ms"].is_null() && accepted["timeout_state"].is_null());
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=stop_accepted");
     let accepted_at = std::time::Instant::now();
     std::thread::sleep(Duration::from_millis(4200));
     let held = fixture.standalone_stop_health()?;
@@ -1754,12 +1761,16 @@ fn stop_native_commits_accepted_encrypted_write_after_drain() -> anyhow::Result<
     assert_eq!(pending["code"], "request_in_progress");
     assert_eq!(provider.calls.load(Ordering::Acquire), 1);
     provider.release.store(true, Ordering::Release);
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=provider_released");
     let (_, result) = business.join().map_err(|_| anyhow::anyhow!("accepted write client panicked"))??;
     write.assert_result(&result, &request);
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=business_completed");
     let receipt = fixture.finish_standalone_stop(&health, &accepted["operation_id"], false)?;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=runtime_stopped");
     assert_eq!(receipt["unfinished"], json!([]));
     assert_ne!(stop_native_worker_identity(worker_pid)?.as_ref(), Some(&worker_identity));
     write.assert_committed(&fixture)?;
+    eprintln!("NATIVE_ACCEPTED_WRITE_CHECKPOINT stage=write_verified");
     provider.finish()?;
     assert_eq!(provider.calls.load(Ordering::Acquire), 1);
     eprintln!("NATIVE_ACCEPTED_WRITE_RAW {}", json!({"schema":1,"evidence_class":"native-raw","gate":"not-evaluated",
@@ -2318,6 +2329,7 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
         owned.run(&["--json", "runtime", "restart"])?;
     checkpoint("recovery_started");
         let recovered = owned.health()?;
+        assert_eq!(recovered["store_ready"], true);
         assert_ne!(recovered["instance_id"], health["instance_id"]);
         let recovered_pid = u32::try_from(recovered["pid"].as_u64().context("recovered registered PID missing")?)?;
         let recovered_os = stop_native_worker_identity(recovered_pid)?.context("recovered registered actor missing")?;
@@ -2326,9 +2338,11 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
         let recovered_grant: Value = serde_json::from_str(recovered_claim["grant_json"].as_str().context("recovered grant missing")?)?;
         let recovered_supervisor = u32::try_from(recovered_grant["supervisor_pid"].as_u64().context("recovered supervisor missing")?)?;
         let recovered_supervisor_os = stop_native_worker_identity(recovered_supervisor)?.context("recovered supervisor not live")?;
-        let recovered_worker = match recovered["inference"].get("worker_pid").context("recovered registered Core observation missing")? {
-            Value::Null => None,
-            value => {
+        let recovered_worker = match recovered["inference"].get("worker_pid") {
+            None if recovered["inference"]["phase"] == "idle"
+                && recovered["inference"]["host_recovery_required"] == false => None,
+            Some(Value::Null) => None,
+            Some(value) => {
                 let pid = u32::try_from(value.as_u64().context("recovered registered Core PID is invalid")?)?;
                 let identity = stop_native_worker_identity(pid)?.context("recovered registered Core not live")?;
                 anyhow::ensure!(Path::new(identity["image"].as_str().context("recovered registered Core image missing")?).canonicalize()?
@@ -2336,6 +2350,7 @@ fn stop_native_registered_held_write() -> anyhow::Result<()> {
                 if let Some(parent) = identity.get("parent") { assert_eq!(*parent, json!(recovered_pid)); }
                 Some((pid, identity))
             }
+            None => anyhow::bail!("recovered registered Core observation missing"),
         };
     checkpoint("recovery_bound");
         replay["id"] = json!("registered-old-scope-after-explicit-recovery");
@@ -2770,15 +2785,18 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
         checkpoint("recovery_started");
         let recovered_host = client2.health(false)?;
         let recovered = client2.health(true)?;
+        assert_eq!(recovered["store_ready"], true);
         assert_ne!(recovered["instance_id"], backend["instance_id"]);
         let (recovered_pid, recovered_os) = client2.observe_actor(&recovered_host, &recovered)?;
         let recovered_host_pid = recovered_pid;
         let recovered_host_os = recovered_os.clone();
         client2.observed_actors.push((recovered_pid, recovered_os.clone()));
         assert_ne!(recovered_host_os, host_os); assert_ne!(recovered_os, backend_os);
-        let recovered_worker = match recovered["inference"].get("worker_pid").context("recovered Core observation missing")? {
-            Value::Null => None,
-            value => {
+        let recovered_worker = match recovered["inference"].get("worker_pid") {
+            None if recovered["inference"]["phase"] == "idle"
+                && recovered["inference"]["host_recovery_required"] == false => None,
+            Some(Value::Null) => None,
+            Some(value) => {
                 let pid = u32::try_from(value.as_u64().context("recovered Core PID is invalid")?)?;
                 let identity = stop_native_worker_identity(pid)?.context("recovered Core worker not live")?;
                 assert_ne!(pid, recovered_pid, "recovered Core worker must be separate from its Runtime owner");
@@ -2788,6 +2806,7 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
                 client2.observed_actors.push((pid, identity.clone()));
                 Some((pid, identity))
             }
+            None => anyhow::bail!("recovered Core observation missing"),
         };
         client2.observed_host = Some(recovered_host.clone());
         client2.identity_observation_complete = true;
