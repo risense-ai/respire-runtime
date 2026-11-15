@@ -209,10 +209,15 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
         if req.as_reader().take(65537).read_to_end(&mut bytes).is_err() || bytes.len() > 65536 {
             return (400, "application/json", br#"{"error":"invalid unlock request"}"#.to_vec());
         }
-        let result = serde_json::from_slice::<respire_protocol::credentials::RuntimeUnlock>(&bytes)
+        let result = respire_protocol::credentials::parse_runtime_unlock(&bytes)
             .map_err(anyhow::Error::from).and_then(crate::rpc_serve::unlock_runtime);
         return match result {
-            Ok(()) => (200, "application/json", br#"{"store_ready":true}"#.to_vec()),
+            Ok(receipt) if receipt.schema_version == 1 =>
+                (200, "application/json", br#"{"store_ready":true}"#.to_vec()),
+            Ok(receipt) => match serde_json::to_vec(&receipt) {
+                Ok(bytes) => (200, "application/json", bytes),
+                Err(_) => (500, "application/json", br#"{"error":"invalid_unlock_receipt"}"#.to_vec()),
+            },
             Err(_) => (409, "application/json", serde_json::to_vec(&json!({"error":"runtime_unlock_failed",
                 "store_ready":crate::rpc_serve::store_ready()})).unwrap_or_default()),
         };

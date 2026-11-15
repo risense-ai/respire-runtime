@@ -129,7 +129,29 @@ fn session_digest(data: &serde_json::Value) -> Result<String> {
 }
 
 /// Accept explicit host input only. Never consult or write a native key store.
-pub fn supply_runtime_session(mut input: respire_protocol::credentials::RuntimeUnlock) -> Result<()> {
+pub fn supply_runtime_session(input: respire_protocol::credentials::RuntimeUnlock) -> Result<()> {
+    supply_runtime_session_inner(input, None)
+}
+
+pub fn supply_runtime_session_v2(input: respire_protocol::credentials::RuntimeUnlockV2) -> Result<()> {
+    use respire_protocol::credentials::{RuntimeUnlock, CREDENTIAL_SCHEMA_V, RUNTIME_UNLOCK_SCHEMA_V2};
+    anyhow::ensure!(input.schema_version == RUNTIME_UNLOCK_SCHEMA_V2, "unsupported runtime unlock schema");
+    let legacy = RuntimeUnlock {
+        schema_version: CREDENTIAL_SCHEMA_V,
+        profile: input.profile,
+        session_sha256: input.session_sha256,
+        instance_id: input.instance_id,
+        generation: input.generation,
+        super_password: input.super_password,
+        login_password: input.login_password,
+        legacy_secret: input.legacy_secret,
+        provider_credentials: Vec::new(),
+    };
+    supply_runtime_session_inner(legacy, Some(input.provider_update))
+}
+
+fn supply_runtime_session_inner(mut input: respire_protocol::credentials::RuntimeUnlock,
+    update: Option<respire_protocol::credentials::ProviderCredentialUpdate>) -> Result<()> {
     use sha2::{Digest, Sha256};
     anyhow::ensure!(input.schema_version == respire_protocol::credentials::CREDENTIAL_SCHEMA_V
         && input.profile.is_absolute()
@@ -152,11 +174,16 @@ pub fn supply_runtime_session(mut input: respire_protocol::credentials::RuntimeU
     let keys = unlock_session_keys(&material, input.login_password.as_deref().unwrap_or(""),
         input.super_password.as_deref(), user)?;
     anyhow::ensure!(std::fs::read(session_file()?)? == bytes, "session changed during unlock");
-    crate::credential_io::supply_credentials(std::mem::take(&mut input.provider_credentials))?;
-    *RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))? = Some(RuntimeSession {
+    let session = RuntimeSession {
         profile: input.profile.canonicalize()?, session: session_digest(&data)?, keys,
         owner: (!user.trim().is_empty()).then(|| user.to_owned()),
-    });
+    };
+    let mut current = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
+    match update {
+        Some(update) => crate::credential_io::apply_provider_update(update)?,
+        None => crate::credential_io::supply_credentials(std::mem::take(&mut input.provider_credentials))?,
+    }
+    *current = Some(session);
     Ok(())
 }
 
@@ -1049,6 +1076,55 @@ mod tests {
             assert!(load_local_session()?.urk == second_urk);
         }
         Ok(())
+    }
+
+    #[test]
+    fn unlock_v2_keeps_session_authentication_independent_of_provider_failure() -> Result<()> {
+        use respire_protocol::credentials::{ProviderCredentialStatus, ProviderCredentialUpdate,
+            ProviderUnavailableCode, RuntimeUnlockV2, RUNTIME_UNLOCK_SCHEMA_V2};
+        use sha2::{Digest, Sha256};
+        let _iso = crate::test_lock::Isolate::new()?;
+        let result = (|| -> Result<()> {
+            let salt = crypto::random_hex(16);
+            let kek = crypto::derive_super_kek("synthetic-super", &salt)?;
+            let expected = [17; 32];
+            let (nonce, wrapped) = crypto::wrap_key(&expected, &kek)?;
+            write_session_json(&serde_json::json!({"user":"provider-fixture", "vault_version":2,
+                "kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}))?;
+            let digest = format!("{:x}", Sha256::digest(std::fs::read(session_file()?)?));
+            let input = |password: &str, digest: &str, provider_update| -> Result<RuntimeUnlockV2> {
+                Ok(RuntimeUnlockV2 { schema_version:RUNTIME_UNLOCK_SCHEMA_V2,
+                    profile:crate::service::data_dir().canonicalize()?, session_sha256:digest.into(),
+                    instance_id:"fixture".into(), generation:1,
+                    super_password:Some(password.into()), login_password:None, legacy_secret:None,
+                    provider_update })
+            };
+            supply_runtime_session_v2(input("synthetic-super", &digest,
+                ProviderCredentialUpdate::Unavailable { code:ProviderUnavailableCode::AccessDenied })?)?;
+            {
+                let supplied = RUNTIME_SESSION.lock().map_err(|_| anyhow!("fixture session lock poisoned"))?;
+                let supplied = supplied.as_ref().context("authenticated session was not installed")?;
+                assert_eq!(supplied.keys.urk, expected);
+                assert_eq!(supplied.owner.as_deref(), Some("provider-fixture"));
+            }
+            assert_eq!(crate::credential_io::provider_status()?,
+                ProviderCredentialStatus::Unavailable { code:ProviderUnavailableCode::AccessDenied });
+            assert!(crate::credential_io::ensure_provider_credentials_available().is_err());
+            assert!(matches!(crate::credential_io::Entry::new("rsrs", "classify:typesafe", "native")
+                .get_password(), Err(respire_protocol::credentials::CredentialError::Unavailable)));
+            for (password, revision) in [("wrong-super", digest.as_str()), ("synthetic-super", "wrong-revision")] {
+                assert!(supply_runtime_session_v2(input(password, revision,
+                    ProviderCredentialUpdate::Replace { credentials:Vec::new() })?).is_err());
+                assert_eq!(crate::credential_io::provider_status()?,
+                    ProviderCredentialStatus::Unavailable { code:ProviderUnavailableCode::AccessDenied });
+            }
+            supply_runtime_session_v2(input("synthetic-super", &digest,
+                ProviderCredentialUpdate::Replace { credentials:Vec::new() })?)?;
+            assert_eq!(crate::credential_io::provider_status()?, ProviderCredentialStatus::Ready);
+            Ok(())
+        })();
+        clear_runtime_session()?;
+        result
     }
 
     #[test]

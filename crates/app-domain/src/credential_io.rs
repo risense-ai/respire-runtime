@@ -14,11 +14,73 @@ struct Channel {
 }
 
 static CHANNEL: OnceLock<Mutex<Channel>> = OnceLock::new();
-static PROVIDED: Mutex<Vec<respire_protocol::credentials::ProvidedCredential>> = Mutex::new(Vec::new());
+struct ProviderState {
+    values: Vec<respire_protocol::credentials::ProvidedCredential>,
+    status: respire_protocol::credentials::ProviderCredentialStatus,
+}
+
+static PROVIDED: Mutex<ProviderState> = Mutex::new(ProviderState {
+    values: Vec::new(),
+    status: respire_protocol::credentials::ProviderCredentialStatus::NotLoaded,
+});
 
 pub fn supply_credentials(values: Vec<respire_protocol::credentials::ProvidedCredential>) -> Result<()> {
-    *PROVIDED.lock().map_err(|_| anyhow::anyhow!("provided credentials lock poisoned"))? = values;
+    let mut provided = PROVIDED.lock().map_err(|_| anyhow::anyhow!("provided credentials lock poisoned"))?;
+    provided.values = values;
+    provided.status = respire_protocol::credentials::ProviderCredentialStatus::Ready;
     Ok(())
+}
+
+impl ProviderState {
+    fn apply(&mut self, update: respire_protocol::credentials::ProviderCredentialUpdate) -> Result<()> {
+        use respire_protocol::credentials::{ProviderCredentialStatus, ProviderCredentialUpdate};
+        match update {
+            ProviderCredentialUpdate::Replace { credentials } => {
+                let mut slots = std::collections::HashSet::new();
+                for entry in &credentials {
+                    anyhow::ensure!(!entry.service.is_empty() && !entry.account.is_empty() && !entry.value.is_empty()
+                        && slots.insert((&entry.service, &entry.account)), "invalid provider credential snapshot");
+                }
+                self.values = credentials;
+                self.status = ProviderCredentialStatus::Ready;
+            }
+            ProviderCredentialUpdate::Unavailable { code } => {
+                self.status = ProviderCredentialStatus::Unavailable { code };
+            }
+        }
+        Ok(())
+    }
+
+    fn read(&self, service: &str, account: &str) -> Result<String, CredentialError> {
+        if self.status != respire_protocol::credentials::ProviderCredentialStatus::Ready {
+            return Err(CredentialError::Unavailable);
+        }
+        self.values.iter().find(|entry| entry.service == service && entry.account == account)
+            .map(|entry| entry.value.clone()).ok_or(CredentialError::NoEntry)
+    }
+
+    fn ensure_available(&self, allow_not_loaded: bool) -> Result<()> {
+        use respire_protocol::credentials::ProviderCredentialStatus;
+        match self.status {
+            ProviderCredentialStatus::Unavailable { code } => anyhow::bail!("provider credentials unavailable: {code:?}"),
+            ProviderCredentialStatus::NotLoaded if !allow_not_loaded =>
+                anyhow::bail!("provider credentials have not been loaded"),
+            _ => Ok(()),
+        }
+    }
+}
+
+pub fn apply_provider_update(update: respire_protocol::credentials::ProviderCredentialUpdate) -> Result<()> {
+    PROVIDED.lock().map_err(|_| anyhow::anyhow!("provided credentials lock poisoned"))?.apply(update)
+}
+
+pub fn provider_status() -> Result<respire_protocol::credentials::ProviderCredentialStatus> {
+    Ok(PROVIDED.lock().map_err(|_| anyhow::anyhow!("provided credentials lock poisoned"))?.status)
+}
+
+pub fn ensure_provider_credentials_available() -> Result<()> {
+    PROVIDED.lock().map_err(|_| anyhow::anyhow!("provided credentials lock poisoned"))?
+        .ensure_available(is_private_control() || cfg!(any(test, feature = "test-support")))
 }
 
 pub fn is_private_control() -> bool {
@@ -100,10 +162,9 @@ impl Entry {
     }
 
     pub fn get_password(&self) -> Result<String, CredentialError> {
+        ensure_provider_credentials_available().map_err(|_| CredentialError::Unavailable)?;
         if !is_private_control() && !cfg!(any(test, feature = "test-support")) {
-            return PROVIDED.lock().map_err(|_| CredentialError::Unavailable)?
-                .iter().find(|entry| entry.service == self.service && entry.account == self.account)
-                .map(|entry| entry.value.clone()).ok_or(CredentialError::NoEntry);
+            return PROVIDED.lock().map_err(|_| CredentialError::Unavailable)?.read(&self.service, &self.account);
         }
         self.exchange(CredentialOperation::Read)?.ok_or(CredentialError::NoEntry)
     }
@@ -140,4 +201,41 @@ fn write_frame(output: &mut impl Write, value: &impl serde::Serialize) -> Result
     output.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
     output.write_all(&bytes)?;
     output.flush().context("private credential delivery failed")
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use respire_protocol::credentials::{ProvidedCredential, ProviderCredentialStatus,
+        ProviderCredentialUpdate, ProviderUnavailableCode};
+
+    fn snapshot(value: &str) -> ProvidedCredential {
+        ProvidedCredential { service: "rsrs".into(), account: "classify:typesafe".into(), value: value.into() }
+    }
+
+    #[test]
+    fn unavailable_retains_but_revokes_old_values_until_complete_replace() -> Result<()> {
+        let mut state = ProviderState { values: Vec::new(), status: ProviderCredentialStatus::NotLoaded };
+        assert!(state.ensure_available(false).is_err());
+        state.apply(ProviderCredentialUpdate::Replace { credentials: vec![snapshot("old-synthetic-key")] })?;
+        assert_eq!(state.read("rsrs", "classify:typesafe")?, "old-synthetic-key");
+        state.apply(ProviderCredentialUpdate::Unavailable { code: ProviderUnavailableCode::AccessDenied })?;
+        assert_eq!(state.values[0].value, "old-synthetic-key");
+        assert!(matches!(state.read("rsrs", "classify:typesafe"), Err(CredentialError::Unavailable)));
+        for allow_not_loaded in [false, true] {
+            let error = state.ensure_available(allow_not_loaded).err().ok_or_else(|| anyhow::anyhow!("unavailable state was accepted"))?;
+            assert!(!error.to_string().contains("old-synthetic-key"));
+        }
+        assert!(state.apply(ProviderCredentialUpdate::Replace { credentials: vec![snapshot("a"), snapshot("b")] }).is_err());
+        assert!(state.apply(ProviderCredentialUpdate::Replace { credentials: vec![snapshot("")] }).is_err());
+        assert_eq!(state.values[0].value, "old-synthetic-key");
+        assert_eq!(state.status, ProviderCredentialStatus::Unavailable { code: ProviderUnavailableCode::AccessDenied });
+        state.apply(ProviderCredentialUpdate::Replace { credentials: vec![snapshot("new-synthetic-key")] })?;
+        state.ensure_available(false)?;
+        assert_eq!(state.read("rsrs", "classify:typesafe")?, "new-synthetic-key");
+        state.apply(ProviderCredentialUpdate::Replace { credentials: Vec::new() })?;
+        assert!(matches!(state.read("rsrs", "classify:typesafe"), Err(CredentialError::NoEntry)));
+        assert_eq!(state.status, ProviderCredentialStatus::Ready);
+        Ok(())
+    }
 }

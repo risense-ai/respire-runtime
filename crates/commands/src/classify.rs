@@ -118,6 +118,7 @@ pub fn execute(
 /// Do not include credentials, endpoint query parameters, prompts or provider
 /// response bodies in errors crossing the SDK boundary.
 pub fn call_api(backend: &Backend, request: &Value) -> Result<Value> {
+    respire_app::credential_io::ensure_provider_credentials_available()?;
     anyhow::ensure!(request["provider"].as_str() == Some(backend.name), "model provider mismatch");
     anyhow::ensure!(!backend.endpoint.trim().is_empty(), "model endpoint is required");
     anyhow::ensure!(!backend.key.trim().is_empty(), "model API key is required");
@@ -156,6 +157,8 @@ mod transport_tests {
 
     #[test]
     fn classification_uses_host_http_without_sending_credentials_to_core() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock()
+            .map_err(|_| anyhow::anyhow!("fixture environment lock poisoned"))?;
         for status in [200, 401] {
             let server = tiny_http::Server::http("127.0.0.1:0")
                 .map_err(|error| anyhow::anyhow!("fixture bind failed: {error}"))?;
@@ -211,6 +214,17 @@ mod transport_tests {
             let error = rejected.err().ok_or_else(|| anyhow::anyhow!("local recall accepted credential fields"))?;
             assert!(error.to_string().contains("unknown field `key`"));
         }
+        use respire_protocol::credentials::{ProviderCredentialUpdate, ProviderUnavailableCode};
+        let backend = Backend { name: "ds", key: "revoked-synthetic-key".into(), model: "fixture".into(),
+            endpoint: "http://127.0.0.1:1/model".into(), base_shown: "fixture".into() };
+        respire_app::credential_io::apply_provider_update(ProviderCredentialUpdate::Unavailable {
+            code: ProviderUnavailableCode::BackendUnavailable,
+        })?;
+        let result = call_api(&backend, &json!({"provider":"ds", "timeout":1,"retries":0,"body":{}}));
+        respire_app::credential_io::supply_credentials(Vec::new())?;
+        let error = result.err().ok_or_else(|| anyhow::anyhow!("revoked provider was accepted"))?;
+        assert!(error.to_string().contains("provider credentials unavailable: BackendUnavailable"));
+        assert!(!error.to_string().contains(&backend.key));
         Ok(())
     }
 }

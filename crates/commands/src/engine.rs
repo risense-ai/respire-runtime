@@ -1806,6 +1806,7 @@ pub fn build_classify_backend(
     ds: Option<&str>,
     backend: Option<&str>,
 ) -> Result<classify::Backend> {
+    respire_app::credential_io::ensure_provider_credentials_available()?;
     use classify::Backend;
     // -- backend pick --
     // --backend (jev|ds) and --ds collapse: jev plus --ds is a conflict;
@@ -1929,6 +1930,7 @@ pub fn classify_source_revision(memories: &[respire_app::StoredMemory]) -> serde
 
 /// JEV API key: TYPESAFE_API_KEY env first, then api_key in <data-dir>/classify.json.
 pub fn classify_api_key() -> Result<String> {
+    respire_app::credential_io::ensure_provider_credentials_available()?;
     if let Ok(k) = respire_app::env::var("TYPESAFE_API_KEY") {
         let k = k.trim().to_owned();
         if !k.is_empty() {

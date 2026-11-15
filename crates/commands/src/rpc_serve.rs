@@ -228,15 +228,26 @@ pub(crate) fn store_ready() -> bool {
 
 /// The HTTP transport authenticates this separate endpoint before parsing secrets.
 /// Unlock input never enters operation journals, progress, argv or result caches.
-pub(crate) fn unlock_runtime(input: respire_protocol::credentials::RuntimeUnlock) -> Result<()> {
-    {
+pub(crate) fn unlock_runtime(input: respire_protocol::credentials::RuntimeUnlockRequest)
+    -> Result<respire_protocol::credentials::RuntimeUnlockReceipt> {
+    use respire_protocol::credentials::{RuntimeUnlockReceipt, RuntimeUnlockRequest};
+    let schema_version = input.schema_version();
+    let provider_status = {
         let _scope = SCOPE_EXECUTION.write().map_err(|_| anyhow::anyhow!("identity fence poisoned"))?;
+        let (instance_id, generation) = match &input {
+            RuntimeUnlockRequest::V1(input) => (&input.instance_id, input.generation),
+            RuntimeUnlockRequest::V2(input) => (&input.instance_id, input.generation),
+        };
         anyhow::ensure!(!STOPPING.load(Ordering::Acquire)
-            && input.instance_id == process_identity().instance_id
-            && input.generation == crate::rpc_worker::wire_generation(), "unlock runtime scope mismatch");
+            && instance_id == &process_identity().instance_id
+            && generation == crate::rpc_worker::wire_generation(), "unlock runtime scope mismatch");
         anyhow::ensure!(!respire_app::service::off_mode(), "runtime service is disabled");
-        respire_app::auth::supply_runtime_session(input)?;
-    }
+        match input {
+            RuntimeUnlockRequest::V1(input) => respire_app::auth::supply_runtime_session(input)?,
+            RuntimeUnlockRequest::V2(input) => respire_app::auth::supply_runtime_session_v2(input)?,
+        }
+        respire_app::credential_io::provider_status()?
+    };
     let until = Instant::now() + Duration::from_secs(10);
     while !store_ready() {
         anyhow::ensure!(!STOPPING.load(Ordering::Acquire) && Instant::now() < until,
@@ -244,7 +255,7 @@ pub(crate) fn unlock_runtime(input: respire_protocol::credentials::RuntimeUnlock
         respire_app::auth::load_local_session()?;
         std::thread::sleep(Duration::from_millis(10));
     }
-    Ok(())
+    Ok(RuntimeUnlockReceipt { schema_version, store_ready: true, provider_status })
 }
 static SNAPSHOT_BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
 pub static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
@@ -2268,6 +2279,11 @@ pub fn health_body() -> Value {
             "error": {"code": "roots_resolution_failed"},
         }),
     };
+    let provider_status = match respire_app::credential_io::provider_status() {
+        Ok(status) => status,
+        Err(_) => return json!({"server":"respire", "v":PROTOCOL_V, "state":"error",
+            "error":{"code":"provider_state_unavailable"}}),
+    };
     let inference = inference_health_status();
     let (queue_cancelled, timings) = crate::admission::timings();
     let (queued, executing) = crate::admission::occupancy();
@@ -2299,6 +2315,8 @@ pub fn health_body() -> Value {
         "generation": crate::rpc_worker::wire_generation(),
         "protocol_range": {"minimum": PROTOCOL_V, "maximum": PROTOCOL_V},
         "capabilities": ["business_executor", "mcp_server"],
+        "runtime_unlock_schemas": [1, respire_protocol::credentials::RUNTIME_UNLOCK_SCHEMA_V2],
+        "provider_status": provider_status,
         "credential_state": if STORE_READY.load(Ordering::Acquire) { "available" } else { "required" },
         "snapshot_restore_id": SNAPSHOT_BOOT_ID.lock().ok().and_then(|slot|slot.clone()),
         "recall_statistics": recall_stats_status(),
