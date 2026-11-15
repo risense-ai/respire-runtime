@@ -111,7 +111,11 @@ embedded build identity is `0.2.56-dev.259`; this is unpublished candidate
 evidence, not a released-client claim. The producer authenticates the source,
 workflow, run, artifact ID, ZIP digest, archive digest and executable digest.
 All seven lifecycle cases and process identity, RPC boundary and cleanup
-assertions remain required. Current Windows/credential checks and published
+assertions remain required. Each ready-library case first runs public CLI
+keygen in the existing hosted private Secret Service fixture, stops the setup
+owner, then tests automatic host key delivery without inherited key variables.
+The fixture verifies credential ownership and removal. Credential-free restart
+locking remains a separate required native check. Current Windows checks and published
 upgrade acceptance remain separate. Interactive Keychain authorization is not
 established by this evidence.
 

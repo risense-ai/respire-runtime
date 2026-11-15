@@ -117,6 +117,7 @@ export function verifyResults(business, launcher, bound) {
   assert.equal(launcher.inputs.runtime_archive_sha256, business.runtime_archive_sha256);
   assert.equal(launcher.inputs.runtime_version, bound.metadata.runtime_version);
   assert.equal(launcher.inputs.ordinary_cli_cold_start, true);
+  assert.equal(launcher.inputs.host_credentials, true);
   assert.equal(launcher.desktop_headless.enabled, true);
   assert.equal(launcher.desktop_headless.release, 'host-owned-candidate');
   assert.equal(launcher.desktop_headless.artifact_id, 14114928434);
@@ -126,7 +127,7 @@ export function verifyResults(business, launcher, bound) {
   assert.equal(new Set(names).size, names.length);
   assert.deepEqual([...names].sort(), ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started',
     'reuse-cli-business-started', 'desktop-owned', 'cli-host-sigterm', 'cli-host-sigkill'].sort());
-  assert.ok(launcher.cases.every(item => item.passed === true && item.cleanup_exit === 0));
+  assert.ok(launcher.cases.every(item => item.passed === true && item.cleanup_exit === 0 && item.synthetic_host_credential === true));
 }
 
 function run() {
@@ -148,13 +149,24 @@ function run() {
   assert.equal(result.status, 0, 'Real isolated business execution failed');
   const launcherPath = join(directory, 'client2-launcher.json');
   const go = execFileSync('which', ['go'], {encoding: 'utf8'}).trim();
-  const launcher = spawnSync('python3', [join(bound.cliSource, 'scripts/test-client2-launcher-compat.py'),
+  const launcherKeyring = join(root, 'launcher-keyring');
+  const launcher = spawnSync('env', ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
+    '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
+    '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK', 'dbus-run-session', '--',
+    'env', 'RSRS_SS_FIXTURE_BUS=private', 'python3', '-B',
+    join(bound.cliSource, 'scripts/dev-secret-service-keyring-selftest.py'), '--root', launcherKeyring,
+    '--', 'python3', join(bound.cliSource, 'scripts/test-client2-launcher-compat.py'),
     '--cli', bound.cli, '--runtime-archive', archive, '--runtime-version', bound.metadata.runtime_version,
     '--client2-source', bound.client2Source, '--client2-baseline', 'host-owned-candidate',
     '--go', go, '--desktop-executable', bound.desktop,
-    '--ordinary-cli-cold-start', '--report', launcherPath], {stdio: 'inherit'});
+    '--host-credentials', '--ordinary-cli-cold-start', '--report', launcherPath], {stdio: 'inherit'});
   assert.ifError(launcher.error);
-  assert.equal(launcher.status, 0, 'Paired Client2 execution failed');
+  assert.equal(launcher.status, 0, 'Paired Client2 execution or private credential cleanup failed');
+  const launcherKeyringBytes = read(join(launcherKeyring, 'business-keyring-selftest.json'));
+  const credentialCheck = JSON.parse(launcherKeyringBytes);
+  for (const key of ['passed', 'business_passed', 'business_credential_cleanup_passed']) assert.equal(credentialCheck[key], true);
+  assert.equal(credentialCheck.keyring_cleanup.passed, true);
+  writeFileSync(join(directory, 'launcher-keyring.json'), launcherKeyringBytes, {flag: 'wx'});
   const businessBytes = read(join(root, 'result.json'));
   const launcherBytes = read(launcherPath);
   verifyResults(JSON.parse(businessBytes), JSON.parse(launcherBytes), bound);
