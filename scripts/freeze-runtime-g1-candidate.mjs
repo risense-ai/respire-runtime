@@ -64,7 +64,8 @@ export function validatePart(part, expected, target) {
   for (const key of ['source_sha', 'cli_source_sha', 'run_id', 'run_attempt']) assert.equal(part[key], expected[key]);
   assert.ok(typeof part.runtime_version === 'string' && part.runtime_version);
   assert.ok(typeof part.cli_version === 'string' && part.cli_version);
-  for (const owner of ['runtime', 'cli']) {
+  assert.equal(part.native_sdk.cli, null, 'The frozen CLI is a frontend, not an SDK consumer');
+  for (const owner of ['runtime']) {
     const observed = part.native_sdk[owner];
     assert.deepEqual(Object.keys(observed).sort(), ['archive_sha256', 'manifest_sha256', 'version']);
     assert.ok(typeof observed.version === 'string' && observed.version);
@@ -102,7 +103,14 @@ export function observeConsumerSdk(root, target) {
   assert.equal(digest(bytes(root, `.sdk/${target}/manifest.json`)), observed.manifest_sha256);
   return observed;
 }
-function packagePart() {
+export function frontendMetadata(binary, target, version, context) {
+  assert.ok(binary.length > 0, 'Frozen frontend binary must not be empty');
+  return {schema_version: 2, artifact_layout: 'cli-frontend-v2', version, git_sha: context.cli_source_sha,
+    target, binary_file: `rsrs-${target}${target.includes('windows') ? '.exe' : ''}`,
+    binary_size: binary.length, binary_sha256: digest(binary),
+    producer: {run_id: context.run_id, run_attempt: context.run_attempt}};
+}
+async function packagePart() {
   const context = checkedContext(), target = process.env.RUNTIME_TARGET;
   assert.ok(FREEZE_TARGETS.includes(target));
   assert.equal(process.platform, target.includes('windows') ? 'win32' : target.includes('apple') ? 'darwin' : 'linux');
@@ -110,10 +118,9 @@ function packagePart() {
   const cli = resolve('.cli-source');
   assert.equal(execFileSync('git', ['-C', cli, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), context.cli_source_sha);
   assert.equal(execFileSync('git', ['-C', cli, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
-  const native_sdk = {};
-  for (const [owner, root] of [['runtime', resolve('.')], ['cli', cli]]) {
-    native_sdk[owner] = observeConsumerSdk(root, target);
-  }
+  const native_sdk = {runtime: observeConsumerSdk(resolve('.'), target), cli: null};
+  const dependencies = execFileSync('cargo', ['tree', '--locked', '-p', 'respire', '--edges', 'normal', '--prefix', 'none'], {cwd: cli, encoding: 'utf8'});
+  assert.doesNotMatch(dependencies, /^respire_core_sdk\s/m, 'Frontend CLI must not consume the native SDK');
   const runtimeMetadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
   const cliMetadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {cwd: cli, encoding: 'utf8'}));
   const runtimePackage = runtimeMetadata.packages.filter(value => value.name === 'respire_runtime');
@@ -126,15 +133,23 @@ function packagePart() {
   const work = join(process.env.RUNNER_TEMP, `freeze-payload-${target}`); mkdirSync(work);
   const runtimePayload = join(work, 'runtime'), cliPayload = join(work, 'cli');
   staged(resolve('.sdk', target), 'scripts/stage-core-runtime.mjs', runtimePayload, target);
-  staged(join(cli, '.sdk', target), join(cli, 'scripts/stage-core-runtime.mjs'), cliPayload, target);
+  mkdirSync(cliPayload);
   const suffix = target.includes('windows') ? '.exe' : '';
   const runtimeName = `rsrs-runtime-${target}${suffix}`, cliName = `rsrs-${target}${suffix}`;
   const build = target.includes('musl') ? `target/ci/${target}/debug` : `target/${target}/debug`;
   copyFileSync(ordinary('.', `${build}/rsrs-runtime${suffix}`), join(runtimePayload, runtimeName));
   copyFileSync(ordinary(cli, `${build}/rsrs${suffix}`), join(cliAssets, cliName));
+  copyFileSync(join(cliAssets, cliName), join(cliPayload, cliName));
   copyFileSync(join(runtimePayload, runtimeName), join(release, runtimeName));
   const inventory = files(runtimePayload).map(path => ({path, size: bytes(runtimePayload, path).length, sha256: digest(bytes(runtimePayload, path))}));
   const runtimeArchive = `rsrs-runtime-${target}.tar.gz`, cliArchive = `rsrs-${target}-runtime.tar.gz`;
+  const cliBuild = frontendMetadata(bytes(cliAssets, cliName), target, cliVersion, context);
+  const {validateBuildMetadata} = await import(pathToFileURL(join(cli, 'npm/scripts/verify-binary.mjs')).href);
+  validateBuildMetadata(cliBuild, json(cli, 'npm/artifact-manifest.json'), target,
+    {sha: context.cli_source_sha, version: cliVersion, run_id: context.run_id, run_attempt: context.run_attempt},
+    {file: cliName, size: cliBuild.binary_size, sha256: cliBuild.binary_sha256});
+  save(join(cliAssets, `cli-build-${target}.json`), cliBuild);
+  copyFileSync(join(cliAssets, `cli-build-${target}.json`), join(cliPayload, `cli-build-${target}.json`));
   archive(runtimePayload, join(release, runtimeArchive)); archive(cliPayload, join(cliAssets, cliArchive));
   const cliHash = digest(bytes(cliAssets, cliName));
   // Candidate identity is created BEFORE freezing or hashing this original sidecar.
@@ -145,9 +160,6 @@ function packagePart() {
     compat: {min_cli: cliVersion, max_cli: '*'}, protocol_range: {minimum: 1, maximum: 1},
     capabilities: {business_executor: '1', mcp_server: '1', offline_keygen_handoff: '1'}, files: inventory,
     candidate: {kind: 'unpublished-source-fixture', cli_source_sha: context.cli_source_sha, cli_binary_sha256: cliHash}});
-  save(join(cliAssets, `cli-build-${target}.json`), {version: cliVersion, git_sha: context.cli_source_sha,
-    target, binary_file: cliName, binary_sha256: cliHash, runtime_file: cliArchive,
-    runtime_sha256: digest(bytes(cliAssets, cliArchive))});
   if (target === FREEZE_TARGETS[0]) {
     for (const path of files(cliPayload)) copy(cliPayload, path, cliAssets);
     const desktop = resolve(process.env.RUNNER_TEMP, 'legacy-desktop');
@@ -183,8 +195,8 @@ export function assembleCandidate(parts, expected, artifacts) {
   for (const part of parts) {
     validatePart(part, expected, part.target);
     assert.equal(part.runtime_version, components.runtime.version); assert.equal(part.cli_version, components.cli.version);
+    assert.equal(part.native_sdk.runtime.version, parts[0].native_sdk.runtime.version);
     for (const owner of ['runtime', 'cli']) {
-      assert.equal(part.native_sdk[owner].version, parts[0].native_sdk[owner].version);
       components[owner].artifacts[part.target] = {...artifacts[part.target][owner], native_sdk: part.native_sdk[owner]};
     }
     if (part.target === FREEZE_TARGETS[0]) components.client2.artifacts[part.target] = {
@@ -232,7 +244,7 @@ function assemble() {
     const runtimeArtifact = pair('release-assets', `rsrs-runtime-${target}${suffix}`, `rsrs-runtime-${target}.tar.gz`);
     const cliArtifact = pair('cli-assets', `rsrs-${target}${suffix}`, `rsrs-${target}-runtime.tar.gz`);
     assert.equal(runtime.binary_sha256, runtimeArtifact.binary_sha256); assert.equal(runtime.archive_sha256, runtimeArtifact.archive_sha256);
-    assert.equal(cli.binary_sha256, cliArtifact.binary_sha256); assert.equal(cli.runtime_sha256, cliArtifact.archive_sha256);
+    assert.deepEqual(cli, frontendMetadata(bytes(root, `cli-assets/rsrs-${target}${suffix}`), target, part.cli_version, expected));
     observedArtifacts[target] = {runtime: runtimeArtifact, cli: cliArtifact};
     if (target === FREEZE_TARGETS[0]) observedArtifacts[target].client2 = {
       ...pair('client2-assets', 'respire', 'respire-linux-amd64.tar.gz'), metadata: json(root, 'client2-assets/desktop-source.json')};
@@ -246,5 +258,5 @@ function assemble() {
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   assert.ok(['package', 'assemble'].includes(process.argv[2]));
-  if (process.argv[2] === 'package') packagePart(); else assemble();
+  if (process.argv[2] === 'package') await packagePart(); else assemble();
 }

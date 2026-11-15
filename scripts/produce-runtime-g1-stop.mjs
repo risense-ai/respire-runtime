@@ -37,17 +37,26 @@ function inputs() {
     assert.equal(execFileSync('git', ['-C', directory, 'diff', 'HEAD', '--name-only'], {encoding: 'utf8'}).trim(), '');
   }
   const artifact = bound.candidate.components.cli.artifacts[bound.target];
-  const actualCliSdk = observeConsumerSdk(resolve('.cli-source'), bound.target);
+  assert.ok(Object.hasOwn(artifact, 'native_sdk'), 'CLI SDK identity must be explicit');
+  const actualCliSdk = artifact.native_sdk === null ? null : observeConsumerSdk(resolve('.cli-source'), bound.target);
   assert.deepEqual(actualCliSdk, artifact.native_sdk);
   const suffix = bound.target.includes('windows') ? '.exe' : '';
   const metadataPath = resolve('g1-input/cli-assets', `cli-build-${bound.target}.json`);
   const metadata = json(metadataPath);
   for (const [key, value] of Object.entries({git_sha: source, target: bound.target,
     version: bound.candidate.components.cli.version, binary_file: `rsrs-${bound.target}${suffix}`,
-    runtime_file: `rsrs-${bound.target}-runtime.tar.gz`, binary_sha256: artifact.binary_sha256,
-    runtime_sha256: artifact.archive_sha256})) assert.equal(metadata[key], value);
+    binary_sha256: artifact.binary_sha256})) assert.equal(metadata[key], value);
+  if (actualCliSdk === null) {
+    assert.equal(metadata.schema_version, 2);
+    assert.equal(metadata.artifact_layout, 'cli-frontend-v2');
+    assert.ok(!Object.hasOwn(metadata, 'runtime_file') && !Object.hasOwn(metadata, 'runtime_sha256'));
+  } else {
+    assert.equal(metadata.runtime_file, `rsrs-${bound.target}-runtime.tar.gz`);
+    assert.equal(metadata.runtime_sha256, artifact.archive_sha256);
+  }
   const cli = resolve('g1-input/cli-assets', metadata.binary_file);
-  const archive = resolve('g1-input/cli-assets', metadata.runtime_file);
+  const archive = resolve('g1-input/cli-assets', `rsrs-${bound.target}-runtime.tar.gz`);
+  if (actualCliSdk === null) assert.equal(metadata.binary_size, read(cli).length);
   assert.equal(hash(read(cli)), artifact.binary_sha256);
   assert.equal(hash(read(archive)), artifact.archive_sha256);
   const runtime = resolve('release-assets', `rsrs-runtime-${bound.target}${suffix}`);
@@ -61,7 +70,8 @@ function inputs() {
   return {bound, identity: {target: bound.target, source_sha: process.env.GITHUB_SHA, cli_source_sha: source, client2_source_sha: client2,
     run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
     candidate_sha256: hash(bound.bytes), harness_target: harnessTarget, harness_native_sdk: harnessSdk,
-    actual_cli_native_sdk: actualCliSdk, cli_sdk_lock_sha256: hash(read('.cli-source/sdk/core-sdk.lock.json')),
+    actual_cli_native_sdk: actualCliSdk,
+    cli_sdk_lock_sha256: actualCliSdk === null ? null : hash(read('.cli-source/sdk/core-sdk.lock.json')),
     cli, cli_metadata: metadataPath,
     cli_metadata_sha256: hash(read(metadataPath)), sdk_lock_sha256: hash(read('sdk/core-sdk.lock.json')),
     cli_binary_sha256: artifact.binary_sha256, cli_archive: archive, cli_archive_sha256: artifact.archive_sha256,

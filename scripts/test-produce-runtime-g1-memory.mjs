@@ -23,4 +23,17 @@ for (const change of [
   {identity: {...identity, actual_cli_native_sdk: {...identity.actual_cli_native_sdk, version: 'other'}}},
   {identity: {...identity, cli_sdk_lock_sha256: '0'.repeat(64)}},
 ]) assert.throws(() => verifyResults({...result, ...change}, identity));
-console.log('memory producer rejects incomplete cases, wrong targets, changed inputs and unverified models');
+const frontendIdentity = {...identity, actual_cli_native_sdk: null, cli_sdk_lock_sha256: null};
+const frontend = {...result, identity: frontendIdentity};
+verifyResults(frontend, frontendIdentity);
+for (const mutate of [
+  value => {delete value.identity.actual_cli_native_sdk;},
+  value => {delete value.identity.cli_sdk_lock_sha256;},
+  value => {value.identity.actual_cli_native_sdk = identity.actual_cli_native_sdk;},
+  value => {value.identity.cli_sdk_lock_sha256 = identity.cli_sdk_lock_sha256;},
+]) {
+  const bad = structuredClone(frontend);
+  mutate(bad);
+  assert.throws(() => verifyResults(bad, frontendIdentity));
+}
+console.log('memory producer rejects incomplete cases, changed inputs and missing or substituted frontend null identity');

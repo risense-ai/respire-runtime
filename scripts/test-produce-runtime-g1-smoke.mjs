@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 
 // Synthetic evidence validates only assembly rejection paths, never a G1 run.
 const script = fileURLToPath(new URL('./produce-runtime-g1-smoke.mjs', import.meta.url));
@@ -20,7 +20,8 @@ const suites = {
 };
 const targets = ['x86_64-unknown-linux-gnu', ...TARGETS.filter(target => target !== 'x86_64-unknown-linux-gnu')];
 const sdk = {version: 'synthetic-only', archive_sha256: 'a'.repeat(64), manifest_sha256: 'b'.repeat(64)};
-const cliSdk = {version: 'synthetic-cli-only', archive_sha256: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64)};
+const legacyCliSdk = {version: 'synthetic-cli-only', archive_sha256: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64)};
+for (const cliSdk of [legacyCliSdk, null]) {
 const candidateBytes = Buffer.from(JSON.stringify({schema: 2, frozen: true, gate: 'G1',
   components: {runtime: {source_sha: sha, artifacts: Object.fromEntries(targets.map(target => [target, {native_sdk: sdk}]))},
     cli: {artifacts: Object.fromEntries(targets.map(target => [target, {native_sdk: cliSdk}]))}}}));
@@ -108,3 +109,36 @@ for (const [name, mutate, passed, kind = 'native'] of mutations) {
   }
 }
 console.log(`${mutations.length} synthetic producer assembly checks passed; no product or native acceptance executed`);
+}
+
+// These schema checks stop at absent Runtime metadata, before any product execution.
+for (const [name, change, reachesRuntime] of [
+  ['legacy CLI SDK', () => {}, true],
+  ['frontend CLI null', value => {value.components.cli.artifacts[targets[0]].native_sdk = null;}, true],
+  ['missing CLI SDK', value => {delete value.components.cli.artifacts[targets[0]].native_sdk;}, false],
+  ['invalid legacy CLI SDK', value => {value.components.cli.artifacts[targets[0]].native_sdk.archive_sha256 = 'bad';}, false],
+  ['Runtime null', value => {value.components.runtime.artifacts[targets[0]].native_sdk = null;}, false],
+]) {
+  const value = {schema: 2, frozen: true, gate: 'G1', components: Object.fromEntries(
+    ['runtime', 'cli', 'client2'].map(owner => [owner, {source_sha: sha, version: 'synthetic', artifacts: {
+      [targets[0]]: {binary_sha256: 'e'.repeat(64), archive_sha256: 'f'.repeat(64),
+        native_sdk: owner === 'client2' ? null : structuredClone(owner === 'runtime' ? sdk : legacyCliSdk)},
+    }}]))};
+  change(value);
+  const bytes = Buffer.from(JSON.stringify(value));
+  const root = mkdtempSync(join(parent, 'schema-'));
+  mkdirSync(join(root, 'g1-input'));
+  writeFileSync(join(root, 'g1-input/candidate.json'), bytes);
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const {context} = await import(${JSON.stringify(pathToFileURL(script).href)}); context();`], {
+    cwd: root, encoding: 'utf8', env: {...process.env, GIT_DIR: gitDir,
+      GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', G1_NATIVE_PLATFORM: process.platform,
+      G1_NATIVE_ARCH: process.arch, RUNNER_ARCH: process.arch === 'arm64' ? 'ARM64' : 'X64',
+      CORE_SDK_READ_TOKEN: '', GH_TOKEN: '', GITHUB_TOKEN: '', GITHUB_SHA: sha,
+      GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '2', GITHUB_REPOSITORY: 'risense-ai/respire-runtime',
+      RUNTIME_TARGET: targets[0], G1_CANDIDATE_SHA256: createHash('sha256').update(bytes).digest('hex')},
+  });
+  assert.equal(result.status, 1, name);
+  assert.equal(result.stderr.includes('ENOENT') && result.stderr.includes(`runtime-build-${targets[0]}.json`), reachesRuntime, name);
+}
+console.log('5 candidate schema refusal checks passed; no Runtime SDK or product execution bypassed');

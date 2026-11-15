@@ -42,34 +42,43 @@ function inputs() {
   assert.equal(cliMeta.git_sha, bound.candidate.components.cli.source_sha);
   assert.equal(cliMeta.version, bound.candidate.components.cli.version);
   assert.equal(cliMeta.target, target);
-  // The CLI release sidecar names a standalone binary plus its native runtime
-  // archive. Neither is the separately packaged standalone Runtime archive.
+  assert.ok(Object.hasOwn(cliArtifact, 'native_sdk'), 'CLI SDK identity must be explicit');
   assert.equal(cliMeta.binary_file, `rsrs-${target}`);
-  assert.equal(cliMeta.runtime_file, `rsrs-${target}-runtime.tar.gz`);
+  if (cliArtifact.native_sdk === null) {
+    assert.equal(cliMeta.schema_version, 2);
+    assert.equal(cliMeta.artifact_layout, 'cli-frontend-v2');
+    assert.ok(!Object.hasOwn(cliMeta, 'runtime_file') && !Object.hasOwn(cliMeta, 'runtime_sha256'));
+  } else {
+    assert.equal(cliMeta.runtime_file, `rsrs-${target}-runtime.tar.gz`);
+    assert.equal(cliMeta.runtime_sha256, cliArtifact.archive_sha256);
+  }
   const cli = resolve('g1-input', 'cli-assets', cliMeta.binary_file);
+  if (cliArtifact.native_sdk === null) assert.equal(cliMeta.binary_size, read(cli).length);
   assert.equal(hash(read(cli)), cliArtifact.binary_sha256);
   assert.equal(cliMeta.binary_sha256, cliArtifact.binary_sha256);
-  assert.equal(hash(read(join('g1-input', 'cli-assets', cliMeta.runtime_file))), cliArtifact.archive_sha256);
-  assert.equal(cliMeta.runtime_sha256, cliArtifact.archive_sha256);
-  const cliLock = json(join(cliSource, 'sdk/core-sdk.lock.json'));
-  const actualCliSdk = observeSdkArchive(read(join(cliSource, '.sdk-archives', target, 'sdk.tar.gz')), target, cliLock.targets[target]);
-  auditSdkDirectory(join(cliSource, '.sdk', target), target, cliLock.targets[target]);
-  assert.deepEqual(actualCliSdk, cliArtifact.native_sdk);
-  const cliPayload = json(join('g1-input', 'cli-assets', 'core-runtime.json'));
-  assert.equal(cliPayload.schema_version, 1);
-  assert.equal(cliPayload.target, target);
-  const manifest = json(join(cliSource, '.sdk', target, 'manifest.json'));
-  for (const file of manifest.files) {
-    const path = file.path.startsWith('runtime/') ? file.path.slice(8)
-      : file.path.startsWith('notices/') ? `core-notices/${file.path.slice(8)}`
-        : file.path === 'LICENSE.txt' ? 'core-notices/CORE-SDK-LICENSE.txt' : null;
-    if (path === null) continue;
-    const records = cliPayload.files.filter(item => item.path === path);
-    assert.equal(records.length, 1);
-    const actual = read(join('g1-input', 'cli-assets', path));
-    assert.equal(hash(actual), file.sha256);
-    assert.equal(records[0].sha256, file.sha256);
-    assert.equal(actual.length, read(join(cliSource, '.sdk', target, file.path)).length);
+  assert.equal(hash(read(join('g1-input', 'cli-assets', `rsrs-${target}-runtime.tar.gz`))), cliArtifact.archive_sha256);
+  let actualCliSdk = null;
+  if (cliArtifact.native_sdk !== null) {
+    const cliLock = json(join(cliSource, 'sdk/core-sdk.lock.json'));
+    actualCliSdk = observeSdkArchive(read(join(cliSource, '.sdk-archives', target, 'sdk.tar.gz')), target, cliLock.targets[target]);
+    auditSdkDirectory(join(cliSource, '.sdk', target), target, cliLock.targets[target]);
+    assert.deepEqual(actualCliSdk, cliArtifact.native_sdk);
+    const cliPayload = json(join('g1-input', 'cli-assets', 'core-runtime.json'));
+    assert.equal(cliPayload.schema_version, 1);
+    assert.equal(cliPayload.target, target);
+    const manifest = json(join(cliSource, '.sdk', target, 'manifest.json'));
+    for (const file of manifest.files) {
+      const path = file.path.startsWith('runtime/') ? file.path.slice(8)
+        : file.path.startsWith('notices/') ? `core-notices/${file.path.slice(8)}`
+          : file.path === 'LICENSE.txt' ? 'core-notices/CORE-SDK-LICENSE.txt' : null;
+      if (path === null) continue;
+      const records = cliPayload.files.filter(item => item.path === path);
+      assert.equal(records.length, 1);
+      const actual = read(join('g1-input', 'cli-assets', path));
+      assert.equal(hash(actual), file.sha256);
+      assert.equal(records[0].sha256, file.sha256);
+      assert.equal(actual.length, read(join(cliSource, '.sdk', target, file.path)).length);
+    }
   }
   const desktop = resolve('g1-input', 'client2-assets', 'respire');
   const originalArchive = resolve('g1-input', 'client2-assets', 'respire-linux-amd64.tar.gz');

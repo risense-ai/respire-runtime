@@ -61,17 +61,32 @@ def verify_members(archive, root, expected):
 
 def main():
     cli = Path("g1-input/cli-assets")
-    metadata = json.loads(ordinary(cli, "cli-build-x86_64-unknown-linux-gnu.json").read_bytes())
-    core_path = ordinary(cli, "core-runtime.json")
-    core = json.loads(core_path.read_bytes())
-    inventory = {"core-runtime.json": {"size": core_path.stat().st_size,
-                                     "sha256": hashlib.sha256(core_path.read_bytes()).hexdigest()}}
-    for item in core["files"]:
-        assert item["path"] not in inventory
-        staged = ordinary(cli, item["path"])
-        # CLI core-runtime entries contain path/hash only; observe actual size.
-        inventory[item["path"]] = {"size": staged.stat().st_size, "sha256": item["sha256"]}
-    verify_members(ordinary(cli, metadata["runtime_file"]), cli, inventory)
+    metadata_path = ordinary(cli, "cli-build-x86_64-unknown-linux-gnu.json")
+    metadata = json.loads(metadata_path.read_bytes())
+    if metadata.get("artifact_layout") == "cli-frontend-v2":
+        assert metadata["schema_version"] == 2
+        assert metadata["target"] == "x86_64-unknown-linux-gnu"
+        assert metadata["binary_file"] == "rsrs-x86_64-unknown-linux-gnu"
+        assert "runtime_file" not in metadata and "runtime_sha256" not in metadata
+        binary = ordinary(cli, metadata["binary_file"])
+        assert binary.stat().st_size == metadata["binary_size"]
+        assert hashlib.sha256(binary.read_bytes()).hexdigest() == metadata["binary_sha256"]
+        inventory = {path.name: {"size": path.stat().st_size,
+                                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                     for path in (binary, metadata_path)}
+        archive = "rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz"
+    else:
+        core_path = ordinary(cli, "core-runtime.json")
+        core = json.loads(core_path.read_bytes())
+        inventory = {"core-runtime.json": {"size": core_path.stat().st_size,
+                                         "sha256": hashlib.sha256(core_path.read_bytes()).hexdigest()}}
+        for item in core["files"]:
+            assert item["path"] not in inventory
+            staged = ordinary(cli, item["path"])
+            # CLI core-runtime entries contain path/hash only; observe actual size.
+            inventory[item["path"]] = {"size": staged.stat().st_size, "sha256": item["sha256"]}
+        archive = metadata["runtime_file"]
+    verify_members(ordinary(cli, archive), cli, inventory)
     desktop = Path("g1-input/client2-assets")
     binary = ordinary(desktop, "respire")
     assert binary.stat().st_size == 19183600

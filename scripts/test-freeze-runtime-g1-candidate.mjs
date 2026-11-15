@@ -4,7 +4,7 @@ import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:
 import {dirname, join} from 'node:path';
 import {gzipSync} from 'node:zlib';
 import test from 'node:test';
-import {FREEZE_TARGETS, validatePart, assembleCandidate, observeConsumerSdk} from './freeze-runtime-g1-candidate.mjs';
+import {FREEZE_TARGETS, validatePart, assembleCandidate, observeConsumerSdk, frontendMetadata} from './freeze-runtime-g1-candidate.mjs';
 
 const expected = {source_sha: 'a'.repeat(40), cli_source_sha: 'b'.repeat(40), run_id: '1234', run_attempt: '2'};
 const hash = 'c'.repeat(64), alternate = 'd'.repeat(64);
@@ -12,7 +12,7 @@ const sdk = {version: '1.1.0-dev.1', archive_sha256: hash, manifest_sha256: alte
 const cliSdk = {version: '2.0.0-dev.4', archive_sha256: alternate, manifest_sha256: hash};
 const part = target => ({schema: 1, kind: 'unpublished-source-fixture-input', g1_passed: false,
   ...expected, target, runtime_version: '1.1.0-dev.2', cli_version: '1.1.0-dev.2',
-  native_sdk: {runtime: structuredClone(sdk), cli: structuredClone(cliSdk)},
+  native_sdk: {runtime: structuredClone(sdk), cli: null},
   files: [{path: `release-assets/rsrs-runtime-${target}`, size: 31, sha256: hash}]});
 const parts = () => FREEZE_TARGETS.map(part);
 const observed = () => Object.fromEntries(FREEZE_TARGETS.map(target => [target, {
@@ -39,9 +39,24 @@ test('freeze keeps original source/bytes distinct from G1 acceptance', () => {
   assert.deepEqual(Object.keys(candidate.components.runtime.artifacts).sort(), [...FREEZE_TARGETS].sort());
   assert.equal(candidate.components.client2.artifacts[FREEZE_TARGETS[0]].native_sdk, null);
   assert.deepEqual(candidate.components.runtime.artifacts[FREEZE_TARGETS[0]].native_sdk, sdk);
-  assert.deepEqual(candidate.components.cli.artifacts[FREEZE_TARGETS[0]].native_sdk, cliSdk);
+  assert.equal(candidate.components.cli.artifacts[FREEZE_TARGETS[0]].native_sdk, null);
   assert.equal(Object.hasOwn(candidate, 'g1_passed'), false);
   assert.equal(Object.hasOwn(candidate, 'sdk'), false);
+  for (const target of FREEZE_TARGETS) {
+    const binary = Buffer.from(`synthetic frontend ${target}`);
+    const metadata = frontendMetadata(binary, target, '2.0.0-dev.1', expected);
+    assert.deepEqual(Object.keys(metadata).sort(), ['schema_version', 'artifact_layout', 'version', 'git_sha',
+      'target', 'binary_file', 'binary_size', 'binary_sha256', 'producer'].sort());
+    assert.equal(metadata.schema_version, 2);
+    assert.equal(metadata.artifact_layout, 'cli-frontend-v2');
+    assert.equal(metadata.git_sha, expected.cli_source_sha);
+    assert.equal(metadata.target, target);
+    assert.equal(metadata.binary_file, `rsrs-${target}${target.includes('windows') ? '.exe' : ''}`);
+    assert.equal(metadata.binary_size, binary.length);
+    assert.equal(metadata.binary_sha256, createHash('sha256').update(binary).digest('hex'));
+    assert.deepEqual(metadata.producer, {run_id: expected.run_id, run_attempt: expected.run_attempt});
+  }
+  assert.throws(() => frontendMetadata(Buffer.alloc(0), FREEZE_TARGETS[0], '2.0.0-dev.1', expected), /must not be empty/);
 });
 for (const [name, mutate] of [
   ['other source', value => {value.source_sha = 'd'.repeat(40);}],
@@ -51,7 +66,7 @@ for (const [name, mutate] of [
   ['claimed acceptance', value => {value.g1_passed = true;}],
   ['other kind', value => {value.kind = 'release';}],
   ['missing SDK archive', value => {delete value.native_sdk.runtime.archive_sha256;}],
-  ['invalid CLI SDK digest', value => {value.native_sdk.cli.archive_sha256 = 'invalid';}],
+  ['frontend cannot claim SDK', value => {value.native_sdk.cli = structuredClone(sdk);}],
   ['duplicate inventory', value => {value.files.push({...value.files[0]});}],
   ['traversal', value => {value.files[0].path = 'release-assets/../secret';}],
   ['absolute path', value => {value.files[0].path = '/release-assets/file';}],
@@ -87,7 +102,7 @@ test('reject missing/duplicated targets and mixed consumer versions', () => {
   assert.throws(() => assembleCandidate(changed, expected, observed()));
   changed[1].runtime_version = changed[0].runtime_version; changed[1].cli_version = 'other';
   assert.throws(() => assembleCandidate(changed, expected, observed()));
-  for (const owner of ['runtime', 'cli']) {
+  for (const owner of ['runtime']) {
     const mixedSdk = parts();
     mixedSdk[1].native_sdk[owner].version = '1.1.0-dev.2';
     assert.throws(() => assembleCandidate(mixedSdk, expected, observed()));
@@ -161,13 +176,17 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   const workflow = readFileSync(new URL('../.github/workflows/freeze-g1-candidate.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   // The parent script directory is scripts/, so resolve through the repository root.
   assert.ok(workflow.includes('contents: read\n  actions: read'));
+  const identity = workflow.split('      - name: Upload the exact candidate identity for frontend checks\n')[1].split('\n      - name:')[0];
+  assert.match(identity, /path: g1-input\/candidate\.json\n/);
+  assert.match(identity, /if-no-files-found: error/);
+  assert.doesNotMatch(identity, /path: .*\.sdk|path: g1-input\/\n/);
   assert.doesNotMatch(workflow, /secrets\.|contents: write|actions: write/);
   const saves = workflow.split('      - uses: actions/cache/save@v4\n').slice(1);
-  assert.equal(saves.length, 2);
+  assert.equal(saves.length, 1);
   for (const body of saves) {
     const step = body.split('\n      - ')[0].split('\n  freeze:')[0];
     assert.match(step, /if: success\(\) && !endsWith\(matrix.target, '-musl'\)/);
-    assert.match(step, /path: (?:\.cli-source\/)?\.rust-native-cache\n/);
+    assert.match(step, /path: \.rust-native-cache\n/);
     assert.doesNotMatch(step, /path: .*\.sdk/);
   }
   const rustCache = readFileSync(new URL('./rust-ci-cache.mjs', import.meta.url), 'utf8');
@@ -176,14 +195,13 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   assert.ok(rustCache.includes("manifest.files.filter(file => file.path.startsWith('runtime/'))"));
   assert.ok(rustCache.includes('rmSync(path.join(output, where, name), {force: true})'));
   assert.ok(workflow.indexOf('path: freeze-part/') < workflow.indexOf('pack native'));
-  assert.ok(workflow.includes('node ../scripts/rust-ci-cache.mjs key native'));
-  assert.ok(workflow.includes('node ../scripts/rust-ci-cache.mjs pack native'));
+  assert.doesNotMatch(workflow, /rust-cli|\.cli-source\/\.rust-native-cache|node \.\.\/scripts\/rust-ci-cache/);
   assert.ok(workflow.includes('fail-on-cache-miss: true'));
   assert.ok(workflow.includes('archive-key "$RUNTIME_TARGET"'));
   assert.ok(workflow.includes('node scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET"'));
   assert.ok(workflow.includes('export RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET"'));
-  assert.ok(workflow.includes('RSRS_CORE_SDK_DIR="$PWD/.cli-source/.sdk/$RUNTIME_TARGET" cargo build'));
-  assert.ok(workflow.includes('(cd .cli-source && RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET" bash scripts/build-linux-musl.sh'));
+  assert.ok(workflow.includes('env -u RSRS_CORE_SDK_DIR cargo build'));
+  assert.ok(workflow.includes('(cd .cli-source && env -u RSRS_CORE_SDK_DIR bash scripts/build-linux-musl.sh'));
   assert.ok(workflow.includes('hashlib.sha256(raw).hexdigest() == expected_digest'));
   assert.ok(workflow.includes("with output.open('xb')"));
   assert.doesNotMatch(workflow, /actions\/download-artifact/);
@@ -197,16 +215,7 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   const stop = ci.slice(ci.indexOf('  g1-native-stop:'), ci.indexOf('  g1-report:'));
   for (const body of [workflow, business, stop]) {
     assert.ok(body.includes('cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json'));
-    assert.ok(body.includes('cmp .cli-source/sdk/core-sdk.lock.json .cli-source/crates/core-sdk/core-sdk.lock.json'));
-    assert.ok(body.includes('$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs key "$RUNTIME_TARGET")'));
-    assert.ok(body.includes('$(cd .cli-source && node ../scripts/sdk-ci-cache.mjs archive-key "$RUNTIME_TARGET")'));
-    assert.ok(body.includes('(cd .cli-source && node ../scripts/sdk-ci-cache.mjs observe "$RUNTIME_TARGET")'));
-    assert.ok(body.includes('steps.cli-payload.outputs.cache-matched-key'));
-    assert.ok(body.includes('steps.cli-archive.outputs.cache-matched-key'));
-    assert.ok(body.includes('mv ".sdk/$RUNTIME_TARGET" ".cli-source/.sdk/$RUNTIME_TARGET"'));
-    assert.ok(body.includes('mv ".sdk-archives/$RUNTIME_TARGET" ".cli-source/.sdk-archives/$RUNTIME_TARGET"'));
-    assert.ok(body.indexOf('id: cli-payload') < body.indexOf('mv ".sdk/$RUNTIME_TARGET"'));
-    assert.ok(body.indexOf('mv ".sdk/$RUNTIME_TARGET"') < body.indexOf('id: payload'));
+    assert.doesNotMatch(body, /cli-payload|cli-archive|\.cli-source\/\.sdk|cmp \.cli-source\/sdk/);
     assert.doesNotMatch(body, /cmp sdk\/core-sdk.lock.json \.cli-source|copytree|cp -a \.sdk/);
   }
   for (const body of [business, stop]) {
@@ -224,7 +233,7 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   }
   assert.deepEqual(JSON.parse(ci.match(/G1_TARGETS: '([^']+)'/)[1]), FREEZE_TARGETS);
   assert.ok(workflow.includes('bash scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate'));
-  assert.ok(workflow.includes('(cd .cli-source && RSRS_CORE_SDK_DIR="$PWD/.sdk/$RUNTIME_TARGET" bash scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate)'));
+  assert.ok(workflow.includes('(cd .cli-source && env -u RSRS_CORE_SDK_DIR bash scripts/build-linux-musl.sh "$RUNTIME_TARGET" candidate)'));
   const host = readFileSync(new URL('./build-linux-musl.sh', import.meta.url), 'utf8');
   const container = readFileSync(new URL('./build-linux-musl-container.sh', import.meta.url), 'utf8');
   assert.ok(host.includes('action="${2:-build}"'));
@@ -242,6 +251,10 @@ test('workflow retains explicit read-only SDK cache and source boundaries', () =
   assert.ok(container.includes('cargo build --release --locked -p respire_runtime --bin rsrs-runtime --target "$TARGET" --target-dir target/ci'));
   assert.ok(container.includes('node scripts/stage-core-runtime.mjs "target/ci/$TARGET/release"'));
   const producer = readFileSync(new URL('./freeze-runtime-g1-candidate.mjs', import.meta.url), 'utf8');
+  assert.ok(producer.includes("join(cli, 'npm/scripts/verify-binary.mjs')"));
+  assert.ok(producer.includes('copyFileSync(join(cliAssets, `cli-build-${target}.json`), join(cliPayload, `cli-build-${target}.json`))'));
+  assert.ok(producer.includes('copyFileSync(join(cliAssets, cliName), join(cliPayload, cliName))'));
+  assert.ok(producer.indexOf('save(join(cliAssets, `cli-build-${target}.json`), cliBuild)') < producer.indexOf('archive(cliPayload,'));
   assert.ok(producer.includes('const build = target.includes(\'musl\') ? `target/ci/${target}/debug` : `target/${target}/debug`;'));
   const release = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
   for (const capability of ['business_executor', 'mcp_server', 'offline_keygen_handoff']) {

@@ -103,6 +103,45 @@ def verify_cli_sdk(sdk, expected_sdk, core, inventory, cli_files):
             assert cli_files[staged]["size"] == (sdk / safe_name(name)).stat().st_size
 
 
+def verify_cli_payload(request, cli_dir, cli_files, metadata):
+    target = request["target"]
+    suffix = ".exe" if "windows" in target else ""
+    binary_name = f"rsrs-{target}{suffix}"
+    assert metadata["target"] == target and metadata["git_sha"] == request["cli_source_sha"]
+    assert metadata["binary_file"] == binary_name
+    assert metadata["binary_sha256"] == request["cli_binary_sha256"]
+    expected_sdk = request["actual_cli_native_sdk"]
+    if expected_sdk is None:
+        assert request["cli_sdk_lock_sha256"] is None
+        assert metadata["schema_version"] == 2 and metadata["artifact_layout"] == "cli-frontend-v2"
+        assert "runtime_file" not in metadata and "runtime_sha256" not in metadata
+        sidecar_name = f"cli-build-{target}.json"
+        assert set(cli_files) == {binary_name, sidecar_name}
+        binary = cli_dir / binary_name
+        sidecar = cli_dir / sidecar_name
+        assert binary.stat().st_size == metadata["binary_size"]
+        assert digest(binary) == request["cli_binary_sha256"] == digest(Path(request["cli"]))
+        assert binary.read_bytes() == Path(request["cli"]).read_bytes()
+        assert sidecar.read_bytes() == Path(request["cli_metadata"]).read_bytes()
+        assert digest(sidecar) == request["cli_metadata_sha256"]
+        for name in (binary_name, sidecar_name):
+            path = cli_dir / name
+            assert cli_files[name] == {"size": path.stat().st_size, "sha256": digest(path)}
+    else:
+        assert metadata["runtime_file"] == f"rsrs-{target}-runtime.tar.gz"
+        assert metadata["runtime_sha256"] == request["cli_archive_sha256"]
+        core = json.loads((cli_dir / "core-runtime.json").read_bytes())
+        assert core["schema_version"] == 1 and core["target"] == target
+        inventory = {safe_name(item["path"]): item["sha256"] for item in core["files"]}
+        assert len(inventory) == len(core["files"])
+        assert set(cli_files) == set(inventory) | {"core-runtime.json"}
+        for name, sha in inventory.items():
+            assert cli_files[name]["sha256"] == sha
+        assert digest(Path(".cli-source/sdk/core-sdk.lock.json")) == request["cli_sdk_lock_sha256"]
+        assert digest(Path(".cli-source/.sdk-archives") / target / "sdk.tar.gz") == expected_sdk["archive_sha256"]
+        verify_cli_sdk(Path(".cli-source/.sdk") / target, expected_sdk, core, inventory, cli_files)
+
+
 def execute(request):
     root = Path(request["root"])
     assert root.is_absolute() and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve()
@@ -117,24 +156,15 @@ def execute(request):
     assert digest(Path(request["runtime_metadata"])) == request["runtime_metadata_sha256"]
     cli_dir = root / "cli"
     cli_files = unpack(Path(request["cli_archive"]), cli_dir, request["cli_archive_sha256"])
-    core = json.loads((cli_dir / "core-runtime.json").read_bytes())
-    assert core["schema_version"] == 1 and core["target"] == target
-    inventory = {safe_name(item["path"]): item["sha256"] for item in core["files"]}
-    assert len(inventory) == len(core["files"])
-    assert set(cli_files) == set(inventory) | {"core-runtime.json"}
-    for name, sha in inventory.items():
-        assert cli_files[name]["sha256"] == sha
-    assert digest(Path(".cli-source/sdk/core-sdk.lock.json")) == request["cli_sdk_lock_sha256"]
-    expected_sdk = request["actual_cli_native_sdk"]
-    assert digest(Path(".cli-source/.sdk-archives") / target / "sdk.tar.gz") == expected_sdk["archive_sha256"]
-    verify_cli_sdk(Path(".cli-source/.sdk") / target, expected_sdk, core, inventory, cli_files)
+    verify_cli_payload(request, cli_dir, cli_files, cli_meta)
     runtime_files = unpack(Path(request["runtime_archive"]), root / "runtime-payload", request["runtime_archive_sha256"])
     expected = {safe_name(item["path"]): {"size": item["size"], "sha256": item["sha256"]} for item in runtime_meta["files"]}
     assert len(expected) == len(runtime_meta["files"]) and runtime_files == expected
     runtime_name = f"rsrs-runtime-{target}{suffix}"
     assert digest(root / "runtime-payload" / runtime_name) == request["runtime_binary_sha256"]
     cli = cli_dir / f"rsrs-{target}{suffix}"
-    shutil.copyfile(request["cli"], cli)
+    if request["actual_cli_native_sdk"] is not None:
+        shutil.copyfile(request["cli"], cli)
     cli.chmod(0o700)
     assert digest(cli) == request["cli_binary_sha256"] == cli_meta["binary_sha256"]
     env = {key: value for key, value in os.environ.items() if key.upper() in (

@@ -65,7 +65,8 @@ export function context() {
     assert.ok(component.artifacts && Object.keys(component.artifacts).length > 0);
     for (const artifact of Object.values(component.artifacts)) {
       for (const key of ['archive_sha256', 'binary_sha256']) assert.match(artifact[key] ?? '', /^[a-f0-9]{64}$/);
-      if (owner === 'client2') assert.equal(artifact.native_sdk, null);
+      assert.ok(Object.hasOwn(artifact, 'native_sdk'), 'Candidate SDK identity must be explicit');
+      if (owner === 'client2' || (owner === 'cli' && artifact.native_sdk === null)) assert.equal(artifact.native_sdk, null);
       else {
         assert.deepEqual(Object.keys(artifact.native_sdk).sort(), ['archive_sha256', 'manifest_sha256', 'version']);
         for (const key of ['archive_sha256', 'manifest_sha256']) assert.match(artifact.native_sdk[key] ?? '', /^[a-f0-9]{64}$/);

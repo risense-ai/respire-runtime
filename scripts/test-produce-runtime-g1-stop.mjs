@@ -75,4 +75,19 @@ for (const mutate of [
   mutate(bad);
   assert.throws(() => verifyResults(bad, identity));
 }
-console.log('six-suite producer verifies real prepared memory and stop cases; rejects incomplete coverage, identity/model changes, private fields and cleanup failures');
+const frontendIdentity = {...identity, actual_cli_native_sdk: null, cli_sdk_lock_sha256: null};
+const frontend = structuredClone(result);
+frontend.identity = frontendIdentity;
+frontend.prepared_memory.identity = frontendIdentity;
+verifyResults(frontend, frontendIdentity);
+for (const mutate of [
+  value => {delete value.identity.actual_cli_native_sdk;},
+  value => {delete value.identity.cli_sdk_lock_sha256;},
+  value => {value.identity.actual_cli_native_sdk = identity.actual_cli_native_sdk;},
+  value => {value.identity.cli_sdk_lock_sha256 = identity.cli_sdk_lock_sha256;},
+]) {
+  const bad = structuredClone(frontend);
+  mutate(bad);
+  assert.throws(() => verifyResults(bad, frontendIdentity));
+}
+console.log('six-suite producer retains native evidence checks and rejects missing or substituted frontend null identity');
