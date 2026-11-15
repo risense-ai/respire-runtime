@@ -249,6 +249,7 @@ jobs:
                   report['stage'] = 'credential_setup'
                   manager = native.backend.create(root / 'credentials')
                   env = manager.configure_env(env)
+                  env['RSRS_TEST_NATIVE_KEYCHAIN'] = str(manager.keychain)
                   before = {}
                   native.roundtrips(manager, before)
                   assert len(before) == 8

@@ -70,6 +70,27 @@ impl Fixture {
             anyhow::ensure!(models.join(file).is_file(), "model fixture missing {file}");
         }
         let home = tempfile::tempdir()?;
+        #[cfg(target_os = "macos")]
+        if let Some(keychain) = std::env::var_os("RSRS_TEST_NATIVE_KEYCHAIN") {
+            let keychain = PathBuf::from(keychain);
+            anyhow::ensure!(keychain.is_absolute() && keychain.is_file(),
+                "synthetic native keychain is missing");
+            // Security preferences belong to HOME; keep this fixture's data isolated.
+            std::fs::create_dir_all(home.path().join("Library/Preferences"))?;
+            for operation in ["list-keychains", "default-keychain"] {
+                let configured = Command::new("/usr/bin/security")
+                    .args([operation, "-d", "user", "-s"]).arg(&keychain)
+                    .env("HOME", home.path()).env("USERPROFILE", home.path()).output()?;
+                anyhow::ensure!(configured.status.success(),
+                    "synthetic fixture keychain configuration failed");
+                let selected = Command::new("/usr/bin/security")
+                    .args([operation, "-d", "user"])
+                    .env("HOME", home.path()).env("USERPROFILE", home.path()).output()?;
+                anyhow::ensure!(selected.status.success()
+                    && String::from_utf8(selected.stdout)?.trim() == format!("\"{}\"", keychain.display()),
+                    "synthetic fixture keychain readback failed");
+            }
+        }
         std::fs::create_dir(home.path().join("data"))?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
             .local_addr()?

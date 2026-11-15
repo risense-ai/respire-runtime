@@ -305,6 +305,8 @@ def execute_stages(request, state):
                     native = load("g1_stop_native_" + mode, Path(".cli-source/scripts/dev-migration-keyring-selftest.py"))
                     manager = native.backend.create(mode_root / "credentials")
                     mode_env = manager.configure_env(mode_env)
+                    if sys.platform == "darwin":
+                        mode_env["RSRS_TEST_NATIVE_KEYCHAIN"] = str(manager.keychain)
                     before = {}
                     native.roundtrips(manager, before)
                     assert len(before) == 8
