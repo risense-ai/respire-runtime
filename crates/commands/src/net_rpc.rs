@@ -62,18 +62,6 @@ pub struct Health {
     pub credential_state: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct StopAccepted {
-    #[serde(default)]
-    pub request_id: String,
-    #[serde(default)]
-    pub operation_id: String,
-    #[serde(default)]
-    pub deadline_ms: Option<u64>,
-    #[serde(default)]
-    pub timeout_state: Option<String>,
-}
-
 impl Health {
     pub fn inference_stalled(&self) -> bool {
         self.inference["host_recovery_required"] == true
@@ -94,24 +82,6 @@ pub fn rpc_port() -> u16 {
 
 pub fn rpc_base_url() -> String {
     format!("http://{DEFAULT_RPC_HOST}:{}", rpc_port())
-}
-
-pub fn no_autostart() -> bool {
-    crate::runtime_policy::client_only()
-}
-
-/// Stable path of the installed CLI binary. Runtime process identity checks
-/// compare a suspect process image against this location (previously provided
-/// by the CLI's mcp module; the transport owns the same rule in one place).
-pub fn stable_bin_path() -> PathBuf {
-    let name = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
-    if let Ok(raw) = respire_app::env::var("RSRS_BIN_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed).join(name);
-        }
-    }
-    respire_app::service::main_data_dir().join("bin").join(name)
 }
 
 pub fn token_path() -> PathBuf {
@@ -162,10 +132,6 @@ fn check_connection() -> Result<()> {
         }
         Err(error) => Err(RuntimeError::Transport(error.to_string()).into()),
     }
-}
-
-pub fn port_is_open() -> bool {
-    port_is_open_on(rpc_port())
 }
 
 pub fn port_is_open_on(port: u16) -> bool {
@@ -373,131 +339,6 @@ pub fn health() -> Result<Health> {
     serde_json::from_value(parsed).context("runtime health shape mismatch")
 }
 
-pub fn request_stop() -> Result<StopAccepted> {
-    request_stop_with_timeout(HTTP_TIMEOUT)
-}
-
-pub fn request_stop_with_timeout(timeout: Duration) -> Result<StopAccepted> {
-    request_stop_for(&health()?, timeout)
-}
-
-pub fn request_stop_for(health: &Health, timeout: Duration) -> Result<StopAccepted> {
-    crate::runtime_policy::require_host("runtime shutdown")?;
-    anyhow::ensure!(
-        !health.installation_id.is_empty()
-            && !health.instance_id.is_empty()
-            && !health.account_id.is_empty()
-            && health.generation > 0,
-        "runtime stop identity is incomplete"
-    );
-    let expected = json!({
-        "installation_id": health.installation_id,
-        "instance_id": health.instance_id,
-        "account_id": health.account_id,
-        "generation": health.generation,
-    })
-    .to_string();
-    let url = format!("{}/api/runtime/stop", rpc_base_url());
-    let response = send_loopback(
-        agent()
-            .post(&url)
-            .timeout(timeout)
-            .set("X-Respire-Lifecycle", "coordinator-v1"),
-        |request| request.send_string(&expected),
-    )?;
-    let value: Value = response
-        .into_json()
-        .context("runtime stop reply is not JSON")?;
-    anyhow::ensure!(
-        value["ok"] == true && value["state"] == "accepted",
-        "runtime did not accept a stop operation"
-    );
-    let accepted: StopAccepted = serde_json::from_value(value)?;
-    anyhow::ensure!(
-        !accepted.request_id.is_empty() && !accepted.operation_id.is_empty(),
-        "runtime stop acknowledgement lacks request or operation ID"
-    );
-    Ok(accepted)
-}
-
-pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result<Value> {
-    anyhow::ensure!(
-        !health.instance_id.is_empty()
-            && health.instance_id.len() <= 128
-            && health
-                .instance_id
-                .bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_'),
-        "invalid runtime stop instance ID"
-    );
-    let root = respire_app::service::main_data_dir();
-    anyhow::ensure!(
-        !health.installation_root.is_empty()
-            && fs::canonicalize(&health.installation_root)? == fs::canonicalize(&root)?,
-        "stopped runtime belongs to another installation"
-    );
-    let path = root
-        .join("runtime")
-        .join(format!("stop-{}.json", health.instance_id));
-    let file = fs::File::open(&path).context("final runtime stop receipt is missing")?;
-    let metadata = file.metadata()?;
-    anyhow::ensure!(
-        metadata.is_file() && metadata.len() <= 1024 * 1024,
-        "invalid stop receipt file"
-    );
-    let mut data = Vec::new();
-    use std::io::Read;
-    file.take(1024 * 1024 + 1).read_to_end(&mut data)?;
-    anyhow::ensure!(data.len() <= 1024 * 1024, "stop receipt exceeds 1 MiB");
-    let receipt: Value = serde_json::from_slice(&data).context("invalid final stop receipt")?;
-    validate_final_stop_receipt(health, operation_id, &receipt)?;
-    Ok(receipt)
-}
-
-pub fn validate_final_stop_receipt(
-    health: &Health,
-    operation_id: Option<&str>,
-    receipt: &Value,
-) -> Result<()> {
-    let expected = serde_json::to_value(health)?;
-    for key in [
-        "installation_id",
-        "instance_id",
-        "process_start_id",
-        "image_path",
-        "image_sha256",
-        "runtime_version",
-        "account_id",
-    ] {
-        anyhow::ensure!(
-            expected[key]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-                && receipt[key] == expected[key],
-            "stop receipt identity mismatch: {key}"
-        );
-    }
-    anyhow::ensure!(
-        health.pid > 0
-            && health.generation > 0
-            && receipt["schema_version"] == 1
-            && receipt["protocol_version"] == health.v
-            && receipt["pid"] == health.pid
-            && receipt["generation"] == health.generation
-            && receipt["operation_id"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
-            && operation_id.is_none_or(|id| receipt["operation_id"] == id),
-        "stop receipt does not match the stopped instance and operation"
-    );
-    anyhow::ensure!(
-        receipt["state"] == "drained"
-            && receipt["unfinished"].as_array().is_some_and(Vec::is_empty),
-        "runtime stopped without a proven complete drain"
-    );
-    Ok(())
-}
-
 pub fn instance_is_running(health: &Health) -> Result<bool> {
     anyhow::ensure!(
         health.pid > 0 && !health.process_start_id.is_empty(),
@@ -553,18 +394,6 @@ pub fn instance_is_running(health: &Health) -> Result<bool> {
         return Ok(!state.starts_with('Z')
             && health.process_start_id == format!("darwin-lstart-{}", birth.trim()));
     }
-}
-
-pub fn wait_for_instance_exit(health: &Health, timeout: Duration) -> Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
-    while instance_is_running(health)? {
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "runtime drain is pending; no process was forced to exit"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Ok(())
 }
 
 pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
@@ -679,16 +508,6 @@ pub(crate) fn rpc_method_with_timeout(
         }
     })?;
     Ok(parsed)
-}
-
-pub fn wait_until_down() -> Result<()> {
-    for _ in 0..STOP_POLLS {
-        if !port_is_open() {
-            return Ok(());
-        }
-        std::thread::sleep(STOP_WAIT);
-    }
-    bail!("runtime did not exit after stop")
 }
 
 /// A closed listener does not prove that the library holder has exited.
@@ -923,71 +742,6 @@ fn darwin_runtime_identity(process: &str, image: &str) -> Result<RuntimeProcessI
         || (args.contains(&"web") && args.contains(&"--internal"))
         || foreground_runtime_arguments(&args), "process is not a runtime; restart refused");
     Ok(RuntimeProcessIdentity { started_at: started_at.to_owned(), executable: executable.to_owned() })
-}
-
-pub fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
-    crate::runtime_policy::require_host("runtime recovery")?;
-    anyhow::ensure!(
-        pid != std::process::id() && pid_is_respire(pid),
-        "refusing to terminate an unverified runtime process {pid}"
-    );
-    anyhow::ensure!(
-        &runtime_process_identity(pid)? == identity,
-        "runtime process {pid} changed during shutdown; termination refused"
-    );
-    #[cfg(windows)]
-    {
-        let expected = respire_spawn::ProcessIdentity {
-            birth: identity
-                .started_at
-                .parse()
-                .context("invalid verified process creation time")?,
-            executable: std::path::PathBuf::from(&identity.executable),
-        };
-        respire_spawn::terminate_runtime(pid, &expected)?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let expected = respire_spawn::ProcessIdentity {
-            birth: identity
-                .started_at
-                .parse()
-                .context("invalid verified process creation time")?,
-            executable: std::path::PathBuf::from(&identity.executable),
-        };
-        respire_spawn::terminate_runtime(pid, &expected)?;
-    }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        let status = std::process::Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()?;
-        anyhow::ensure!(
-            status.success(),
-            "failed to terminate runtime process {pid}"
-        );
-    }
-    Ok(())
-}
-
-pub fn kill_pid(pid: u32) {
-    if pid == 0 || pid == std::process::id() {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-    }
 }
 
 /// Used by tests and doctor: ensure the token file exists without starting HTTP.
