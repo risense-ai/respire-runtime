@@ -90,7 +90,9 @@ function staged(sdk, script, output, target) {
   return core;
 }
 function archive(payload, output) {
-  execFileSync('tar', ['--format=ustar', '-czf', output, '-C', payload, '.'], {stdio: 'inherit'});
+  // Git's tar treats Windows drive letters as remote hosts; use the native tool.
+  const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar';
+  execFileSync(tar, ['--format=ustar', '-czf', output, '-C', payload, '.'], {stdio: 'inherit'});
 }
 function packagePart() {
   const context = checkedContext(), target = process.env.RUNTIME_TARGET;
