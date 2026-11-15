@@ -74,9 +74,9 @@ def main():
     verify_members(ordinary(cli, metadata["runtime_file"]), cli, inventory)
     desktop = Path("g1-input/client2-assets")
     binary = ordinary(desktop, "respire")
-    assert binary.stat().st_size == 19002928
+    assert binary.stat().st_size == 19138480
     verify_members(ordinary(desktop, "respire-linux-amd64.tar.gz"), desktop,
-                   {"respire": {"size": 19002928,
+                   {"respire": {"size": 19138480,
                                 "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}})
     print("business_original_archives_match_execution_payloads")
 

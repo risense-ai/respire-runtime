@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix="g1-real-schema-pure-") as temporary:
     with tarfile.open(cli / "native.tar.gz", "w:gz", format=tarfile.GNU_FORMAT) as stream:
         for name in ("core-runtime.json", "library.so"):
             stream.add(cli / name, arcname=name, recursive=False)
-    (desktop / "respire").write_bytes(b"\0" * 19002928)
+    (desktop / "respire").write_bytes(b"\0" * 19138480)
     with tarfile.open(desktop / "respire-linux-amd64.tar.gz", "w:gz", format=tarfile.GNU_FORMAT) as stream:
         stream.add(desktop / "respire", arcname="respire", recursive=False)
     previous = Path.cwd()
