@@ -5,7 +5,43 @@ report. The coordinated drafts are Runtime #84, CLI #290 and Client2 #42 in
 `risense-ai`. They must remain drafts until the other in-flight work is complete,
 the branches are synchronized with main, and implementation review is finished.
 
-## Dependency evidence
+## Current evidence and CI scope (2026-11-15)
+
+The sections below preserve the original draft checklist and historical baseline;
+its pending rows and original SDK/protocol/conflict notes are not a current status
+report. The current SDK lock selects Core SDK `2.0.0-dev.4`, and
+`respire_protocol 2.0.0-dev.8` is published. Product PRs remain unmerged.
+
+Runtime `ebf1c3c554dedc5529c9247e60192f295b12b648`, CLI
+`ab7a25078c0d2dfcde4b30d4f1a27382ae3b778d`, and Client2
+`1734322b6c6dd543441a753f07a3517bee5e1231` passed the paired Linux/macOS
+native lifecycle workflow `43660791467`. Its Linux controlled-service account
+suite and macOS original-path issue #285 upgrade also passed. These are source
+candidate results, not published-product acceptance. Windows UI, frozen G1 and
+published-product acceptance must be evaluated separately.
+
+CLI run `43660517611` passed its core integration but failed the account case in
+`runtime_smoke`: full logout with the published Runtime `2.0.0-dev.17` reopened
+the store without a session. Keep that assertion. This run tests the published
+pin, whereas the paired native suite tests the new Runtime source. A historical
+Runtime result must not substitute for paired-source or release acceptance.
+The CLI pin must not name an unpublished release.
+
+Measured warm-run times show runner allocation around two seconds, Runtime
+builds of 46–54 seconds and CLI builds around 35 seconds. Linux account execution
+took about five minutes, and the macOS upgrade about three minutes. The two
+Windows jobs each repeated 5–6 minutes of shared source tests. Shared source and
+PowerShell policy tests now run once in `windows-source`; both jobs retain their
+separate native product scenarios and both must pass. New PR revisions cancel
+obsolete runs of the two native workflows. No product assertion is removed.
+
+Old business assertions for database integrity, login, synchronization, memory
+operations and migration remain relevant. Startup fixtures must supply synthetic
+credentials through the host. A separate direct-Runtime case must prove locked
+startup without host input. Old Client2 binaries that require removed host RPCs
+are historical fixtures, not supported consumers of the pure Runtime.
+
+## Dependency evidence (historical draft baseline)
 
 The original working baseline pins Core SDK `1.0.2-dev.23`. For
 `x86_64-pc-windows-msvc`, the downloaded private release matches the lock:
