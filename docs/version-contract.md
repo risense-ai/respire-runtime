@@ -98,6 +98,16 @@ When a change touches the RPC contract:
 
 ## Current stage-one DEV scope
 
+Runtime 2.0.0-dev.18 removes the embedded host command entry points. Client2
+0.2.56 selects its installed Runtime image for host operations, so it cannot
+launch this pure Runtime or manage its components. Upgrade that Client2 before
+selecting this Runtime. The frozen original-desktop compatibility baseline is
+Client2 2.0.0-dev.5, whose unchanged host delegates those operations to the CLI.
+G1 retains all seven lifecycle cases, the original released desktop bytes,
+process identity, RPC boundary and cleanup assertions. This baseline change
+does not establish compatibility with Client2 0.2.56 or interactive Keychain
+authorization. The paired current Client2 also requires its own native checks.
+
 Runtime 1.0.21-dev.3 and later provide a standalone doctor that
 executes Runtime-owned store, asset/backend, index and optional bounded remote
 health diagnostics. Asset readiness uses the existing supervised fresh-session

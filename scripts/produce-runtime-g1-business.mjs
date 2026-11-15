@@ -8,7 +8,7 @@ import {context, BUSINESS_CASES as CASES} from './produce-runtime-g1-smoke.mjs';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
-const oldClient2 = '57bc070826949994c3f7ce9a64277160704bdfe5';
+const oldClient2 = 'be682108c555a3e5a788ad74217e088bcb25170b';
 export {CASES};
 const selected = [...new Set(Object.values(CASES).flat())].sort();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -33,7 +33,7 @@ function inputs() {
     assert.equal(execFileSync('git', ['-C', path, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
   }
   assert.equal(bound.candidate.components.client2.source_sha, oldClient2);
-  assert.equal(bound.candidate.components.client2.version, '0.2.56');
+  assert.equal(bound.candidate.components.client2.version, '2.0.0-dev.5');
   const cliMeta = json(join('g1-input', 'cli-assets', `cli-build-${target}.json`));
   const cliArtifact = bound.candidate.components.cli.artifacts[target];
   assert.equal(cliMeta.git_sha, bound.candidate.components.cli.source_sha);
@@ -147,7 +147,7 @@ function run() {
   const go = execFileSync('which', ['go'], {encoding: 'utf8'}).trim();
   const launcher = spawnSync('python3', [join(bound.cliSource, 'scripts/test-client2-launcher-compat.py'),
     '--cli', bound.cli, '--runtime-archive', archive, '--runtime-version', bound.metadata.runtime_version,
-    '--client2-source', bound.client2Source, '--client2-baseline', 'v0.2.56',
+    '--client2-source', bound.client2Source, '--client2-baseline', 'v2.0.0-dev.5',
     '--go', go, '--desktop-executable', bound.desktop,
     '--ordinary-cli-cold-start', '--report', launcherPath], {stdio: 'inherit'});
   assert.ifError(launcher.error);

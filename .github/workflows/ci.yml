@@ -466,7 +466,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-client2
-          ref: 57bc070826949994c3f7ce9a64277160704bdfe5
+          ref: be682108c555a3e5a788ad74217e088bcb25170b
           path: .client2-source
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0

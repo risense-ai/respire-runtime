@@ -18,7 +18,7 @@ const business = {suite: 'g1-business', passed: true, test_executed: true, relea
   runtime_metadata_sha256: bound.metadata_sha256, sdk_lock_sha256: bound.sdk_lock_sha256,
   offline_installer_verified: true, selected_case_count: 2, required_cases: names, passed_cases: names,
   missing_or_failed_cases: [], owned_process_cleanup: {passed: true, forced: 0, forced_processes: []}, keyring: {passed: true, business_passed: true}};
-const launcher = {client2_source: '57bc070826949994c3f7ce9a64277160704bdfe5', g1_passed: false,
+const launcher = {client2_source: 'be682108c555a3e5a788ad74217e088bcb25170b', g1_passed: false,
   inputs: {cli_sha256: cliBinary, runtime_archive_sha256: archive, runtime_version: 'synthetic', ordinary_cli_cold_start: true},
   desktop_headless: {enabled: true, binary_sha256: desktop},
   cases: ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started', 'reuse-cli-business-started',
