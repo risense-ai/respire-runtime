@@ -7,10 +7,16 @@ process.env.GITHUB_RUN_ATTEMPT = '2';
 const target = 'x86_64-unknown-linux-gnu';
 const sha = 'a'.repeat(40), cliSha = 'b'.repeat(40), binary = 'c'.repeat(64), cliBinary = 'd'.repeat(64);
 const archive = 'e'.repeat(64), desktop = 'f'.repeat(64);
+const client2Sha = '9'.repeat(40);
+const proof = {source_commit: client2Sha, version: 'synthetic-client2', release: 'host-owned-candidate',
+  repository: 'risense-ai/respire-client2', workflow: '.github/workflows/desktop.yml',
+  run_id: 71, run_attempt: 1, artifact_id: 81, artifact_sha256: '8'.repeat(64),
+  archive_sha256: archive, binary_sha256: desktop};
 const bound = {metadata: {binary_sha256: binary, archive_sha256: archive, runtime_version: 'synthetic'},
   metadata_sha256: '1'.repeat(64), sdk_lock_sha256: '2'.repeat(64),
   candidate: {components: {runtime: {source_sha: sha}, cli: {source_sha: cliSha, artifacts: {[target]: {binary_sha256: cliBinary}}},
-    client2: {artifacts: {[target]: {binary_sha256: desktop}}}}}};
+    client2: {source_sha: client2Sha, version: proof.version, native_artifact: proof,
+      artifacts: {[target]: {binary_sha256: desktop, archive_sha256: archive}}}}}};
 const names = [...selected];
 const business = {suite: 'g1-business', passed: true, test_executed: true, release_acceptance: false,
   cli_source_sha: cliSha, runtime_source_sha: sha, target, run_id: '17', run_attempt: '2',
@@ -24,9 +30,10 @@ const business = {suite: 'g1-business', passed: true, test_executed: true, relea
     encrypted_write_committed: name === 'accepted-write', forced_operation_remains_unknown: name === 'explicit-force',
     business_before_stop_ms: 4201, business_held_after_stop_ms: 4202}))},
   owned_process_cleanup: {passed: true, forced: 0, forced_processes: []}, keyring: {passed: true, business_passed: true}};
-const launcher = {client2_source: '6ffa187685734873721ab51f3a54d8b2c29cd269', g1_passed: false,
+const launcher = {client2_source: client2Sha, g1_passed: false,
   inputs: {cli_sha256: cliBinary, runtime_archive_sha256: archive, runtime_version: 'synthetic', ordinary_cli_cold_start: true, host_credentials: true},
-  desktop_headless: {enabled: true, binary_sha256: desktop, release: 'host-owned-candidate', artifact_id: 14157714821, run_id: '43705532188'},
+  desktop_headless: {enabled: true, client2_source: client2Sha, binary_sha256: desktop, archive_sha256: archive,
+    release: proof.release, artifact_id: proof.artifact_id, run_id: String(proof.run_id)},
   cases: ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started', 'reuse-cli-business-started',
     'desktop-owned', 'cli-host-sigterm', 'cli-host-sigkill'].map(name => ({name, passed: true, cleanup_exit: 0, synthetic_host_credential: true}))};
 verifyResults(business, launcher, bound);
@@ -46,10 +53,13 @@ for (const mutate of [
   (b) => {b.owned_process_cleanup.forced_processes = {};},
   (b) => {b.keyring.business_passed = false;},
   (_b, l) => {l.client2_source = '0'.repeat(40);},
+  (_b, l) => {l.desktop_headless.client2_source = '0'.repeat(40);},
+  (_b, l) => {l.desktop_headless.release = 'foreign';},
+  (_b, l) => {l.desktop_headless.archive_sha256 = '0'.repeat(64);},
   (_b, l) => {l.desktop_headless.enabled = false;},
   (_b, l) => {l.desktop_headless.binary_sha256 = '0'.repeat(64);},
-  (_b, l) => {l.desktop_headless.artifact_id = 0;},
-  (_b, l) => {l.desktop_headless.run_id = 'other';},
+  (_b, l) => {l.desktop_headless.artifact_id = 82;},
+  (_b, l) => {l.desktop_headless.run_id = '72';},
   (_b, l) => {l.inputs.cli_sha256 = '0'.repeat(64);},
   (_b, l) => {l.inputs.host_credentials = false;},
   (_b, l) => {delete l.cases[0].synthetic_host_credential;},
@@ -59,6 +69,19 @@ for (const mutate of [
   const b = structuredClone(business), l = structuredClone(launcher);
   mutate(b, l);
   assert.throws(() => verifyResults(b, l, bound));
+}
+for (const mutate of [
+  c => {delete c.native_artifact;},
+  c => {c.native_artifact.source_commit = '0'.repeat(40);},
+  c => {c.native_artifact.version = 'foreign';},
+  c => {c.native_artifact.archive_sha256 = '0'.repeat(64);},
+  c => {c.native_artifact.binary_sha256 = '0'.repeat(64);},
+  c => {c.native_artifact.run_id = 72;},
+  c => {c.native_artifact.artifact_id = 82;},
+]) {
+  const changed = structuredClone(bound);
+  mutate(changed.candidate.components.client2);
+  assert.throws(() => verifyResults(business, launcher, changed));
 }
 for (const mode of ['registered', 'client2-owned']) {
   const owned = {suite: 'g1-owned-stop', passed: true, test_executed: true, release_acceptance: false,

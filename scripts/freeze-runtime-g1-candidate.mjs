@@ -168,10 +168,18 @@ export function assembleCandidate(parts, expected, artifacts) {
   const observedClient2 = artifacts[FREEZE_TARGETS[0]].client2;
   assert.equal(observedClient2.metadata.source_commit, client2Source);
   assert.equal(observedClient2.metadata.version, '0.2.56-dev.263', 'Client2 source proof version mismatch');
+  assert.equal(observedClient2.metadata.repository, 'risense-ai/respire-client2');
+  assert.equal(observedClient2.metadata.workflow, '.github/workflows/desktop.yml');
+  assert.equal(observedClient2.metadata.release, 'host-owned-candidate');
+  for (const key of ['run_id', 'run_attempt', 'artifact_id']) {
+    assert.ok(Number.isSafeInteger(observedClient2.metadata[key]) && observedClient2.metadata[key] > 0, `Invalid Client2 proof ${key}`);
+  }
+  assert.match(observedClient2.metadata.artifact_sha256 ?? '', /^[a-f0-9]{64}$/);
   for (const key of ['archive_sha256', 'binary_sha256']) assert.equal(observedClient2.metadata[key], observedClient2[key]);
   const components = {runtime: {source_sha: expected.source_sha, version: parts[0].runtime_version, artifacts: {}},
     cli: {source_sha: expected.cli_source_sha, version: parts[0].cli_version, artifacts: {}},
-    client2: {source_sha: client2Source, version: observedClient2.metadata.version, artifacts: {}}};
+    client2: {source_sha: client2Source, version: observedClient2.metadata.version,
+      native_artifact: {...observedClient2.metadata}, artifacts: {}}};
   for (const part of parts) {
     validatePart(part, expected, part.target);
     assert.equal(part.runtime_version, components.runtime.version); assert.equal(part.cli_version, components.cli.version);

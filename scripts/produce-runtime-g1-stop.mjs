@@ -30,7 +30,6 @@ function inputs() {
   const harnessSdk = observeSdkArchive(read(join('.sdk-archives', harnessTarget, 'sdk.tar.gz')), harnessTarget, lock.targets[harnessTarget]);
   auditSdkDirectory(resolve('.sdk', harnessTarget), harnessTarget, lock.targets[harnessTarget]);
   const client2 = bound.candidate.components.client2.source_sha;
-  assert.equal(client2, 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151');
   assert.equal(execFileSync('git', ['-C', '.client2-source', 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), client2);
   const source = bound.candidate.components.cli.source_sha;
   assert.equal(execFileSync('git', ['-C', '.cli-source', 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), source);

@@ -20,6 +20,8 @@ const observed = () => Object.fromEntries(FREEZE_TARGETS.map(target => [target, 
   cli: {archive_sha256: alternate, binary_sha256: hash},
   ...(target === FREEZE_TARGETS[0] ? {client2: {archive_sha256: hash, binary_sha256: alternate,
     metadata: {source_commit: '6ffa187685734873721ab51f3a54d8b2c29cd269', version: '0.2.56-dev.263',
+      repository: 'risense-ai/respire-client2', workflow: '.github/workflows/desktop.yml', release: 'host-owned-candidate',
+      run_id: 71, run_attempt: 1, artifact_id: 81, artifact_sha256: alternate,
       archive_sha256: hash, binary_sha256: alternate}}} : {}),
 }]));
 
@@ -33,6 +35,7 @@ test('freeze keeps original source/bytes distinct from G1 acceptance', () => {
   assert.equal(candidate.components.client2.source_sha, '6ffa187685734873721ab51f3a54d8b2c29cd269');
   assert.equal(candidate.components.client2.version, '0.2.56-dev.263');
   assert.equal(candidate.components.client2.version, observed()[FREEZE_TARGETS[0]].client2.metadata.version);
+  assert.deepEqual(candidate.components.client2.native_artifact, observed()[FREEZE_TARGETS[0]].client2.metadata);
   assert.deepEqual(Object.keys(candidate.components.runtime.artifacts).sort(), [...FREEZE_TARGETS].sort());
   assert.equal(candidate.components.client2.artifacts[FREEZE_TARGETS[0]].native_sdk, null);
   assert.deepEqual(candidate.components.runtime.artifacts[FREEZE_TARGETS[0]].native_sdk, sdk);
@@ -69,6 +72,11 @@ test('reject Client2 source proof version or byte identity mismatches', () => {
   assert.throws(() => assembleCandidate(parts(), expected, artifacts), /Client2 source proof version mismatch/);
   for (const key of ['source_commit', 'archive_sha256', 'binary_sha256']) {
     const changed = observed(); changed[FREEZE_TARGETS[0]].client2.metadata[key] = '0'.repeat(key === 'source_commit' ? 40 : 64);
+    assert.throws(() => assembleCandidate(parts(), expected, changed));
+  }
+  for (const [key, value] of Object.entries({repository: 'foreign/repository', workflow: 'foreign.yml',
+    release: 'foreign', run_id: 0, run_attempt: 0, artifact_id: 0, artifact_sha256: 'invalid'})) {
+    const changed = observed(); changed[FREEZE_TARGETS[0]].client2.metadata[key] = value;
     assert.throws(() => assembleCandidate(parts(), expected, changed));
   }
 });

@@ -8,7 +8,6 @@ import {context, BUSINESS_CASES, STOP_CASES as CASES} from './produce-runtime-g1
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
-const pairedClient2 = '6ffa187685734873721ab51f3a54d8b2c29cd269';
 export {CASES};
 export const selected = [...new Set([
   ...Object.values(BUSINESS_CASES).flat(),
@@ -32,12 +31,12 @@ function inputs() {
   assert.equal(process.env.GITHUB_JOB, 'g1-native-business');
   const cliSource = resolve('.cli-source');
   const client2Source = resolve('.client2-source');
-  for (const [path, sha] of [[cliSource, bound.candidate.components.cli.source_sha], [client2Source, pairedClient2]]) {
+  for (const [path, sha] of [[cliSource, bound.candidate.components.cli.source_sha], [client2Source, bound.candidate.components.client2.source_sha]]) {
     assert.equal(execFileSync('git', ['-C', path, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), sha);
     assert.equal(execFileSync('git', ['-C', path, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
   }
-  assert.equal(bound.candidate.components.client2.source_sha, pairedClient2);
-  assert.equal(bound.candidate.components.client2.version, '0.2.56-dev.263');
+  assert.deepEqual(json(join('g1-input', 'client2-assets', 'desktop-source.json')),
+    bound.candidate.components.client2.native_artifact, 'Client2 source proof differs from frozen candidate');
   const cliMeta = json(join('g1-input', 'cli-assets', `cli-build-${target}.json`));
   const cliArtifact = bound.candidate.components.cli.artifacts[target];
   assert.equal(cliMeta.git_sha, bound.candidate.components.cli.source_sha);
@@ -80,8 +79,6 @@ function inputs() {
   // Verify the already-hashed original archives themselves contain the exact
   // payload bytes that will execute, not independently supplied loose files.
   execFileSync('python3', ['scripts/verify-business-archive-payloads.py'], {stdio: 'pipe'});
-  // The existing launcher also requires the fixed paired desktop hash;
-  // arbitrary binaries cannot replace the Go Manager/desktop acceptance input.
   const runtime = resolve('release-assets', `rsrs-runtime-${target}`);
   assert.equal(hash(read(runtime)), bound.metadata.binary_sha256);
   // Match the existing CLI workflow's actual cargo compiler-artifact record;
@@ -130,7 +127,13 @@ export function verifyResults(business, launcher, bound) {
   assert.deepEqual(business.owned_process_cleanup.forced_processes, []);
   assert.equal(business.keyring.passed, true);
   assert.equal(business.keyring.business_passed, true);
-  assert.equal(launcher.client2_source, pairedClient2);
+  const client2 = bound.candidate.components.client2;
+  const proof = client2.native_artifact;
+  assert.ok(proof, 'Frozen Client2 native_artifact proof required; refreeze the candidate');
+  assert.equal(proof.source_commit, client2.source_sha);
+  assert.equal(proof.version, client2.version);
+  for (const key of ['archive_sha256', 'binary_sha256']) assert.equal(proof[key], client2.artifacts[target][key]);
+  assert.equal(launcher.client2_source, client2.source_sha);
   assert.equal(launcher.g1_passed, false);
   assert.equal(launcher.inputs.cli_sha256, business.cli_binary_sha256);
   assert.equal(launcher.inputs.runtime_archive_sha256, business.runtime_archive_sha256);
@@ -138,10 +141,12 @@ export function verifyResults(business, launcher, bound) {
   assert.equal(launcher.inputs.ordinary_cli_cold_start, true);
   assert.equal(launcher.inputs.host_credentials, true);
   assert.equal(launcher.desktop_headless.enabled, true);
-  assert.equal(launcher.desktop_headless.release, 'host-owned-candidate');
-  assert.equal(launcher.desktop_headless.artifact_id, 14157714821);
-  assert.equal(launcher.desktop_headless.run_id, '43705532188');
-  assert.equal(launcher.desktop_headless.binary_sha256, bound.candidate.components.client2.artifacts[target].binary_sha256);
+  assert.equal(launcher.desktop_headless.client2_source, client2.source_sha);
+  assert.equal(launcher.desktop_headless.release, proof.release);
+  assert.equal(launcher.desktop_headless.artifact_id, proof.artifact_id);
+  assert.equal(launcher.desktop_headless.run_id, String(proof.run_id));
+  assert.equal(launcher.desktop_headless.archive_sha256, proof.archive_sha256);
+  assert.equal(launcher.desktop_headless.binary_sha256, proof.binary_sha256);
   const names = launcher.cases.map(item => item.name);
   assert.equal(new Set(names).size, names.length);
   assert.deepEqual([...names].sort(), ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started',
@@ -166,7 +171,7 @@ export function verifyOwnedStop(report, mode, bound) {
   assert.deepEqual(report.passed_cases, ['diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay']);
   assert.deepEqual(report.missing_or_failed_cases, []);
   assert.equal(report.owned_stop.passed, true);
-  assert.equal(report.owned_stop.source_binding.client2_source_sha, pairedClient2);
+  assert.equal(report.owned_stop.source_binding.client2_source_sha, bound.candidate.components.client2.source_sha);
   assert.equal(report.owned_stop.source_binding.probe_fixture_cli_sha, report.cli_source_sha);
   assert.equal(report.owned_stop.source_binding.mode, mode);
   const observations = report.owned_stop.observations;
