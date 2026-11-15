@@ -137,7 +137,7 @@ export function verifyResults(result, identity) {
         assert.equal(row.encrypted_write_committed, row.case !== 'explicit-force');
         assert.equal(row.forced_operation_remains_unknown, row.case === 'explicit-force');
         if (row.case === 'normal') assert.equal(row.caller_timeout_ms, null);
-        else assert.ok(Number.isInteger(row.caller_timeout_ms) && row.caller_timeout_ms >= (mode === 'registered' ? 35000 : 30000) && row.caller_timeout_ms <= 60000);
+        else assert.ok(Number.isInteger(row.caller_timeout_ms) && row.caller_timeout_ms >= 35000 && row.caller_timeout_ms <= 60000);
         observed.push(`${startup}:${row.case}`);
       }
     }

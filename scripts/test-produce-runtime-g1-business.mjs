@@ -95,7 +95,7 @@ for (const mode of ['registered', 'client2-owned']) {
         startup_mode: mode === 'registered' ? 'cli-supervised' : 'client2-owned', provider_requests: 1,
         business_sender: 'modern-harness',
         stop_sender: mode === 'registered' ? (name === 'normal' ? 'modern-cli' : 'original-go-client2-managed') : 'original-go-client2',
-        caller_timeout_ms: name === 'normal' ? null : (mode === 'registered' ? 35001 : 30001),
+        caller_timeout_ms: name === 'normal' ? null : 35001,
         provider_http_status: 200, encrypted_write_committed: name !== 'explicit-force',
         forced_operation_remains_unknown: name === 'explicit-force', credential_cleanup_verified: true}))}};
   verifyOwnedStop(owned, mode, bound);
@@ -105,7 +105,7 @@ for (const mode of ['registered', 'client2-owned']) {
     r => {r.owned_stop.source_binding.mode = 'other';},
     r => {r.owned_stop.source_binding.client2_source_sha = '0'.repeat(40);},
     r => {r.owned_stop.observations.pop();},
-    r => {r.owned_stop.observations[1].caller_timeout_ms = 0;},
+    r => {r.owned_stop.observations[1].caller_timeout_ms = 34999;},
     r => {delete r.owned_stop.observations[1].caller_timeout_ms;},
     r => {r.owned_stop.observations[2].caller_timeout_ms = 0;},
     r => {r.owned_stop.observations[1].encrypted_write_committed = false;},

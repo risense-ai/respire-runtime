@@ -2842,9 +2842,9 @@ fn stop_native_client2_owned_held_write() -> anyhow::Result<()> {
                 std::thread::sleep(Duration::from_millis(100));
             }
             let stop_result: Value = serde_json::from_slice(&std::fs::read(&stop_output_path)?)?;
-            assert!(stop_result["action_error"].as_str().context("old caller timeout error missing")?
-                .contains("尚未退出，未强制结束进程"));
-            assert!(started_stop.elapsed() >= Duration::from_secs(30));
+            assert!(stop_result["action_error"].as_str().context("Client2 caller timeout error missing")?
+                .contains("结果尚未确认，未自动重试"));
+            assert!(started_stop.elapsed() >= Duration::from_secs(35));
             caller_timeout_ms = Some(started_stop.elapsed().as_millis());
         }
         checkpoint("caller_wait_complete");

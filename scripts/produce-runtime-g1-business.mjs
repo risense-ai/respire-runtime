@@ -197,7 +197,7 @@ export function verifyOwnedStop(report, mode, bound) {
       ? (item.case === 'normal' ? 'modern-cli' : 'original-go-client2-managed') : 'original-go-client2');
     if (item.case === 'normal') assert.equal(item.caller_timeout_ms, null);
     else assert.ok(Number.isSafeInteger(item.caller_timeout_ms)
-      && item.caller_timeout_ms >= (mode === 'registered' ? 35000 : 30000)
+      && item.caller_timeout_ms >= 35000
       && item.caller_timeout_ms <= 60000, 'Original caller must actually time out before explicit force or completion');
   }
   assert.equal(report.keyring.passed, true);

@@ -70,6 +70,7 @@ for (const mutate of [
   r => { r.modes.registered.source_binding.run_attempt = '3'; },
   r => { r.modes.registered.observations[0].stop_sender = 'synthetic'; },
   r => { r.modes.registered.observations[1].caller_timeout_ms = 1; },
+  r => { r.modes['client2-owned'].observations[1].caller_timeout_ms = 34999; },
   r => { r.modes.registered.observations[2].forced_operation_remains_unknown = false; },
   r => { r.modes.standalone.standalone.observations.pop(); },
   r => { delete r.modes.standalone.standalone; },
