@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {selected, verifyResults} from './produce-runtime-g1-business.mjs';
+import {selected, verifyResults, verifyOwnedStop} from './produce-runtime-g1-business.mjs';
 
 // Synthetic data exercises refusal paths only. It is never acceptance evidence.
 process.env.GITHUB_RUN_ID = '17';
@@ -58,4 +58,33 @@ for (const mutate of [
   mutate(b, l);
   assert.throws(() => verifyResults(b, l, bound));
 }
-console.log('23 synthetic business combination checks passed; no native acceptance executed');
+for (const mode of ['registered', 'client2-owned']) {
+  const owned = {suite: 'g1-owned-stop', passed: true, test_executed: true, release_acceptance: false,
+    cli_source_sha: cliSha, runtime_source_sha: sha, cli_binary_sha256: cliBinary,
+    runtime_binary_sha256: binary, runtime_archive_sha256: archive, runtime_metadata_sha256: bound.metadata_sha256,
+    run_id: '17', run_attempt: '2', passed_cases: ['diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay'],
+    missing_or_failed_cases: [], keyring: {passed: true, business_passed: true},
+    owned_process_cleanup: {passed: true, forced: 0, forced_processes: []},
+    owned_stop: {passed: true, source_binding: {mode, client2_source_sha: launcher.client2_source, probe_fixture_cli_sha: cliSha},
+      observations: ['normal', 'caller-timeout', 'explicit-force'].map(name => ({case: name,
+        startup_mode: mode === 'registered' ? 'cli-supervised' : 'client2-owned', provider_requests: 1,
+        provider_http_status: 200, encrypted_write_committed: name !== 'explicit-force',
+        forced_operation_remains_unknown: name === 'explicit-force', credential_cleanup_verified: true}))}};
+  verifyOwnedStop(owned, mode, bound);
+  for (const mutate of [
+    r => {r.runtime_archive_sha256 = '0'.repeat(64);},
+    r => {r.run_attempt = '1';},
+    r => {r.owned_stop.source_binding.mode = 'other';},
+    r => {r.owned_stop.source_binding.client2_source_sha = '0'.repeat(40);},
+    r => {r.owned_stop.observations.pop();},
+    r => {r.owned_stop.observations[0].provider_requests = 2;},
+    r => {r.owned_stop.observations[2].forced_operation_remains_unknown = false;},
+    r => {r.owned_process_cleanup.forced = 1;},
+    r => {r.keyring.business_passed = false;},
+  ]) {
+    const changed = structuredClone(owned);
+    mutate(changed);
+    assert.throws(() => verifyOwnedStop(changed, mode, bound));
+  }
+}
+console.log('Synthetic business and owned-stop evidence checks passed; no native acceptance executed');

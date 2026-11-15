@@ -149,6 +149,43 @@ export function verifyResults(business, launcher, bound) {
   assert.ok(launcher.cases.every(item => item.passed === true && item.cleanup_exit === 0 && item.synthetic_host_credential === true));
 }
 
+export function verifyOwnedStop(report, mode, bound) {
+  assert.ok(['registered', 'client2-owned'].includes(mode));
+  assert.equal(report.suite, 'g1-owned-stop');
+  assert.equal(report.passed, true);
+  assert.equal(report.test_executed, true);
+  assert.equal(report.release_acceptance, false);
+  assert.equal(report.cli_source_sha, bound.candidate.components.cli.source_sha);
+  assert.equal(report.runtime_source_sha, bound.candidate.components.runtime.source_sha);
+  assert.equal(report.cli_binary_sha256, bound.candidate.components.cli.artifacts[target].binary_sha256);
+  assert.equal(report.runtime_binary_sha256, bound.metadata.binary_sha256);
+  assert.equal(report.runtime_archive_sha256, bound.metadata.archive_sha256);
+  assert.equal(report.runtime_metadata_sha256, bound.metadata_sha256);
+  assert.equal(report.run_id, process.env.GITHUB_RUN_ID);
+  assert.equal(report.run_attempt, process.env.GITHUB_RUN_ATTEMPT);
+  assert.deepEqual(report.passed_cases, ['diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay']);
+  assert.deepEqual(report.missing_or_failed_cases, []);
+  assert.equal(report.owned_stop.passed, true);
+  assert.equal(report.owned_stop.source_binding.client2_source_sha, pairedClient2);
+  assert.equal(report.owned_stop.source_binding.probe_fixture_cli_sha, report.cli_source_sha);
+  assert.equal(report.owned_stop.source_binding.mode, mode);
+  const observations = report.owned_stop.observations;
+  assert.deepEqual(observations.map(item => item.case).sort(), ['caller-timeout', 'explicit-force', 'normal']);
+  for (const item of observations) {
+    assert.equal(item.startup_mode, mode === 'registered' ? 'cli-supervised' : 'client2-owned');
+    assert.equal(item.provider_requests, 1);
+    assert.equal(item.provider_http_status, 200);
+    assert.equal(item.encrypted_write_committed, item.case !== 'explicit-force');
+    assert.equal(item.forced_operation_remains_unknown, item.case === 'explicit-force');
+    assert.equal(item.credential_cleanup_verified, true);
+  }
+  assert.equal(report.keyring.passed, true);
+  assert.equal(report.keyring.business_passed, true);
+  assert.equal(report.owned_process_cleanup.passed, true);
+  assert.equal(report.owned_process_cleanup.forced, 0);
+  assert.deepEqual(report.owned_process_cleanup.forced_processes, []);
+}
+
 function run() {
   const bound = inputs();
   const directory = resolve('g1-business-raw');
@@ -168,6 +205,23 @@ function run() {
   const businessBytes = read(join(root, 'result.json'));
   writeFileSync(join(directory, 'business.json'), businessBytes, {flag: 'wx'});
   assert.equal(result.status, 0, 'Real isolated business execution failed');
+  const ownedStops = {};
+  for (const mode of ['registered', 'client2-owned']) {
+    const ownedRoot = `${root}-${mode}`;
+    assert.ok(!existsSync(ownedRoot));
+    const owned = spawnSync('python3', [join(bound.cliSource, 'scripts/native-account-candidate.py'),
+      '--root', ownedRoot, '--cli-source', bound.cliSource, '--runtime-source', process.cwd(),
+      '--cli-sha', bound.candidate.components.cli.source_sha, '--runtime-sha', process.env.GITHUB_SHA,
+      '--cli', bound.cli, '--runtime', bound.runtime, '--harness', bound.harness,
+      '--suite', 'g1-owned-stop', '--owned-stop-mode', mode, '--client2-source', bound.client2Source,
+      '--runtime-archive', archive, '--runtime-metadata', metadata], {stdio: 'inherit'});
+    assert.ifError(owned.error);
+    const bytes = read(join(ownedRoot, 'result.json'));
+    writeFileSync(join(directory, `owned-stop-${mode}.json`), bytes, {flag: 'wx'});
+    assert.equal(owned.status, 0, `Frozen ${mode} stop execution failed`);
+    verifyOwnedStop(JSON.parse(bytes), mode, bound);
+    ownedStops[mode] = hash(bytes);
+  }
   const launcherPath = join(directory, 'client2-launcher.json');
   const go = execFileSync('which', ['go'], {encoding: 'utf8'}).trim();
   const launcherKeyring = join(root, 'launcher-keyring');
@@ -198,6 +252,7 @@ function run() {
     job_name: 'g1-native-business', producer: 'scripts/produce-runtime-g1-business.mjs',
     candidate_sha256: hash(bound.bytes), actual_native_sdk: bound.observed, actual_cli_native_sdk: bound.actualCliSdk,
     harness_sha256: hash(read(bound.harness)), business_sha256: hash(businessBytes), launcher_sha256: hash(launcherBytes),
+    owned_stop_sha256: ownedStops,
     started_at, completed_at: new Date().toISOString(), suites: Object.keys(CASES)});
 }
 
@@ -222,6 +277,12 @@ function report() {
     repository: process.env.GITHUB_REPOSITORY, target, candidate_sha256: hash(bound.bytes),
     job_name: 'g1-native-business', producer: 'scripts/produce-runtime-g1-business.mjs'})) assert.equal(execution[key], expected);
   verifyResults(JSON.parse(businessBytes), JSON.parse(launcherBytes), bound);
+  assert.deepEqual(Object.keys(execution.owned_stop_sha256).sort(), ['client2-owned', 'registered']);
+  for (const mode of ['registered', 'client2-owned']) {
+    const bytes = read(join(directory, `owned-stop-${mode}.json`));
+    assert.equal(hash(bytes), execution.owned_stop_sha256[mode]);
+    verifyOwnedStop(JSON.parse(bytes), mode, bound);
+  }
   mkdirSync('g1-business-report/reports', {recursive: true});
   writeFileSync('g1-business-report/candidate.json', bound.bytes, {flag: 'wx'});
   for (const [id, names] of Object.entries(CASES)) {
