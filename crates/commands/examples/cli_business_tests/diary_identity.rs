@@ -1567,9 +1567,17 @@ impl Fixture {
         }
         assert_eq!(receipt["state"], if forced { "forced_timeout" } else { "drained" });
         checkpoint("receipt_verified");
+        let listener_started = std::time::Instant::now();
         match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{}", self.port).parse()?, Duration::from_secs(2)) {
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {},
-            other => anyhow::bail!("stopped listener did not refuse a fresh connection: {other:?}"),
+            other => {
+                match &other {
+                    Ok(_) => eprintln!("NATIVE_STOP_LISTENER_FAILURE outcome=connected probe_elapsed_ms={}", listener_started.elapsed().as_millis()),
+                    Err(error) => eprintln!("NATIVE_STOP_LISTENER_FAILURE outcome=error kind={:?} os_error={:?} probe_elapsed_ms={}",
+                        error.kind(), error.raw_os_error(), listener_started.elapsed().as_millis()),
+                }
+                anyhow::bail!("stopped listener did not refuse a fresh connection: {other:?}");
+            }
         }
         checkpoint("listener_verified");
         // This harness process is distinct from the Runtime owner; use the actual file-lock API.
