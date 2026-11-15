@@ -165,9 +165,13 @@ function packagePart() {
 }
 export function assembleCandidate(parts, expected, artifacts) {
   assert.deepEqual(parts.map(part => part.target).sort(), [...FREEZE_TARGETS].sort());
+  const observedClient2 = artifacts[FREEZE_TARGETS[0]].client2;
+  assert.equal(observedClient2.metadata.source_commit, client2Source);
+  assert.equal(observedClient2.metadata.version, '0.2.56-dev.263', 'Client2 source proof version mismatch');
+  for (const key of ['archive_sha256', 'binary_sha256']) assert.equal(observedClient2.metadata[key], observedClient2[key]);
   const components = {runtime: {source_sha: expected.source_sha, version: parts[0].runtime_version, artifacts: {}},
     cli: {source_sha: expected.cli_source_sha, version: parts[0].cli_version, artifacts: {}},
-    client2: {source_sha: client2Source, version: '0.2.56-dev.262', artifacts: {}}};
+    client2: {source_sha: client2Source, version: observedClient2.metadata.version, artifacts: {}}};
   for (const part of parts) {
     validatePart(part, expected, part.target);
     assert.equal(part.runtime_version, components.runtime.version); assert.equal(part.cli_version, components.cli.version);
@@ -175,7 +179,8 @@ export function assembleCandidate(parts, expected, artifacts) {
       assert.equal(part.native_sdk[owner].version, parts[0].native_sdk[owner].version);
       components[owner].artifacts[part.target] = {...artifacts[part.target][owner], native_sdk: part.native_sdk[owner]};
     }
-    if (part.target === FREEZE_TARGETS[0]) components.client2.artifacts[part.target] = {...artifacts[part.target].client2, native_sdk: null};
+    if (part.target === FREEZE_TARGETS[0]) components.client2.artifacts[part.target] = {
+      archive_sha256: observedClient2.archive_sha256, binary_sha256: observedClient2.binary_sha256, native_sdk: null};
   }
   for (const component of Object.values(components)) for (const artifact of Object.values(component.artifacts)) {
     for (const key of ['archive_sha256', 'binary_sha256']) assert.match(artifact[key], /^[a-f0-9]{64}$/);
@@ -221,7 +226,8 @@ function assemble() {
     assert.equal(runtime.binary_sha256, runtimeArtifact.binary_sha256); assert.equal(runtime.archive_sha256, runtimeArtifact.archive_sha256);
     assert.equal(cli.binary_sha256, cliArtifact.binary_sha256); assert.equal(cli.runtime_sha256, cliArtifact.archive_sha256);
     observedArtifacts[target] = {runtime: runtimeArtifact, cli: cliArtifact};
-    if (target === FREEZE_TARGETS[0]) observedArtifacts[target].client2 = pair('client2-assets', 'respire', 'respire-linux-amd64.tar.gz');
+    if (target === FREEZE_TARGETS[0]) observedArtifacts[target].client2 = {
+      ...pair('client2-assets', 'respire', 'respire-linux-amd64.tar.gz'), metadata: json(root, 'client2-assets/desktop-source.json')};
     parts.push(part);
   }
   execFileSync('python3', ['scripts/verify-business-archive-payloads.py'], {stdio: 'inherit'});

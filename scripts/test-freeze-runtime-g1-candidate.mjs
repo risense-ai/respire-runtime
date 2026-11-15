@@ -18,7 +18,9 @@ const parts = () => FREEZE_TARGETS.map(part);
 const observed = () => Object.fromEntries(FREEZE_TARGETS.map(target => [target, {
   runtime: {archive_sha256: hash, binary_sha256: alternate},
   cli: {archive_sha256: alternate, binary_sha256: hash},
-  ...(target === FREEZE_TARGETS[0] ? {client2: {archive_sha256: hash, binary_sha256: alternate}} : {}),
+  ...(target === FREEZE_TARGETS[0] ? {client2: {archive_sha256: hash, binary_sha256: alternate,
+    metadata: {source_commit: '6ffa187685734873721ab51f3a54d8b2c29cd269', version: '0.2.56-dev.263',
+      archive_sha256: hash, binary_sha256: alternate}}} : {}),
 }]));
 
 test('freeze keeps original source/bytes distinct from G1 acceptance', () => {
@@ -29,7 +31,8 @@ test('freeze keeps original source/bytes distinct from G1 acceptance', () => {
   assert.equal(candidate.components.runtime.source_sha, expected.source_sha);
   assert.equal(candidate.components.cli.source_sha, expected.cli_source_sha);
   assert.equal(candidate.components.client2.source_sha, '6ffa187685734873721ab51f3a54d8b2c29cd269');
-  assert.equal(candidate.components.client2.version, '0.2.56-dev.262');
+  assert.equal(candidate.components.client2.version, '0.2.56-dev.263');
+  assert.equal(candidate.components.client2.version, observed()[FREEZE_TARGETS[0]].client2.metadata.version);
   assert.deepEqual(Object.keys(candidate.components.runtime.artifacts).sort(), [...FREEZE_TARGETS].sort());
   assert.equal(candidate.components.client2.artifacts[FREEZE_TARGETS[0]].native_sdk, null);
   assert.deepEqual(candidate.components.runtime.artifacts[FREEZE_TARGETS[0]].native_sdk, sdk);
@@ -57,6 +60,17 @@ for (const [name, mutate] of [
 ]) test(`reject ${name}`, () => {
   const value = part(FREEZE_TARGETS[0]); mutate(value);
   assert.throws(() => validatePart(value, expected, FREEZE_TARGETS[0]));
+});
+test('reject Client2 source proof version or byte identity mismatches', () => {
+  const artifacts = observed(), client2 = artifacts[FREEZE_TARGETS[0]].client2;
+  const workflow = readFileSync(new URL('../.github/workflows/freeze-g1-candidate.yml', import.meta.url), 'utf8');
+  assert.equal(client2.metadata.version, workflow.match(/proof = dict\(source_commit=source, release='host-owned-candidate', version='([^']+)'/)[1]);
+  client2.metadata.version = '0.2.56-dev.262';
+  assert.throws(() => assembleCandidate(parts(), expected, artifacts), /Client2 source proof version mismatch/);
+  for (const key of ['source_commit', 'archive_sha256', 'binary_sha256']) {
+    const changed = observed(); changed[FREEZE_TARGETS[0]].client2.metadata[key] = '0'.repeat(key === 'source_commit' ? 40 : 64);
+    assert.throws(() => assembleCandidate(parts(), expected, changed));
+  }
 });
 test('reject missing/duplicated targets and mixed consumer versions', () => {
   assert.throws(() => assembleCandidate([part(FREEZE_TARGETS[0])], expected, observed()));

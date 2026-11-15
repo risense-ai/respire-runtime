@@ -37,7 +37,7 @@ function inputs() {
     assert.equal(execFileSync('git', ['-C', path, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
   }
   assert.equal(bound.candidate.components.client2.source_sha, pairedClient2);
-  assert.equal(bound.candidate.components.client2.version, '0.2.56-dev.262');
+  assert.equal(bound.candidate.components.client2.version, '0.2.56-dev.263');
   const cliMeta = json(join('g1-input', 'cli-assets', `cli-build-${target}.json`));
   const cliArtifact = bound.candidate.components.cli.artifacts[target];
   assert.equal(cliMeta.git_sha, bound.candidate.components.cli.source_sha);
