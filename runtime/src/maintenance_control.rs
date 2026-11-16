@@ -126,12 +126,47 @@ fn output(params: &Params, status: Option<snapshot::RestoreStatus>) -> Result<Ou
     Ok(result)
 }
 
+/// Authenticate only the exact host-selected session and factors, never a credential broker.
+pub(crate) fn restore_session_keys(
+    bytes: &[u8],
+    material: &respire_protocol::host_control::HostAuthSessionMaterial,
+    account: &str,
+) -> Result<SessionKeys> {
+    use respire_protocol::host_control::HostAuthVaultFactors as Factors;
+    anyhow::ensure!(format!("{:x}", Sha256::digest(bytes)) == material.session_sha256,
+        "snapshot session changed; host must supply factors for the current session");
+    let session: serde_json::Value = serde_json::from_slice(bytes)?;
+    anyhow::ensure!(session["user"].as_str() == Some(account), "snapshot account changed");
+    let field = |name: &str| -> Result<&str> {
+        session[name].as_str().filter(|value| !value.is_empty())
+            .with_context(|| format!("snapshot session is missing {name}"))
+    };
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_u64().context("invalid snapshot vault version")?,
+    };
+    let (salt, wrapped, nonce) = (field("kdf_salt")?, field("wrapped_urk")?, field("urk_nonce")?);
+    let keys = match (version, &material.factors) {
+        (1, Factors::V1 { password, account_secret }) =>
+            SessionKeys::unlock(password, account_secret, salt, wrapped, nonce),
+        (2, Factors::V2 { super_password }) =>
+            SessionKeys::unlock_super(super_password, salt, wrapped, nonce),
+        (3, Factors::V3 { super_password, secret_key }) =>
+            SessionKeys::unlock_vault(super_password, secret_key, salt, wrapped, nonce),
+        (4, Factors::V4 { super_password }) =>
+            SessionKeys::unlock_v4(super_password, salt, wrapped, nonce),
+        _ => anyhow::bail!("snapshot factors do not match the session vault version"),
+    }?;
+    if session["crypto_namespace"].as_str() == Some(respire_app::memory::crypto::RSRS_PREFIX) {
+        SessionKeys::from_urk(keys.urk)
+    } else { Ok(keys) }
+}
+
 /// All offline actions require proven occupant/descendant exit. A failed health
 /// probe or an available library lock is not a substitute for that proof.
 pub(crate) fn execute_offline(
     params: &Params,
     account: &str,
-    keys: Option<&SessionKeys>,
     dispatch: RestoreDispatch,
     authorize: impl Fn(&Params, Access) -> Result<()>,
 ) -> Result<Output> {
@@ -147,6 +182,10 @@ pub(crate) fn execute_offline(
     let mut result = output(params, status.clone())?;
     match params.action {
         Action::Restore => {
+            let material = params.material.as_ref().context("host snapshot restoration material is required")?;
+            let bytes = crate::startup_identity::read_private_file(&root.join("session.json"))?
+                .context("snapshot session is missing")?;
+            let keys = restore_session_keys(&bytes, material, account)?;
             if status.is_none() && dispatch == RestoreDispatch::FirstAttempt {
                 authorize(params, Access::StartRestore)?;
                 respire_app::service::ensure_writable()?;
@@ -160,7 +199,7 @@ pub(crate) fn execute_offline(
                 snapshot::restore_operation_locked(
                     &root,
                     account,
-                    keys,
+                    Some(&keys),
                     &params.snapshot_id,
                     &operation,
                     &ownership,

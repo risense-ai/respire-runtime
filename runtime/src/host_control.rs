@@ -595,11 +595,7 @@ fn receive_and_execute(
         } else {
             crate::snapshot_authority::authorize_offline(&params, crate::maintenance_control::Access::Offline)
                 .map_err(|_| ("unauthorized", "snapshot offline authorization failed"))?;
-            let keys = if params.action == MaintenanceAction::Restore {
-                Some(respire_app::auth::load_local_session_with_owner()
-                    .map_err(|_| ("credentials_unavailable", "snapshot credentials unavailable"))?.0)
-            } else { None };
-            crate::snapshot_authority::dispatch_offline(&request, account, keys.as_ref(),
+            crate::snapshot_authority::dispatch_offline(&request, account,
                 if params.action == MaintenanceAction::Restore { crate::maintenance_control::RestoreDispatch::FirstAttempt }
                     else { crate::maintenance_control::RestoreDispatch::Resume })
         }.map_err(|failure| {
