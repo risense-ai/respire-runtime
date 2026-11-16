@@ -647,10 +647,11 @@ fn receive_and_execute(
             crate::startup_identity::verify_auth_control_binding(account.binding(), account.identity())
         }.map_err(|_| ("scope_mismatch", "account control identity does not match the consumed grant"))?;
         *control_ready = true;
-        let result = account.execute(&request, ownership).map_err(|failure| {
+        let reply = account.execute(&request, ownership).map_err(|failure| {
             response.error = Some(format!("{failure:#}"));
             ("account_outcome_unknown", "query the same account operation before retrying")
         })?;
+        let result = &reply.receipt;
         response.ok = matches!(result.outcome,
             HostAuthAccountOutcome::AwaitingInput | HostAuthAccountOutcome::AwaitingVerification
                 | HostAuthAccountOutcome::Committed);
@@ -663,7 +664,8 @@ fn receive_and_execute(
         response.envelope = Some(ResultEnvelope::new("auth-account",
             if result.outcome == HostAuthAccountOutcome::AwaitingInput { Status::Pending }
             else if response.ok { Status::Ok } else { Status::Fail },
-            serde_json::to_value(result).map_err(|_| ("account_outcome_unknown", "account receipt encoding failed"))?,
+            (if host_registration || result.login.is_none() { serde_json::to_value(result) } else { serde_json::to_value(&reply) })
+                .map_err(|_| ("account_outcome_unknown", "account receipt encoding failed"))?,
             Vec::new()));
         return Ok(());
     }
