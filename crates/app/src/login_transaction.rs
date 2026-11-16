@@ -662,6 +662,55 @@ mod tests {
         assert_eq!(serde_json::to_vec(&merge)?, confirmed);
         assert!(merge.offer_merge(&root.join("another-target")).is_err());
         assert_eq!(serde_json::to_vec(&merge)?, confirmed);
+        // Migration publication must retain the password confirmed before host custody acknowledgement.
+        let migration_password = "synthetic-original-migration-password";
+        let migration_salt = crate::memory::crypto::derive_auth_salt("receipt-user")?;
+        let authentication = json!({"salt":migration_salt,
+            "pass_hash":crate::memory::crypto::derive_pass_hash(migration_password, &migration_salt)?});
+        let mut migration_value = serde_json::to_value(&login_journal)?;
+        migration_value["operations"][login_index]["account"]["login"]["migrate_vault"] = json!(true);
+        migration_value["operations"][login_index]["account"]["login"]["migration_salt"] = json!(migration_salt);
+        let mut migration_journal: Journal = serde_json::from_value(migration_value)?;
+        let migration_session = json!({"user":"receipt-user","auth_salt":migration_salt});
+        let candidate_sha256 = digest(&serde_json::to_vec_pretty(&migration_session)?);
+        login::bind_migration_auth(&mut migration_journal.operations[login_index], &candidate_sha256,
+            Some(&authentication), false)?;
+        checkpoint_account_candidate(&mut migration_journal, login_index, &migration_session)?;
+        save_journal(&mut migration_journal)?;
+        let mut migration_journal = load_journal()?;
+        login::bind_migration_auth(&mut migration_journal.operations[login_index], &candidate_sha256,
+            Some(&authentication), true)?;
+        let confirmed_migration = serde_json::to_vec(&migration_journal)?;
+        let durable_migration = std::fs::read(recovery_path())?;
+        let durable_text = String::from_utf8(durable_migration.clone())?;
+        assert!(!durable_text.contains(migration_password) && !durable_text.contains("pass_hash")
+            && !durable_text.contains(authentication["pass_hash"].as_str().context("fixture authentication hash missing")?));
+        let mut changed_authentication = authentication.clone();
+        changed_authentication["pass_hash"] = json!(crate::memory::crypto::derive_pass_hash("synthetic-replacement-password", &migration_salt)?);
+        for acknowledging in [false, true] {
+            let rejected = login::bind_migration_auth(&mut migration_journal.operations[login_index], &candidate_sha256,
+                Some(&changed_authentication), acknowledging).err().context("migration password replacement accepted")?;
+            assert!(rejected.to_string().contains("differs from the original login candidate"));
+            assert_eq!(serde_json::to_vec(&migration_journal)?, confirmed_migration);
+        }
+        assert!(login::bind_migration_auth(&mut migration_journal.operations[login_index], &digest(b"different-candidate"),
+            Some(&authentication), true).is_err());
+        let rejected = login::finish_migration(&mut migration_journal, login_index, Some("synthetic-replacement-password"))
+            .err().context("completion accepted a password outside confirmed host custody")?;
+        assert_eq!(rejected.to_string(), "migration password differs from the confirmed login material; no publication attempted");
+        assert_eq!(serde_json::to_vec(&migration_journal)?, confirmed_migration);
+        assert_eq!(std::fs::read(recovery_path())?, durable_migration);
+        // Old admitted records cannot bootstrap evidence from a completion request.
+        let mut missing_evidence = serde_json::to_value(&migration_journal)?;
+        missing_evidence["operations"][login_index]["account"]["login"].as_object_mut()
+            .context("migration fixture progress missing")?.remove("migration_auth_sha256");
+        let mut missing_evidence: Journal = serde_json::from_value(missing_evidence)?;
+        assert!(login::bind_migration_auth(&mut missing_evidence.operations[login_index], &candidate_sha256,
+            Some(&authentication), true).is_err());
+        let rejected = login::finish_migration(&mut missing_evidence, login_index, Some(migration_password))
+            .err().context("completion accepted missing original authentication evidence")?;
+        assert_eq!(rejected.to_string(), "host_recovery_required: original migration authentication evidence is missing");
+        assert_eq!(std::fs::read(recovery_path())?, durable_migration);
         // Unknown authorization cannot restart password/browser authorization.
         login_params.continuation.as_mut().context("continuation missing")?.migrate_local = false;
         login_journal.operations[login_index].phase = AuthPhase::RemoteUnknown;

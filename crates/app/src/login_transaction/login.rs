@@ -48,6 +48,8 @@ pub(super) struct LoginProgress {
     sync: Option<Value>,
     migration_cloud: Option<Value>,
     migration_salt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migration_auth_sha256: Option<String>,
     publication_pending: bool,
     publication_done: bool,
     publication_step: Option<String>,
@@ -60,7 +62,7 @@ impl LoginProgress {
         Self { migrate_local, migrate_vault, offer_local_merge, merge_local: None, merge_target: None,
             required_inputs: Vec::new(), password_slot: false, original_target_key: None, challenge: None, snapshot: None,
             import_started: false, sync_started: false, import: None, sync: None, migration_cloud: None,
-            migration_salt: None, publication_pending: false, publication_done: false,
+            migration_salt: None, migration_auth_sha256: None, publication_pending: false, publication_done: false,
             publication_step: None, vault_done: false, password_done: false }
     }
 
@@ -109,6 +111,27 @@ impl LoginProgress {
 fn progress(journal: &mut Journal, index: usize) -> Result<&mut LoginProgress> {
     journal.operations[index].account.as_mut().and_then(|account| account.login.as_mut())
         .context("login continuation receipt is missing")
+}
+
+fn migration_auth_digest(record: &AuthRecord, candidate_sha256: &str, authentication: &Value) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&(&record.operation_id, &record.fingerprint, candidate_sha256, authentication))?))
+}
+
+/// Bind the original authentication request before the host confirms credential custody.
+pub(super) fn bind_migration_auth(record: &mut AuthRecord, candidate_sha256: &str,
+    authentication: Option<&Value>, acknowledging: bool) -> Result<()> {
+    let proof = authentication.map(|authentication| migration_auth_digest(record, candidate_sha256, authentication)).transpose()?;
+    let candidate_exists = record.candidate_sha256.is_some();
+    let login = record.account.as_mut().and_then(|account| account.login.as_mut())
+        .context("login continuation receipt is missing")?;
+    ensure!(login.migrate_vault == proof.is_some(), "migration authentication evidence is missing or unexpected");
+    if acknowledging || candidate_exists {
+        ensure!(login.migration_auth_sha256 == proof,
+            "migration authentication differs from the original login candidate; original operation retained");
+    } else {
+        login.migration_auth_sha256 = proof;
+    }
+    Ok(())
 }
 
 pub(super) fn factor_keys(session: &Value, factors: &respire_protocol::host_control::HostAuthVaultFactors)
@@ -448,6 +471,8 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         prepared.session["legacy_secret_backend"] = json!(material.keyring_backend);
     }
     let candidate_sha256 = digest(&serde_json::to_vec_pretty(&prepared.session)?);
+    bind_migration_auth(&mut journal.operations[index], &candidate_sha256,
+        prepared.migration_auth.as_ref(), params.custody_ack.is_some())?;
     if let Some(ack) = &params.custody_ack {
         ensure!(journal.operations[index].candidate_sha256.as_deref() == Some(ack.candidate_sha256.as_str())
             && ack.candidate_sha256 == candidate_sha256,
@@ -654,9 +679,17 @@ pub(super) fn finish_migration(journal: &mut Journal, index: usize, password: Op
     let addr = account.addr.clone();
     let session: Value = serde_json::from_slice(record.candidate.as_deref().context("migration candidate missing")?)?;
     let password = password.context("explicit host migration password is required")?;
-    let migration_auth = login.migration_salt.as_ref().filter(|_| !login.password_done).map(|salt| -> Result<Value> {
-        Ok(json!({"salt":salt,"pass_hash":crate::memory::crypto::derive_pass_hash(&password, salt)?}))
-    }).transpose()?;
+    let migration_auth = if login.password_done { None } else {
+        let salt = login.migration_salt.as_ref().context("original migration authentication salt is missing")?;
+        Some(json!({"salt":salt,"pass_hash":crate::memory::crypto::derive_pass_hash(password, salt)?}))
+    };
+    if let Some(authentication) = &migration_auth {
+        let original = login.migration_auth_sha256.as_deref()
+            .context("host_recovery_required: original migration authentication evidence is missing")?;
+        let candidate_sha256 = record.candidate_sha256.as_deref().context("migration candidate digest missing")?;
+        ensure!(migration_auth_digest(record, candidate_sha256, authentication)? == original,
+            "migration password differs from the confirmed login material; no publication attempted");
+    }
     let prepared = PreparedLogin { user: account.user.clone(), directory: account.target.clone().context("migration target missing")?,
         original: None, session, super_password: String::new(), login_password: None, legacy_secret: None, alias: record.alias.clone(),
         recovery_written: false, migration_cloud: if login.vault_done { None } else { login.migration_cloud.clone() }, migration_auth };
