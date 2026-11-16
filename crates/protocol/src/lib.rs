@@ -28,7 +28,7 @@ pub use maintenance_control::{
 pub use metadata_control::SnapshotPreflightPayload;
 pub use model_control::{HostModelParams, ModelInstallIntent, ModelPreparation, HOST_MODEL_SCHEMA_V};
 pub use host_control::{
-    HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
+    HostAuthIdentity, HostAuthKeygenMaterial, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
     HOST_AUTH_SCHEMA_V, HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
     ControlBinding, HostControlLaunchGrant, HostControlMaintenanceBinding,
     HostControlOperation, HostControlParams,

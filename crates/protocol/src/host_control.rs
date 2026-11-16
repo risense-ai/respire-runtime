@@ -88,6 +88,25 @@ pub enum HostAuthIdentity {
     Bound { account_id: String, session_sha256: String },
 }
 
+/// Host-generated v4 material travels only in the inherited private request frame.
+/// The host owns persistence and readback; Runtime only validates the supplied wrap.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthKeygenMaterial {
+    pub kdf_salt: String,
+    pub wrapped_urk: String,
+    pub urk_nonce: String,
+    pub super_password: String,
+    pub keyring_account: String,
+    pub keyring_backend: String,
+}
+
+impl std::fmt::Debug for HostAuthKeygenMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HostAuthKeygenMaterial([REDACTED])")
+    }
+}
+
 /// Operation ID and idempotency key are mandatory in the outer RpcRequest.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +115,9 @@ pub struct HostAuthKeygenParams {
     pub binding: ControlBinding,
     pub identity: HostAuthIdentity,
     pub force: bool,
+    /// Execution requires host material; omission never authorizes Runtime generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<HostAuthKeygenMaterial>,
 }
 
 /// Fixed private recovery only; no business operation or credential is accepted.
