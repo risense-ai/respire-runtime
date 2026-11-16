@@ -1246,7 +1246,7 @@ mod tests {
             binding: params.binding.clone(),
             identity: respire_protocol::HostAuthIdentity::Absent,
             addr: "https://example.invalid".into(), user: "fixture-user".into(),
-            password: "fixture-only-password".into(), super_password: None,
+            password: "fixture-only-password".into(), super_password: None, material: None,
         })?];
         assert!(crate::auth_control::AccountRequest::parse(&account_request).is_ok());
         account_request.operation_id = None;

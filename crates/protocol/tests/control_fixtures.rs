@@ -73,13 +73,19 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
         assert!(serde_json::from_value::<HostAuthKeygenParams>(missing).is_err());
     }
     auth["identity"]["generation"] = json!(0);
-    assert!(serde_json::from_value::<HostAuthKeygenParams>(auth).is_err());
+    assert!(serde_json::from_value::<HostAuthKeygenParams>(auth.clone()).is_err());
     assert!(serde_json::from_value::<HostAuthIdentity>(json!({"kind":"anonymous"})).is_err());
     use respire_protocol::host_control::{HostAuthRegisterParams, HostAuthLoginParams, HostAuthAccountParams};
     let register = json!({"schema_version":1,"binding":params.binding,"identity":{"kind":"absent"},
         "addr":"https://example.invalid","user":"roundtrip-user","password":"private-pipe-only","super_password":null});
     let parsed: HostAuthRegisterParams = serde_json::from_value(register.clone())?;
     assert_eq!(serde_json::to_value(parsed)?, register);
+    let mut prepared_register = register.clone();
+    prepared_register["material"] = auth["material"].clone();
+    let parsed: HostAuthRegisterParams = serde_json::from_value(prepared_register.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, prepared_register);
+    prepared_register["material"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<HostAuthRegisterParams>(prepared_register).is_err());
     let mut unknown = register.clone();
     unknown["argv"] = json!(["keygen"]);
     assert!(serde_json::from_value::<HostAuthRegisterParams>(unknown).is_err());
