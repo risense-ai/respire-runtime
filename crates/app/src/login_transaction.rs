@@ -1787,7 +1787,7 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
         "registration binding mismatch");
     let source = read_original(&ownership.profile)?;
     let local: Value = match source.as_deref() { Some(bytes) => serde_json::from_slice(bytes)?, None => json!({}) };
-    ensure!(["super", "pass", "secret", "secret_key"].iter().all(|field| local.get(field).is_none()),
+    ensure!(["super", "pass", "secret", "secret_key"].iter().all(|field| local.get(*field).is_none()),
         "host must normalize registration source credentials before admission");
     let addr = params.addr.trim().trim_end_matches('/');
     let (mut journal, index, fresh) = admit_account(ownership, &params.identity, operation_id, key, true, addr, &params.user)?;
@@ -1835,7 +1835,7 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
     let directory = if use_source { ownership.profile.clone() } else { login_directory(addr, user)? };
     let original = read_original(&directory)?;
     let mut session: Value = match original.as_deref() { Some(bytes) => serde_json::from_slice(bytes)?, None => json!({}) };
-    ensure!(session.is_object() && ["super", "pass", "secret", "secret_key"].iter().all(|field| session.get(field).is_none()),
+    ensure!(session.is_object() && ["super", "pass", "secret", "secret_key"].iter().all(|field| session.get(*field).is_none()),
         "host must normalize registration target credentials before admission");
     ensure!(session["user"].as_str().is_none_or(|owner| owner.is_empty() || owner == user),
         "registration destination belongs to another account");
