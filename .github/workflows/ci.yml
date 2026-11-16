@@ -118,6 +118,15 @@ jobs:
           cargo test --locked -p respire_app_domain --lib keystore::host_tests::imported_read_preserves_missing_credential_type -- --exact
           cargo test --locked -p respire_app --lib login_transaction::tests:: -- --test-threads=1
           cargo test --locked -p respire_runtime --bin rsrs-runtime startup_identity::tests:: -- --test-threads=1
+      - name: Run affected core asset unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml crates/commands/src/model_assets.rs | grep -q .; then
+            cargo test --locked -p respire_commands --lib model_assets::tests:: -- --test-threads=1
+          else
+            echo 'Core asset unit tests are not affected by this change.'
+          fi
 
   ci-complete:
     if: always()
