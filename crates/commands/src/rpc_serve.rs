@@ -821,8 +821,9 @@ fn start_host_plugin_reader() -> Result<()> {
 }
 
 pub(crate) fn deliver_post_sync(pulled: usize, pushed: usize) -> Result<()> {
+    // No initialized channel means this host did not subscribe to plugin events.
+    let Some(channel) = HOST_PLUGIN_CHANNEL.get() else { return Ok(()); };
     let result = (|| -> Result<()> {
-        let channel = HOST_PLUGIN_CHANNEL.get().context("background post-sync requires a connected CLI host")?;
         // Release stdout before waiting: it is shared with other Runtime diagnostics.
         let warnings = channel.exchange(|bytes| {
             let mut output = std::io::stdout().lock();

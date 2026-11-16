@@ -85,6 +85,8 @@ mod tests {
     fn payload_builders_and_event_names() -> anyhow::Result<()> {
         use respire_protocol::host_plugin::*;
         use crate::rpc_serve::HostPluginChannel;
+        // A standalone host has not opted into the private plugin extension.
+        crate::rpc_serve::deliver_post_sync(3, 4)?;
         let plugin_timeout: anyhow::Error = crate::rpc_serve::HostPluginFailure(anyhow::anyhow!("configured hook timeout")).into();
         assert!(!crate::rpc_serve::background_sync_retryable(&plugin_timeout));
         assert!(crate::rpc_serve::background_sync_retryable(&anyhow::anyhow!("network timeout")));
@@ -107,16 +109,21 @@ mod tests {
                 channel.acknowledge(HostPluginEventAck { plugin_event_ack: HOST_PLUGIN_SCHEMA_V, id: request.id, result })
             }, 3, 4);
             if failed {
-                assert!(observed.err().ok_or_else(|| anyhow::anyhow!("failed plugin was accepted"))?
-                    .to_string().contains("configured plugin exited unsuccessfully"));
+                let failure: anyhow::Error = crate::rpc_serve::HostPluginFailure(
+                    observed.err().ok_or_else(|| anyhow::anyhow!("failed plugin was accepted"))?).into();
+                assert!(failure.to_string().contains("configured plugin exited unsuccessfully"));
+                assert!(!crate::rpc_serve::background_sync_retryable(&failure));
             } else {
                 let warnings = observed?;
                 assert!(warnings.is_empty() || warnings == ["observer warning"]);
             }
         }
         let disconnected = HostPluginChannel::default();
-        assert!(disconnected.exchange(|_| disconnected.close("parent disconnected".into()), 0, 0)
-            .err().ok_or_else(|| anyhow::anyhow!("disconnect was accepted"))?.to_string().contains("parent disconnected"));
+        let disconnected_error: anyhow::Error = crate::rpc_serve::HostPluginFailure(
+            disconnected.exchange(|_| disconnected.close("parent disconnected".into()), 0, 0)
+                .err().ok_or_else(|| anyhow::anyhow!("disconnect was accepted"))?).into();
+        assert!(disconnected_error.to_string().contains("parent disconnected"));
+        assert!(!crate::rpc_serve::background_sync_retryable(&disconnected_error));
         assert!(disconnected.exchange(|_| anyhow::bail!("closed channel must not write again"), 0, 0).is_err());
         let broken_output = HostPluginChannel::default();
         assert!(broken_output.exchange(|_| anyhow::bail!("broken output pipe"), 0, 0)
