@@ -57,6 +57,21 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     let parsed: HostAuthKeygenParams = serde_json::from_value(auth.clone())?;
     assert!(matches!(&parsed.identity, HostAuthIdentity::Unbound { .. }));
     assert_eq!(serde_json::to_value(parsed)?, auth);
+    auth["material"] = json!({
+        "kdf_salt":"fixture-salt", "wrapped_urk":"fixture-wrap", "urk_nonce":"fixture-nonce",
+        "super_password":"private-pipe-material", "keyring_account":"login-fixture", "keyring_backend":"fixture-backend",
+    });
+    let parsed: HostAuthKeygenParams = serde_json::from_value(auth.clone())?;
+    assert_eq!(serde_json::to_value(&parsed)?, auth);
+    assert!(!format!("{parsed:?}").contains("private-pipe-material"));
+    let mut invalid_material = auth.clone();
+    invalid_material["material"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<HostAuthKeygenParams>(invalid_material).is_err());
+    for field in ["kdf_salt", "wrapped_urk", "urk_nonce", "super_password", "keyring_account", "keyring_backend"] {
+        let mut missing = auth.clone();
+        missing["material"].as_object_mut().context("material is an object")?.remove(field);
+        assert!(serde_json::from_value::<HostAuthKeygenParams>(missing).is_err());
+    }
     auth["identity"]["generation"] = json!(0);
     assert!(serde_json::from_value::<HostAuthKeygenParams>(auth).is_err());
     assert!(serde_json::from_value::<HostAuthIdentity>(json!({"kind":"anonymous"})).is_err());

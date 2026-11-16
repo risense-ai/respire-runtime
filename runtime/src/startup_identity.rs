@@ -1234,7 +1234,7 @@ mod tests {
             "method": respire_protocol::HOST_AUTH_KEYGEN_METHOD,
             "args": [serde_json::to_string(&respire_protocol::HostAuthKeygenParams {
                 schema_version: respire_protocol::HOST_AUTH_SCHEMA_V,
-                binding, identity: respire_protocol::HostAuthIdentity::Absent, force: false,
+                binding, identity: respire_protocol::HostAuthIdentity::Absent, force: false, material: None,
             })?],
         }))?;
         assert!(crate::host_control::validate_auth_request(&auth).is_ok());
