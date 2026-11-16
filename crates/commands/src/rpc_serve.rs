@@ -3603,9 +3603,6 @@ fn admit_locked(
         ));
     }
     // Retain admission tombstones until exit; evicting them could replay a committed write.
-    if idempotency.len() >= 4096 {
-        return Err(("idempotency_capacity".to_owned(), "runtime retained 4096 operation identities; existing results remain queryable, but new operations are not accepted".to_owned()));
-    }
     idempotency.insert(
         operation.storage_key.clone(),
         IdempotencyRecord {
@@ -3759,14 +3756,14 @@ mod tests {
                 operation_id: Some("operation-1".to_owned()),
                 idempotency_key: Some("idempotency-1".to_owned()),
                 parent_operation_id: None,
-                method: "runtime.status".to_owned(),
+                method: "cli.exec".to_owned(),
                 args: args.iter().map(|item| item.to_string()).collect(),
                 queue_wait_ms: None,
                 lifecycle: None,
             }
         }
 
-        let first = request("request-1", &["a"]);
+        let first = request("request-1", &["remember", "value"]);
         for (error, code) in [
             ("runtime_maintenance: queued execution was fenced", "runtime_maintenance"),
             ("invalid_config: malformed client config", "invalid_config"),
@@ -3803,7 +3800,7 @@ mod tests {
         assert!(ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner())
             .iter().any(|item| item.operation_id == operation.operation_id));
         assert!(matches!(
-            admit_scoped(&request("request-in-flight", &["a"]), &operation, &current),
+            admit_scoped(&request("request-in-flight", &["remember", "value"]), &operation, &current),
             Ok(Admission::InProgress)
         ));
         for stale in [
@@ -3831,7 +3828,7 @@ mod tests {
             .remove(&operation.storage_id);
         drop(admission);
         assert_eq!(result_state(cached(&operation.storage_id).as_ref(), false), "completed");
-        match admit_scoped(&request("request-2", &["a"]), &operation, &current) {
+        match admit_scoped(&request("request-2", &["remember", "value"]), &operation, &current) {
             Ok(Admission::Replay(replay)) => {
                 assert_eq!(replay.id, "request-2");
                 assert_eq!(replay.operation_id.as_deref(), Some("operation-1"));
@@ -3843,16 +3840,35 @@ mod tests {
             other => panic!("expected replay, got {other:?}"),
         }
 
-        CACHE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
+        for index in 0..4096 {
+            let id = format!("capacity-operation-{index}");
+            let mut fresh = request(&id, &["status"]);
+            fresh.operation_id = Some(id.clone());
+            fresh.idempotency_key = Some(id);
+            let identity = operation_identity_for_scope(&fresh, &current)
+                .map_err(|(code, error)| anyhow::anyhow!("{code}: {error}"))?;
+            let guard = match admit_scoped(&fresh, &identity, &current) {
+                Ok(Admission::New(guard)) => guard,
+                other => panic!("expected admission beyond the old limit, got {other:?}"),
+            };
+            remember(&identity.storage_id, &status_response(&fresh));
+            INFLIGHT
+                .lock()
+                .map_err(|_| anyhow::anyhow!("inflight lock poisoned"))?
+                .remove(&identity.storage_id);
+            drop(guard);
+            if index == 4095 {
+                assert!(matches!(admit_scoped(&fresh, &identity, &current), Ok(Admission::Replay(_))));
+            }
+        }
+        assert_eq!(IDEMPOTENCY.lock().map_err(|_| anyhow::anyhow!("idempotency lock poisoned"))?.len(), 4097);
+        assert!(cached(&operation.storage_id).is_none());
         assert!(matches!(
-            admit_scoped(&request("request-3", &["a"]), &operation, &current),
+            admit_scoped(&request("request-3", &["remember", "value"]), &operation, &current),
             Ok(Admission::Unknown)
         ));
 
-        let changed = request("request-4", &["different"]);
+        let changed = request("request-4", &["remember", "different"]);
         let Some(changed_operation) = operation_identity_for_scope(&changed, &current).ok()
         else {
             panic!("changed operation identity must be valid");
@@ -3862,7 +3878,7 @@ mod tests {
             other => panic!("expected conflict, got {other:?}"),
         }
         let other_scope = fixture_scope("account-b", 1);
-        let mut other_request = request("request-other-account", &["a"]);
+        let mut other_request = request("request-other-account", &["remember", "value"]);
         other_request.scope = Some(other_scope.clone());
         let other_account = match operation_identity_for_scope(&other_request, &other_scope) {
             Ok(value) => value,
