@@ -724,14 +724,16 @@ mod tests {
         for current in [false, true] {
             for version in 1..=4 {
                 let salt = crypto::random_hex(16);
+                let super_password = crypto::generate_secret_key();
+                let secret_key = crypto::generate_secret_key();
                 let kek = match (version, current) {
                     (1, false) => crypto::derive_kek("password", "account-secret", &salt)?,
                     (1, true) => crypto::derive_rsrs_password_kek("password", "account-secret", &salt)?,
-                    (2, _) => crypto::derive_super_kek("super-password", &salt)?,
-                    (3, false) => crypto::derive_vault_kek("super-password", "secret-key", &salt)?,
-                    (3, true) => crypto::derive_rsrs_vault_kek("super-password", "secret-key", &salt)?,
-                    (4, false) => crypto::derive_kek_v4("super-password", &salt)?,
-                    (4, true) => crypto::derive_rsrs_kek("super-password", &salt)?,
+                    (2, _) => crypto::derive_super_kek(&super_password, &salt)?,
+                    (3, false) => crypto::derive_vault_kek(&super_password, &secret_key, &salt)?,
+                    (3, true) => crypto::derive_rsrs_vault_kek(&super_password, &secret_key, &salt)?,
+                    (4, false) => crypto::derive_kek_v4(&super_password, &salt)?,
+                    (4, true) => crypto::derive_rsrs_kek(&super_password, &salt)?,
                     _ => unreachable!("four fixture vault versions"),
                 };
                 let (nonce, wrapped) = crypto::wrap_key(&[7; 32], &kek)?;
@@ -740,9 +742,9 @@ mod tests {
                     "kdf_salt":salt, "wrapped_urk":format!("{prefix}{wrapped}"), "urk_nonce":nonce});
                 let factors = match version {
                     1 => Factors::V1 { password: "password".into(), account_secret: "account-secret".into() },
-                    2 => Factors::V2 { super_password: "super-password".into() },
-                    3 => Factors::V3 { super_password: "super-password".into(), secret_key: "secret-key".into() },
-                    4 => Factors::V4 { super_password: "super-password".into() },
+                    2 => Factors::V2 { super_password: super_password.clone() },
+                    3 => Factors::V3 { super_password: super_password.clone(), secret_key: secret_key.clone() },
+                    4 => Factors::V4 { super_password: super_password.clone() },
                     _ => unreachable!("four fixture vault versions"),
                 };
                 let bytes = serde_json::to_vec(&session)?;
@@ -757,7 +759,7 @@ mod tests {
                 material.session_sha256 = hash(&changed);
                 assert!(crate::maintenance_control::restore_session_keys(&changed, &material, "account")?
                     .encrypt_content("fixture")?.1.starts_with(crypto::RSRS_PREFIX));
-                material.factors = Factors::V4 { super_password: "wrong".into() };
+                material.factors = Factors::V4 { super_password: crypto::generate_secret_key() };
                 assert!(crate::maintenance_control::restore_session_keys(&changed, &material, "account").is_err());
             }
         }
