@@ -113,7 +113,7 @@ fn original_result_binds_key_force_session_and_unknown_queries_never_replay() ->
     let secret = crate::keystore::read_imported(&record.alias, "super", backend)?;
     crate::keystore::remove_imported(&record.alias, "super", backend)?;
     verify_locked_auth_identity(&root, &root, &identity)?;
-    assert!(verify_auth_identity(&root, &root, &identity).is_err());
+    verify_auth_identity(&root, &root, &identity)?;
     assert_eq!(control_keygen(&ownership, &identity, &id, &id, false, true, Some(&material))?.outcome,
         HostAuthOutcome::Committed);
     crate::keystore::import_credential(&record.alias, "super", &secret)?;

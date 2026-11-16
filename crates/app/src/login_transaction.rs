@@ -1234,7 +1234,7 @@ mod tests {
         assert!(journal.active.is_none());
         assert_eq!(auth_result(&journal.operations[0], Some(&material))?.outcome, HostAuthOutcome::Committed);
         verify_locked_auth_identity(&root, &root, &identity)?;
-        assert!(verify_auth_identity(&root, &root, &identity).is_err());
+        verify_auth_identity(&root, &root, &identity)?;
         assert_eq!(std::fs::read(root.join("session.json"))?, candidate);
         Ok(())
     }
@@ -1531,7 +1531,7 @@ impl AuthOwnership {
                 verify_auth_identity(&self.root, &self.profile, identity)?;
                 return Ok(());
             }
-            verify_auth_identity_inner(&self.root, &self.profile, identity, true, true)?;
+            verify_auth_identity_inner(&self.root, &self.profile, identity, true)?;
             if !journal.operations.iter().any(|record| record.account.is_some()
                 && journal.active.as_ref().and_then(|active| active.operation_id.as_deref()) == Some(record.operation_id.as_str())) {
                 recover_keygen(&mut journal, &self.root, &self.profile, None)?;
@@ -1548,7 +1548,7 @@ impl AuthOwnership {
             return retire_active(&mut journal);
         }
         if journal.active.is_some() {
-            verify_auth_identity_inner(&self.root, &self.profile, identity, true, false)?;
+            verify_auth_identity_inner(&self.root, &self.profile, identity, true)?;
             recover_keygen(&mut journal, &self.root, &self.profile, material)?;
         }
         Ok(())
@@ -1591,30 +1591,18 @@ fn validate_candidate(record: &AuthRecord) -> Result<Value> {
     Ok(session)
 }
 
-fn verify_candidate(record: &AuthRecord) -> Result<String> {
-    let session = validate_candidate(record)?;
-    let backend = record.backend.as_deref().context("auth credential backend is missing")?;
-    let secret = crate::keystore::read_imported(&record.alias, "super", backend)?;
-    crate::memory::SessionKeys::unlock_v4(&secret,
-        session["kdf_salt"].as_str().context("candidate salt is missing")?,
-        session["wrapped_urk"].as_str().context("candidate wrap is missing")?,
-        session["urk_nonce"].as_str().context("candidate nonce is missing")?)
-        .context("auth recovery credential does not unlock the candidate")?;
-    Ok(secret)
-}
-
-/// This reader is exclusive to private auth control; business identity stays strict.
+/// Validate transaction identity without reading host credentials; vault authentication requires explicit material.
 pub fn verify_auth_identity(root: &Path, profile: &Path, expected: &HostAuthIdentity) -> Result<()> {
-    verify_auth_identity_inner(root, profile, expected, false, true)
+    verify_auth_identity_inner(root, profile, expected, false)
 }
 
 /// Validate the locked serving profile's receipt without reading credentials.
 /// Host-supplied material must still authenticate the vault before it can open.
 pub fn verify_locked_auth_identity(root: &Path, profile: &Path, expected: &HostAuthIdentity) -> Result<()> {
-    verify_auth_identity_inner(root, profile, expected, false, false)
+    verify_auth_identity_inner(root, profile, expected, false)
 }
 
-fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthIdentity, recovering: bool, credentials: bool) -> Result<()> {
+fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthIdentity, recovering: bool) -> Result<()> {
     let original = read_original(profile)?;
     match (original.as_deref(), expected) {
         (None, HostAuthIdentity::Absent) => Ok(()),
@@ -1628,7 +1616,7 @@ fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthId
         (Some(bytes), HostAuthIdentity::Unbound { operation_id, session_sha256 }) => {
             canonical_operation_id(operation_id)?;
             ensure!(digest(bytes) == *session_sha256, "unbound auth session digest mismatch");
-            let journal = if credentials { load_journal()? } else { load_journal_metadata()? };
+            let journal = load_journal_metadata()?;
             let record = journal.operations.iter().find(|record| record.operation_id == *operation_id)
                 .context("unbound auth session has no transaction receipt")?;
             if record.key_operation.is_some() {
@@ -1640,7 +1628,7 @@ fn verify_auth_identity_inner(root: &Path, profile: &Path, expected: &HostAuthId
                 && journal.active.as_ref().is_some_and(|active| active.operation_id.as_deref() == Some(operation_id.as_str()));
             ensure!(record.root == root && record.profile == profile && (record.phase == AuthPhase::Committed || prepared)
                 && record.candidate.as_deref() == Some(bytes), "unbound auth receipt does not own this session");
-            if credentials { verify_candidate(record)?; } else { validate_candidate(record)?; }
+            validate_candidate(record)?;
             Ok(())
         }
         _ => anyhow::bail!("auth session identity mismatch; malformed sessions are not anonymous"),
