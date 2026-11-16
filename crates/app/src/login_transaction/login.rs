@@ -15,7 +15,6 @@ struct ImportSnapshot {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChallengeCheckpoint {
-    backend: String,
     sha256: String,
 }
 
@@ -35,6 +34,10 @@ pub(super) struct LoginProgress {
     merge_local: Option<bool>,
     merge_target: Option<PathBuf>,
     required_inputs: Vec<String>,
+    #[serde(default)]
+    password_slot: bool,
+    #[serde(default)]
+    pub(super) original_target_key: Option<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     challenge: Option<ChallengeCheckpoint>,
     snapshot: Option<ImportSnapshot>,
@@ -45,6 +48,8 @@ pub(super) struct LoginProgress {
     sync: Option<Value>,
     migration_cloud: Option<Value>,
     migration_salt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migration_auth_sha256: Option<String>,
     publication_pending: bool,
     publication_done: bool,
     publication_step: Option<String>,
@@ -55,9 +60,9 @@ pub(super) struct LoginProgress {
 impl LoginProgress {
     pub(super) fn new(migrate_local: bool, migrate_vault: bool, offer_local_merge: bool) -> Self {
         Self { migrate_local, migrate_vault, offer_local_merge, merge_local: None, merge_target: None,
-            required_inputs: Vec::new(), challenge: None, snapshot: None,
+            required_inputs: Vec::new(), password_slot: false, original_target_key: None, challenge: None, snapshot: None,
             import_started: false, sync_started: false, import: None, sync: None, migration_cloud: None,
-            migration_salt: None, publication_pending: false, publication_done: false,
+            migration_salt: None, migration_auth_sha256: None, publication_pending: false, publication_done: false,
             publication_step: None, vault_done: false, password_done: false }
     }
 
@@ -108,10 +113,112 @@ fn progress(journal: &mut Journal, index: usize) -> Result<&mut LoginProgress> {
         .context("login continuation receipt is missing")
 }
 
-fn require_inputs(journal: &mut Journal, index: usize, inputs: &[&str]) -> Result<HostAuthAccountResult> {
+fn migration_auth_digest(record: &AuthRecord, candidate_sha256: &str, authentication: &Value) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&(&record.operation_id, &record.fingerprint, candidate_sha256, authentication))?))
+}
+
+/// Bind the original authentication request before the host confirms credential custody.
+pub(super) fn bind_migration_auth(record: &mut AuthRecord, candidate_sha256: &str,
+    authentication: Option<&Value>, acknowledging: bool) -> Result<()> {
+    let proof = authentication.map(|authentication| migration_auth_digest(record, candidate_sha256, authentication)).transpose()?;
+    let candidate_exists = record.candidate_sha256.is_some();
+    let login = record.account.as_mut().and_then(|account| account.login.as_mut())
+        .context("login continuation receipt is missing")?;
+    ensure!(login.migrate_vault == proof.is_some(), "migration authentication evidence is missing or unexpected");
+    if acknowledging || candidate_exists {
+        ensure!(login.migration_auth_sha256 == proof,
+            "migration authentication differs from the original login candidate; original operation retained");
+    } else {
+        login.migration_auth_sha256 = proof;
+    }
+    Ok(())
+}
+
+pub(super) fn factor_keys(session: &Value, factors: &respire_protocol::host_control::HostAuthVaultFactors)
+    -> Result<crate::memory::SessionKeys> {
+    use respire_protocol::host_control::HostAuthVaultFactors as Factors;
+    let salt = session["kdf_salt"].as_str().context("vault salt missing")?;
+    let wrapped = session["wrapped_urk"].as_str().context("vault wrap missing")?;
+    let nonce = session["urk_nonce"].as_str().context("vault nonce missing")?;
+    let version = session["vault_version"].as_i64().context("vault version missing")?;
+    match (version, factors) {
+        (1, Factors::V1 { password, account_secret }) => crate::memory::SessionKeys::unlock(password, account_secret, salt, wrapped, nonce),
+        (2, Factors::V2 { super_password }) => crate::memory::SessionKeys::unlock_super(super_password, salt, wrapped, nonce),
+        (3, Factors::V3 { super_password, secret_key }) => crate::memory::SessionKeys::unlock_vault(super_password, secret_key, salt, wrapped, nonce),
+        (4, Factors::V4 { super_password }) => crate::memory::SessionKeys::unlock_v4(super_password, salt, wrapped, nonce),
+        _ => anyhow::bail!("host factors do not match the original vault version"),
+    }.context("explicit host factors do not unlock the original vault")
+}
+
+pub(super) fn raw_factor_keys(session: &Value, password: Option<&str>, super_password: Option<&str>, secret: Option<&str>)
+    -> Result<crate::memory::SessionKeys> {
+    use respire_protocol::host_control::HostAuthVaultFactors as Factors;
+    let factors = match session["vault_version"].as_i64() {
+        Some(1) => Factors::V1 { password: password.context("explicit v1 password required")?.to_owned(),
+            account_secret: secret.context("explicit v1 Account Secret required")?.to_owned() },
+        Some(2) => Factors::V2 { super_password: super_password.context("explicit super key required")?.to_owned() },
+        Some(3) => Factors::V3 { super_password: super_password.context("explicit super key required")?.to_owned(),
+            secret_key: secret.context("explicit v3 Secret Key required")?.to_owned() },
+        Some(4) => Factors::V4 { super_password: super_password.context("explicit super key required")?.to_owned() },
+        _ => anyhow::bail!("unsupported host vault version"),
+    };
+    factor_keys(session, &factors)
+}
+
+pub(super) fn supplied_keys(bytes: &[u8], material: Option<&respire_protocol::host_control::HostAuthSessionMaterial>)
+    -> Result<crate::memory::SessionKeys> {
+    let material = material.context("explicit host session material is required")?;
+    ensure!(digest(bytes) == material.session_sha256, "host session material digest changed");
+    factor_keys(&serde_json::from_slice(bytes)?, &material.factors)
+}
+
+fn request_candidate(params: &HostAuthLoginParams, record: &AuthRecord)
+    -> Result<Option<respire_protocol::host_control::HostAuthSessionMaterial>> {
+    use respire_protocol::host_control::{HostAuthSessionMaterial, HostAuthVaultFactors as Factors};
+    let Some(bytes) = record.candidate.as_deref() else { return Ok(None); };
+    let session: Value = serde_json::from_slice(bytes)?;
+    let input = params.continuation.as_ref();
+    let password = input.and_then(|input| input.legacy_password.as_ref()).or_else(|| match &params.authorization {
+        HostAuthAuthorization::Password { password, .. } => Some(password), _ => None });
+    let secret = input.and_then(|input| input.account_secret.as_ref());
+    let factors = match session["vault_version"].as_i64() {
+        Some(1) => Factors::V1 { password: password.context("explicit v1 password required")?.clone(),
+            account_secret: secret.context("explicit v1 Account Secret required")?.clone() },
+        Some(2) => Factors::V2 { super_password: params.super_password.clone().context("explicit super key required")? },
+        Some(3) => Factors::V3 { super_password: params.super_password.clone().context("explicit super key required")?,
+            secret_key: input.and_then(|input| input.secret_key.as_ref()).context("explicit v3 Secret Key required")?.clone() },
+        Some(4) => Factors::V4 { super_password: params.super_password.clone().context("explicit super key required")? },
+        _ => anyhow::bail!("unsupported login candidate vault version"),
+    };
+    Ok(Some(HostAuthSessionMaterial { session_sha256: digest(bytes), factors }))
+}
+
+fn reply(receipt: HostAuthAccountResult) -> respire_protocol::host_control::HostAuthLoginReply {
+    respire_protocol::host_control::HostAuthLoginReply { receipt, handoff: None }
+}
+
+pub(super) fn candidate_reply(record: &AuthRecord) -> Result<respire_protocol::host_control::HostAuthLoginReply> {
+    use respire_protocol::host_control::{HostAuthLoginHandoff, HostAuthLoginSlot};
+    let mut result = reply(account_result(record)?);
+    if record.phase == AuthPhase::Authorized && record.account.as_ref().and_then(|account| account.login.as_ref())
+        .is_some_and(|login| login.required_inputs.as_slice() == ["host_credentials"]) {
+        let session: Value = serde_json::from_slice(record.candidate.as_deref().context("login custody candidate missing")?)?;
+        let mut slots = if session["vault_version"] == 1 { vec![HostAuthLoginSlot::Pass] }
+            else { vec![HostAuthLoginSlot::Super] };
+        if matches!(session["vault_version"].as_i64(), Some(1 | 3)) { slots.push(HostAuthLoginSlot::LegacySecret); }
+        if record.account.as_ref().and_then(|account| account.login.as_ref()).is_some_and(|login| login.password_slot) {
+            if session["vault_version"] != 1 { slots.push(HostAuthLoginSlot::Pass); }
+        }
+        result.handoff = Some(HostAuthLoginHandoff::Credentials {
+            candidate_sha256: record.candidate_sha256.clone().context("login custody digest missing")?, session, slots });
+    }
+    Ok(result)
+}
+
+fn require_inputs(journal: &mut Journal, index: usize, inputs: &[&str]) -> Result<respire_protocol::host_control::HostAuthLoginReply> {
     progress(journal, index)?.required_inputs = inputs.iter().map(|input| (*input).to_owned()).collect();
     save_journal(journal)?;
-    account_result(&journal.operations[index])
+    Ok(reply(account_result(&journal.operations[index])?))
 }
 
 fn challenge_binding(record: &AuthRecord) -> Result<String> {
@@ -131,51 +238,27 @@ pub(super) fn verify_challenge(record: &AuthRecord, sha256: &str, payload: &str)
 }
 
 fn checkpoint_challenge(journal: &mut Journal, index: usize,
-    challenge: crate::auth::PasswordAuthorizationChallenge) -> Result<()> {
-    let record = &journal.operations[index];
-    ensure!(record.phase == AuthPhase::RemotePending, "challenge does not own a pending password step");
-    let payload = encode_challenge(record, challenge)?;
+    challenge: crate::auth::PasswordAuthorizationChallenge) -> Result<respire_protocol::host_control::HostAuthLoginHandoff> {
+    ensure!(journal.operations[index].phase == AuthPhase::RemotePending,
+        "challenge does not own a pending password step");
+    let payload = encode_challenge(&journal.operations[index], challenge)?;
     let sha256 = digest(payload.as_bytes());
-    let alias = record.alias.clone();
-    // A Windows journal may inherit its directory ACL. Keep the ticket itself
-    // in the existing persistent credential backend, never in that file.
-    let backend = crate::keystore::import_credential_checkpoint(&alias, "totp", &payload, |backend| {
-        require_persistent_auth_backend(backend)?;
-        let active = journal.active.as_mut().context("challenge recovery is missing")?;
-        ensure!(active.operation_id.as_deref() == Some(journal.operations[index].operation_id.as_str())
-            && active.alias == alias, "challenge recovery owner mismatch");
-        if !active.totp_backends.iter().any(|original| original == backend) {
-            active.totp_backends.push(backend.to_owned());
-        }
-        progress(journal, index)?.challenge = Some(ChallengeCheckpoint { backend: backend.to_owned(), sha256: sha256.clone() });
-        save_journal(journal)
-    })?;
-    ensure!(progress(journal, index)?.challenge.as_ref().is_some_and(|checkpoint|
-        checkpoint.backend == backend && checkpoint.sha256 == sha256), "challenge credential has no owned checkpoint");
+    progress(journal, index)?.challenge = Some(ChallengeCheckpoint { sha256: sha256.clone() });
     journal.operations[index].phase = AuthPhase::LoginInput;
     progress(journal, index)?.required_inputs = vec!["totp".to_owned()];
-    save_journal(journal)
+    save_journal(journal)?;
+    Ok(respire_protocol::host_control::HostAuthLoginHandoff::Challenge { payload, sha256 })
 }
 
-fn challenge_checkpoint(journal: &Journal, index: usize) -> Result<&ChallengeCheckpoint> {
+fn read_challenge(journal: &Journal, index: usize,
+    supplied: Option<&respire_protocol::host_control::HostAuthLoginChallenge>) -> Result<crate::auth::PasswordAuthorizationChallenge> {
     let record = &journal.operations[index];
     ensure!(record.phase == AuthPhase::LoginInput, "challenge is not awaiting input");
     let checkpoint = record.account.as_ref().and_then(|account| account.login.as_ref())
         .and_then(|login| login.challenge.as_ref()).context("challenge checkpoint is missing")?;
-    let active = journal.active.as_ref().context("challenge recovery is missing")?;
-    ensure!(active.operation_id.as_deref() == Some(record.operation_id.as_str()) && active.alias == record.alias
-        && active.totp_backends.contains(&checkpoint.backend), "challenge recovery owner mismatch");
-    require_persistent_auth_backend(&checkpoint.backend)?;
-    ensure!(checkpoint.sha256.len() == 64 && checkpoint.sha256.bytes().all(|byte|
-        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), "invalid challenge digest");
-    Ok(checkpoint)
-}
-
-fn read_challenge(journal: &Journal, index: usize) -> Result<crate::auth::PasswordAuthorizationChallenge> {
-    let checkpoint = challenge_checkpoint(journal, index)?;
-    let record = &journal.operations[index];
-    let payload = crate::keystore::read_imported(&record.alias, "totp", &checkpoint.backend)?;
-    verify_challenge(record, &checkpoint.sha256, &payload)
+    let supplied = supplied.context("host challenge material is required; original operation retained")?;
+    ensure!(supplied.sha256 == checkpoint.sha256, "host challenge digest changed");
+    verify_challenge(record, &checkpoint.sha256, &supplied.payload)
 }
 
 fn save_authorization(journal: &mut Journal, index: usize, mut authorization: Value) -> Result<()> {
@@ -190,7 +273,12 @@ fn save_authorization(journal: &mut Journal, index: usize, mut authorization: Va
 }
 
 pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
-    params: &HostAuthLoginParams) -> Result<HostAuthAccountResult> {
+    params: &HostAuthLoginParams) -> Result<respire_protocol::host_control::HostAuthLoginReply> {
+    let material = params.material.as_ref().context("login requires explicit host custody material")?;
+    ensure!(material.keyring_account.strip_prefix("login-").is_some_and(|suffix|
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())),
+        "invalid host login credential owner");
+    require_persistent_auth_backend(&material.keyring_backend)?;
     ensure!(params.schema_version == respire_protocol::HOST_AUTH_SCHEMA_V
         && params.binding.installation_root == ownership.root && params.binding.profile == ownership.profile,
         "login binding mismatch");
@@ -204,11 +292,15 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         false, addr, &params.user, Some((input.migrate_local, input.migrate_vault, input.offer_local_merge)))?;
     if journal.operations[index].account.as_ref().is_some_and(|account| account.login.is_none()) {
         // Legacy receipts are queryable, not an opportunity to attach new login effects.
-        return control_account_result(ownership, &params.identity, id, key);
+        let candidate = request_candidate(params, &journal.operations[index])?;
+        let receipt = control_account_result(ownership, &params.identity, id, key, candidate.as_ref())?;
+        return Ok(reply(receipt));
     }
     if !fresh && !matches!(journal.operations[index].phase, AuthPhase::Authorized | AuthPhase::LoginInput) {
         // A pending/unknown network request cannot be replayed by supplying new factors.
-        return control_account_result(ownership, &params.identity, id, key);
+        let candidate = request_candidate(params, &journal.operations[index])?;
+        let receipt = control_account_result(ownership, &params.identity, id, key, candidate.as_ref())?;
+        return Ok(reply(receipt));
     }
     if fresh {
         journal.operations[index].phase = AuthPhase::RemotePending;
@@ -224,7 +316,11 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         };
         match step {
             Ok(crate::auth::PasswordAuthorizationStep::Authorized(authorization)) => save_authorization(&mut journal, index, authorization)?,
-            Ok(crate::auth::PasswordAuthorizationStep::TotpRequired(challenge)) => checkpoint_challenge(&mut journal, index, challenge)?,
+            Ok(crate::auth::PasswordAuthorizationStep::TotpRequired(challenge)) => {
+                let handoff = checkpoint_challenge(&mut journal, index, challenge)?;
+                return Ok(respire_protocol::host_control::HostAuthLoginReply {
+                    receipt: account_result(&journal.operations[index])?, handoff: Some(handoff) });
+            },
             Err(error) => {
                 journal.operations[index].phase = AuthPhase::RemoteUnknown;
                 save_journal(&mut journal)?;
@@ -233,13 +329,14 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         }
     }
     if journal.operations[index].phase == AuthPhase::LoginInput {
-        challenge_checkpoint(&journal, index)?;
+        ensure!(journal.operations[index].account.as_ref().and_then(|account| account.login.as_ref())
+            .and_then(|login| login.challenge.as_ref()).is_some(), "challenge checkpoint missing");
         let HostAuthAuthorization::Password { totp, .. } = &params.authorization else {
             anyhow::bail!("the admitted password challenge cannot change authorization method");
         };
         let Some(code) = totp.as_deref() else { return require_inputs(&mut journal, index, &["totp"]); };
         if crate::auth::validate_totp_code(code).is_err() { return require_inputs(&mut journal, index, &["totp"]); }
-        let challenge = read_challenge(&journal, index)?;
+        let challenge = read_challenge(&journal, index, params.challenge.as_ref())?;
         journal.operations[index].phase = AuthPhase::RemotePending;
         progress(&mut journal, index)?.required_inputs.clear();
         save_journal(&mut journal)?;
@@ -274,16 +371,11 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             ensure!(params.super_password.is_none(), "v1 requires the original password and Account Secret, not a super key");
         }
         let Some(password) = password else { return require_inputs(&mut journal, index, &["legacy_password"]); };
-        let alias = local["keyring_account"].as_str().unwrap_or(&params.user).to_owned();
-        if let Some(secret) = session_legacy_secret(&local, &alias)? {
-            local[if version == 1 { "secret" } else { "secret_key" }] = json!(secret);
-        }
         if version == 1 && input.account_secret.as_deref().or(input.secret_key.as_deref()).is_none()
             && local["secret"].as_str().is_none() {
             return require_inputs(&mut journal, index, &["account_secret"]);
         }
-        if version != 1 && (params.super_password.as_deref().is_some_and(str::is_empty)
-            || params.super_password.is_none() && crate::keystore::load_super(&alias).is_none()) {
+        if version != 1 && params.super_password.as_deref().is_none_or(str::is_empty) {
             return require_inputs(&mut journal, index, &["super_password"]);
         }
         if version == 3 && input.secret_key.as_deref().or(input.account_secret.as_deref()).is_none()
@@ -311,26 +403,10 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         let target = login_directory(addr, &params.user)?;
         let mut local: Value = read_original(&target)?.map(|bytes| serde_json::from_slice(&bytes)).transpose()?.unwrap_or(json!({}));
         ensure!(local.is_object(), "target account session must be an object");
-        let alias = local["keyring_account"].as_str().unwrap_or(&params.user).to_owned();
-        if let Some(secret) = session_legacy_secret(&local, &alias)? {
-            local[if version == 1 { "secret" } else { "secret_key" }] = json!(secret);
-        }
         let super_password = if version == 1 { String::new() } else {
-            params.super_password.clone().or_else(|| crate::keystore::load_super(&alias)).unwrap_or_default()
+            params.super_password.clone().unwrap_or_default()
         };
         if version == 1 {
-            if authorized["pass"].as_str().is_none() {
-                let mut found = local["pass"].as_str().map(str::to_owned)
-                    .or_else(|| crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty()))
-                    .or_else(|| crate::keystore::load_login_pass(&alias));
-                if found.is_none() {
-                    if let Some(backend) = local["keyring_backend"].as_str() {
-                        found = Some(crate::keystore::read_imported_v1_password(&alias, backend)?);
-                    }
-                }
-                if let Some(found) = found { authorized["pass"] = json!(found); }
-            }
-            if authorized["secret"].as_str().is_none_or(|value| value.is_empty()) { authorized["secret"] = local["secret"].clone(); }
             let missing: Vec<_> = [("pass", "legacy_password"), ("secret", "account_secret")].iter()
                 .filter(|(field, _)| authorized[*field].as_str().is_none_or(|value| *field != "pass" && value.is_empty()))
                 .map(|(_, input)| *input).collect();
@@ -347,14 +423,15 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
-        match PreparedLogin::prepare_with_vault(addr, &authorized, super_password, vault, None) {
+        match PreparedLogin::prepare_candidate_with_material(addr, &authorized, super_password, vault, None,
+            false, false, None, material.target_original.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 let Some(rejected) = error.downcast_ref::<LocalKeyMaterialRejected>() else {
                     return Err(error);
                 };
                 reject_local_key_material(ownership, &mut journal, index, rejected, &config_before)?;
-                return account_result(&journal.operations[index]);
+                return Ok(reply(account_result(&journal.operations[index])?));
             }
         }
     };
@@ -374,12 +451,9 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         ensure!(!prepared_is_source, "source and destination are the same account; no migration needed");
         ensure!(!crate::service::off_mode(), "memory service is disabled; no local import was started");
         crate::service::ensure_writable()?;
-        let snapshot = match local_snapshot(input.source_secret.as_deref().filter(|value| !value.is_empty())) {
-            Ok(snapshot) => snapshot,
-            Err(error) if error.is::<crate::auth::SessionCredentialRequired>() =>
-                return require_inputs(&mut journal, index, &["source_secret"]),
-            Err(error) => return Err(error),
-        };
+        let source_bytes = read_original(&ownership.profile)?.context("original import source session missing")?;
+        let source_keys = supplied_keys(&source_bytes, material.source.as_ref())?;
+        let snapshot = crate::service::local_snapshot_with_keys(&source_keys)?;
         if let Some(original) = progress(&mut journal, index)?.snapshot.as_ref() {
             ensure!(original.sha256 == digest(snapshot.as_bytes()) && original.target == prepared.directory,
                 "admitted import source or destination changed; retain its original operation");
@@ -390,14 +464,48 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         progress(&mut journal, index)?.snapshot = Some(ImportSnapshot { target: prepared.directory.clone(),
             sha256: digest(snapshot.as_bytes()), nonce, ciphertext });
     }
+    prepared.alias = material.keyring_account.clone();
+    prepared.session["keyring_account"] = json!(material.keyring_account);
+    prepared.session["keyring_backend"] = json!(material.keyring_backend);
+    if prepared.legacy_secret.is_some() {
+        prepared.session["legacy_secret_backend"] = json!(material.keyring_backend);
+    }
+    let candidate_sha256 = digest(&serde_json::to_vec_pretty(&prepared.session)?);
+    bind_migration_auth(&mut journal.operations[index], &candidate_sha256,
+        prepared.migration_auth.as_ref(), params.custody_ack.is_some())?;
+    if let Some(ack) = &params.custody_ack {
+        ensure!(journal.operations[index].candidate_sha256.as_deref() == Some(ack.candidate_sha256.as_str())
+            && ack.candidate_sha256 == candidate_sha256,
+            "host custody acknowledgement does not match the original login candidate");
+    } else {
+        if let Some(original) = &journal.operations[index].candidate_sha256 {
+            ensure!(*original == candidate_sha256, "login custody candidate changed; original operation retained");
+        }
+        journal.operations[index].alias = material.keyring_account.clone();
+        journal.operations[index].backend = Some(material.keyring_backend.clone());
+        journal.operations[index].account.as_mut().context("login account missing")?.target = Some(prepared.directory.clone());
+        checkpoint_account_candidate(&mut journal, index, &prepared.session)?;
+        let original_target_key = prepared.original.as_deref().map(|bytes| -> Result<_> {
+            let keys = supplied_keys(bytes, material.target_original.as_ref())?;
+            Ok((digest(bytes), digest(&keys.urk)))
+        }).transpose()?;
+        let login = progress(&mut journal, index)?;
+        login.original_target_key = original_target_key;
+        login.password_slot = prepared.login_password.is_some();
+        login.required_inputs = vec!["host_credentials".to_owned()];
+        save_journal(&mut journal)?;
+        return candidate_reply(&journal.operations[index]);
+    }
     let login = progress(&mut journal, index)?;
     login.required_inputs.clear();
+    login.password_slot = prepared.login_password.is_some();
     login.migration_cloud = prepared.migration_cloud.clone();
     login.migration_salt = prepared.migration_auth.as_ref().and_then(|auth| auth["salt"].as_str()).map(str::to_owned);
     save_journal(&mut journal)?;
     commit_account(ownership, &mut journal, index, &mut prepared)?;
-    resume_import(ownership, &mut journal, index)?;
-    account_result(&journal.operations[index])
+    let candidate = request_candidate(params, &journal.operations[index])?;
+    resume_import(ownership, &mut journal, index, candidate.as_ref())?;
+    Ok(reply(account_result(&journal.operations[index])?))
 }
 
 pub(super) fn reject_local_key_material(ownership: &AuthOwnership, journal: &mut Journal,
@@ -473,7 +581,23 @@ impl crate::sync::SyncControl for ImportSyncControl {
     }
 }
 
-pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, index: usize) -> Result<()> {
+fn install_candidate_runtime(record: &AuthRecord, candidate: &respire_protocol::host_control::HostAuthSessionMaterial) -> Result<()> {
+    use respire_protocol::host_control::HostAuthVaultFactors as Factors;
+    let (super_password, login_password, legacy_secret) = match &candidate.factors {
+        Factors::V1 { password, account_secret } => (None, Some(password.clone()), Some(account_secret.clone())),
+        Factors::V2 { super_password } | Factors::V4 { super_password } => (Some(super_password.clone()), None, None),
+        Factors::V3 { super_password, secret_key } => (Some(super_password.clone()), None, Some(secret_key.clone())),
+    };
+    crate::auth::supply_runtime_session(respire_protocol::credentials::RuntimeUnlock {
+        schema_version: respire_protocol::credentials::CREDENTIAL_SCHEMA_V,
+        profile: record.account.as_ref().and_then(|account| account.target.clone()).context("import target missing")?,
+        session_sha256: candidate.session_sha256.clone(), instance_id: record.operation_id.clone(), generation: 0,
+        super_password, login_password, legacy_secret, provider_credentials: Vec::new(),
+    })
+}
+
+pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, index: usize,
+    candidate: Option<&respire_protocol::host_control::HostAuthSessionMaterial>) -> Result<()> {
     let record = &journal.operations[index];
     let Some(login) = record.account.as_ref().and_then(|account| account.login.as_ref()) else { return Ok(()); };
     if !login.imports_local() || login.import.is_some() && login.sync.is_some()
@@ -483,9 +607,10 @@ pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, in
     ensure!(crate::service::data_dir().canonicalize()? == target_identity, "import selection changed");
     let _target_lock = if target_identity == ownership.root || target_identity == ownership.profile { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
-    account_material_keys(record, true)?;
+    account_material_keys(record, true, candidate)?;
+    install_candidate_runtime(record, candidate.context("explicit import candidate required")?)?;
     if login.import.is_none() {
-    let keys = account_material_keys(record, true)?;
+    let keys = account_material_keys(record, true, candidate)?;
     let snapshot = login.snapshot.as_ref().context("admitted encrypted import snapshot missing")?;
     ensure!(snapshot.target == target, "admitted import destination changed");
     let bytes = crate::memory::crypto::decrypt_bytes(&import_key(&keys, record, &target)?, &snapshot.ciphertext, &snapshot.nonce)?;
@@ -522,7 +647,7 @@ pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, in
     if let Err(error) = before {
         if first_sync && empty_target && !control.remote_effect_possible.get() {
             progress(journal, index)?.sync = Some(json!({"status":"failed","reason":"target_sync_failed_before_copying"}));
-            rollback_import_before_copy(ownership, journal, index, _target_lock, original_material?.as_deref())
+            rollback_import_before_copy(ownership, journal, index, _target_lock, original_material?.as_deref(), candidate)
                 .context("target sync failed before copying; compensation unconfirmed; retain the original operation")?;
             return Ok(());
         }
@@ -544,7 +669,7 @@ pub(super) fn resume_import(ownership: &AuthOwnership, journal: &mut Journal, in
 }
 
 /// Only the Verified completion callback may publish legacy cloud mutations.
-pub(super) fn finish_migration(journal: &mut Journal, index: usize) -> Result<()> {
+pub(super) fn finish_migration(journal: &mut Journal, index: usize, password: Option<&str>) -> Result<()> {
     reconcile_publication(journal, index)?;
     let record = &journal.operations[index];
     let Some(login) = record.account.as_ref().and_then(|account| account.login.as_ref()) else { return Ok(()); };
@@ -553,12 +678,18 @@ pub(super) fn finish_migration(journal: &mut Journal, index: usize) -> Result<()
     let authorized = account.authorization.clone().context("migration authorization missing")?;
     let addr = account.addr.clone();
     let session: Value = serde_json::from_slice(record.candidate.as_deref().context("migration candidate missing")?)?;
-    let backend = journal.active.as_ref().filter(|active| active.operation_id.as_deref() == Some(record.operation_id.as_str()))
-        .and_then(|active| active.pass_backends.last()).context("migration password checkpoint missing")?;
-    let password = crate::keystore::read_imported(&record.alias, "pass", backend)?;
-    let migration_auth = login.migration_salt.as_ref().filter(|_| !login.password_done).map(|salt| -> Result<Value> {
-        Ok(json!({"salt":salt,"pass_hash":crate::memory::crypto::derive_pass_hash(&password, salt)?}))
-    }).transpose()?;
+    let password = password.context("explicit host migration password is required")?;
+    let migration_auth = if login.password_done { None } else {
+        let salt = login.migration_salt.as_ref().context("original migration authentication salt is missing")?;
+        Some(json!({"salt":salt,"pass_hash":crate::memory::crypto::derive_pass_hash(password, salt)?}))
+    };
+    if let Some(authentication) = &migration_auth {
+        let original = login.migration_auth_sha256.as_deref()
+            .context("host_recovery_required: original migration authentication evidence is missing")?;
+        let candidate_sha256 = record.candidate_sha256.as_deref().context("migration candidate digest missing")?;
+        ensure!(migration_auth_digest(record, candidate_sha256, authentication)? == original,
+            "migration password differs from the confirmed login material; no publication attempted");
+    }
     let prepared = PreparedLogin { user: account.user.clone(), directory: account.target.clone().context("migration target missing")?,
         original: None, session, super_password: String::new(), login_password: None, legacy_secret: None, alias: record.alias.clone(),
         recovery_written: false, migration_cloud: if login.vault_done { None } else { login.migration_cloud.clone() }, migration_auth };
