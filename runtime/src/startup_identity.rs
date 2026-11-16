@@ -1351,7 +1351,7 @@ mod tests {
             target_profile: Some(context.root.join("accounts/fivekeys-fixture")),
             account_id: Some(hash(b"fivekeys-fixture")), session_sha256: Some("f".repeat(64)),
             identity: respire_protocol::HostAuthIdentity::Bound { account_id: hash(b"fivekeys-fixture"), session_sha256: "f".repeat(64) },
-            required_inputs: Vec::new(), verification_required: true, super_password: None };
+            required_inputs: Vec::new(), verification_required: true, super_password: None, challenge: None };
         let mut target = context.clone();
         target.profile = key_receipt.target_profile.clone().context("fivekeys target missing")?;
         target.account_id = hash(b"fivekeys-fixture");

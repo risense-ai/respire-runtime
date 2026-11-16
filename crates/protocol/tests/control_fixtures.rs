@@ -120,6 +120,23 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     ] {
         let parsed: respire_protocol::host_control::HostAuthVaultFactors = serde_json::from_value(factors.clone())?;
         assert_eq!(serde_json::to_value(parsed)?, factors);
+        let snapshot = json!({
+            "schema_version":1,"binding":params.binding,"operation_id":"fixture-operation",
+            "request_fingerprint":"d".repeat(64),"sync_generation":0,"snapshot_id":"fixture-snapshot",
+            "action":"restore","material":{"session_sha256":"a".repeat(64),"factors":factors},
+        });
+        let parsed: respire_protocol::maintenance_control::MaintenanceControlParams =
+            serde_json::from_value(snapshot.clone())?;
+        assert_eq!(serde_json::to_value(&parsed)?, snapshot);
+        assert!(!format!("{parsed:?}").contains("fixture-super"));
+        assert!(!format!("{parsed:?}").contains("fixture-pass"));
+        assert!(!format!("{parsed:?}").contains("fixture-secret"));
+        let mut unknown_snapshot = snapshot.clone();
+        unknown_snapshot["material"]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlParams>(unknown_snapshot).is_err());
+        let mut missing_snapshot = snapshot;
+        missing_snapshot["material"].as_object_mut().context("snapshot material is an object")?.remove("session_sha256");
+        assert!(serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlParams>(missing_snapshot).is_err());
         let mut unknown = factors.clone();
         unknown["unexpected"] = json!(true);
         assert!(serde_json::from_value::<respire_protocol::host_control::HostAuthVaultFactors>(unknown).is_err());
@@ -136,6 +153,22 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     let mut unknown = query;
     unknown["verified"] = json!(true);
     assert!(serde_json::from_value::<HostAuthAccountParams>(unknown).is_err());
+    let key_input = json!({"password":null,"super_password":null,"account_secret":null,"totp":null,
+        "material":{"keyring_account":"fixture-key","keyring_backend":"native",
+            "reset":auth["material"],"challenge":"private-key-continuation"}});
+    let parsed: respire_protocol::key_control::HostKeyInput = serde_json::from_value(key_input.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, key_input);
+    for field in ["keyring_account", "keyring_backend"] {
+        let mut missing = key_input.clone();
+        missing["material"].as_object_mut().context("key material is an object")?.remove(field);
+        assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(missing).is_err());
+    }
+    let mut unknown = key_input.clone();
+    unknown["material"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(unknown).is_err());
+    let mut unknown = key_input;
+    unknown["material"]["reset"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(unknown).is_err());
     Ok(())
 }
 
