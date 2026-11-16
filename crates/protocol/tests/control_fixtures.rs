@@ -96,6 +96,38 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     object.insert("super_password".into(), json!("recovery-code"));
     let parsed: HostAuthLoginParams = serde_json::from_value(login.clone())?;
     assert_eq!(serde_json::to_value(parsed)?, login);
+    let mut prepared_login = login.clone();
+    prepared_login["material"] = json!({
+        "keyring_account":"login-fixture", "keyring_backend":"native",
+        "source":{"session_sha256":"a".repeat(64),
+            "factors":{"version":"v1","password":"","account_secret":"fixture-source-secret"}},
+        "target_original":null,
+    });
+    prepared_login["challenge"] = json!({"payload":"private-bound-challenge","sha256":"b".repeat(64)});
+    prepared_login["custody_ack"] = json!({"candidate_sha256":"c".repeat(64)});
+    let parsed: HostAuthLoginParams = serde_json::from_value(prepared_login.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, prepared_login);
+    for field in ["material", "challenge", "custody_ack"] {
+        let mut unknown = prepared_login.clone();
+        unknown[field]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<HostAuthLoginParams>(unknown).is_err());
+    }
+    for factors in [
+        json!({"version":"v1","password":"fixture-pass","account_secret":"fixture-secret"}),
+        json!({"version":"v2","super_password":"fixture-super"}),
+        json!({"version":"v3","super_password":"fixture-super","secret_key":"fixture-secret"}),
+        json!({"version":"v4","super_password":"fixture-super"}),
+    ] {
+        let parsed: respire_protocol::host_control::HostAuthVaultFactors = serde_json::from_value(factors.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, factors);
+        let mut unknown = factors.clone();
+        unknown["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<respire_protocol::host_control::HostAuthVaultFactors>(unknown).is_err());
+        let required = if factors["version"] == "v1" { "account_secret" } else { "super_password" };
+        let mut missing = factors;
+        missing.as_object_mut().context("vault factors are an object")?.remove(required);
+        assert!(serde_json::from_value::<respire_protocol::host_control::HostAuthVaultFactors>(missing).is_err());
+    }
     login["authorization"]["exec"] = json!(true);
     assert!(serde_json::from_value::<HostAuthLoginParams>(login).is_err());
     let query = json!({"schema_version":1,"binding":params.binding,"identity":{"kind":"absent"}});

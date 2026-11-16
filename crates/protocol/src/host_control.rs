@@ -180,6 +180,74 @@ pub enum HostAuthAuthorization {
     Browser { token: String, session_id: Option<String> },
 }
 
+/// Historical vault factors supplied explicitly by the host for one exact session.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "version", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostAuthVaultFactors {
+    V1 { password: String, account_secret: String },
+    V2 { super_password: String },
+    V3 { super_password: String, secret_key: String },
+    V4 { super_password: String },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthSessionMaterial {
+    pub session_sha256: String,
+    pub factors: HostAuthVaultFactors,
+}
+
+/// Host custody is acknowledged over private RPC; Runtime must never access its store.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginMaterial {
+    pub keyring_account: String,
+    pub keyring_backend: String,
+    pub source: Option<HostAuthSessionMaterial>,
+    pub target_original: Option<HostAuthSessionMaterial>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginChallenge {
+    pub payload: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginCustodyAck {
+    pub candidate_sha256: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAuthLoginSlot {
+    Super,
+    Pass,
+    LegacySecret,
+}
+
+/// The host consumes this handoff before exposing the public account receipt.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostAuthLoginHandoff {
+    Challenge { payload: String, sha256: String },
+    Credentials {
+        candidate_sha256: String,
+        session: serde_json::Value,
+        slots: Vec<HostAuthLoginSlot>,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthLoginReply {
+    pub receipt: HostAuthAccountResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<HostAuthLoginHandoff>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostAuthLoginParams {
@@ -193,6 +261,13 @@ pub struct HostAuthLoginParams {
     pub super_password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<HostAuthLoginContinuation>,
+    /// The executor requires explicit host custody; absence never enables broker access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<HostAuthLoginMaterial>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<HostAuthLoginChallenge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_ack: Option<HostAuthLoginCustodyAck>,
 }
 
 /// Supplemental input travels on the inherited channel; never journal this object.
@@ -236,6 +311,12 @@ pub struct HostAuthAccountParams {
     pub schema_version: u32,
     pub binding: ControlBinding,
     pub identity: HostAuthIdentity,
+    /// Login candidate verification uses explicit factors, never a host credential lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<HostAuthSessionMaterial>,
+    /// The host supplies this only when finalizing an authorized legacy vault migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_password: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
