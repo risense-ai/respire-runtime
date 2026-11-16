@@ -101,6 +101,20 @@ jobs:
           node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
       - name: Check current Runtime libraries and binaries
         run: cargo check --workspace --lib --bins --locked
+      - name: Detect affected authentication unit tests
+        id: auth-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- crates/app/src/login_transaction.rs crates/app/src/login_transaction crates/app-domain/src/auth.rs crates/app-domain/src/credential_io.rs crates/app-domain/src/keystore.rs | grep -q .; then
+            echo 'required=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'required=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run affected authentication recovery unit tests
+        if: steps.auth-tests.outputs.required == 'true'
+        run: cargo test --locked -p respire_app --lib login_transaction::tests:: -- --test-threads=1
 
   ci-complete:
     if: always()
