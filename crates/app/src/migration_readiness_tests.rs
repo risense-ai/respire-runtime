@@ -79,7 +79,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(rows: &[(&str, bool, bool)]) -> Result<Self> {
-        let home = tempfile::tempdir()?;
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
         let source = home.path().join(".onememory");
         private_directory(&source)?;
         let user = "synthetic-migration-readiness";
