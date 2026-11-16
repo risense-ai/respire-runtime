@@ -9,7 +9,7 @@ on:
         description: Runner for targeted source tests; native product acceptance remains post-release
         type: choice
         default: ubuntu-latest
-        options: [ubuntu-latest, windows-latest]
+        options: [ubuntu-latest, windows-latest, macos-latest]
   push:
     branches: [main, 'release/**']
   pull_request:
