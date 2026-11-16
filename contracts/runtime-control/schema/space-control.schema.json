@@ -316,6 +316,16 @@
               "type": "null"
             }
           ]
+        },
+        "material": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/hostMaterial"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -751,6 +761,40 @@
         },
         "ledger": {},
         "progress": {}
+      },
+      "additionalProperties": false
+    },
+    "hostMaterial": {
+      "type": "object",
+      "required": [
+        "super_password",
+        "keyring_account",
+        "keyring_backend"
+      ],
+      "properties": {
+        "super_password": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keyring_account": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keyring_backend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "legacy_secret": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       },
       "additionalProperties": false
     }

@@ -297,8 +297,8 @@ mod endpoint_publication_tests {
     #[test]
     fn clean_stop_uses_current_generation_and_rejects_changed_evidence() -> Result<()> {
         for change in ["none", "old-generation", "foreign-instance", "bytes", "claim", "owner"] {
-            let directory = tempfile::tempdir()?;
-            let other = tempfile::tempdir()?;
+            let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
+            let other = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
             let owner = respire_app::lock::LibraryLock::acquire(directory.path(), Duration::from_secs(1))?;
             let wrong_owner = respire_app::lock::LibraryLock::acquire(other.path(), Duration::from_secs(1))?;
             let path = directory.path().join("endpoint.json");
@@ -341,7 +341,7 @@ mod endpoint_publication_tests {
     #[cfg(unix)]
     #[test]
     fn clean_stop_does_not_follow_endpoint_symlink() -> Result<()> {
-        let directory=tempfile::tempdir()?;
+        let directory=tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
         let owner=respire_app::lock::LibraryLock::acquire(directory.path(),Duration::from_secs(1))?;
         let target=directory.path().join("foreign.json");
         let path=directory.path().join("endpoint.json");
@@ -360,8 +360,8 @@ mod endpoint_publication_tests {
     #[test]
     fn failed_start_revokes_only_unchanged_owned_publication() -> Result<()> {
         for change in ["none", "no-claim", "bytes", "claim", "missing-claim", "new-claim", "path", "receipt-path", "lock", "missing"] {
-            let directory = tempfile::tempdir()?;
-            let other = tempfile::tempdir()?;
+            let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
+            let other = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
             let owner = respire_app::lock::LibraryLock::acquire(directory.path(), Duration::from_secs(1))?;
             let wrong_owner = respire_app::lock::LibraryLock::acquire(other.path(), Duration::from_secs(1))?;
             let path = directory.path().join("endpoint.json");
@@ -411,7 +411,7 @@ mod endpoint_publication_tests {
 
     #[test]
     fn failed_start_retains_endpoint_on_any_identity_change() -> Result<()> {
-        let directory = tempfile::tempdir()?;
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
         let owner = respire_app::lock::LibraryLock::acquire(directory.path(), Duration::from_secs(1))?;
         let path = directory.path().join("endpoint.json");
         let receipt = directory.path().join("launch.claimed");

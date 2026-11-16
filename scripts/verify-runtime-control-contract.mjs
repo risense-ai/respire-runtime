@@ -1186,6 +1186,13 @@ function spaceFailure(p) {
   let a;
   try { a = JSON.parse(q.args[0]); } catch { return "space_params_invalid"; }
   if (!spaceValid(a, "params")) return "space_params_invalid";
+  if (a.operation.kind === "kick") {
+    if (a.material != null || a.invite_code != null) return "space_params_invalid";
+  } else if (!a.material || typeof a.material.super_password !== "string" || !a.material.super_password.length ||
+      typeof a.material.keyring_account !== "string" || !/^login-[A-Za-z0-9-]*$/.test(a.material.keyring_account) ||
+      a.material.keyring_account.length > 128 || !["native", "secret_service"].includes(a.material.keyring_backend)) {
+    return "space_params_invalid";
+  }
   if (q.method !== "control.space.result" && q.method !== `control.space.${a.operation.kind}`) return "space_method_mismatch";
   const r = p.result, c = p.space_context, op = a.operation;
   if (!spaceValid(r, "result")) return "space_result_invalid";
@@ -1231,7 +1238,8 @@ function spaceFailure(p) {
       ["remote_pending", "unknown"].includes(old.state) && r.kick[i].state !== "unknown")) return "space_remote_replay";
   } else {
     if ([r.target_profile, r.target_account_id, r.target_session_sha256].some(v => v !== null) || r.kick.length) return "space_result_invalid";
-    if (r.outcome === "committed") {
+    if (r.outcome === "committed" || r.outcome === "pending" && r.invite_code !== null) {
+      if (r.outcome === "pending" && (c.journal_phase !== "authorized" || q.method === "control.space.result")) return "space_result_invalid";
       try {
         const code = JSON.parse(Buffer.from(r.invite_code.slice(12), "hex").toString("utf8"));
         if (!r.invite_code.startsWith("1mem-invite:") || code.session_id !== r.session_id ||
@@ -1260,6 +1268,27 @@ for (const [group, count] of [["positive", 7], ["negative", 24]]) {
     if (group === "positive" && !hostSchemaValid(f, spaceSchema, spaceSchema.$defs)) fail(`invalid space container: ${name}`);
     const actual = spaceFailure(f.payload), expected = group === "positive" ? null : f.error_code;
     if (actual !== expected) fail(`${name}: space rejection ${actual}, expected ${expected}`);
+    if (group === "positive") {
+      const missing = structuredClone(f.payload), args = JSON.parse(missing.request.args[0]);
+      if (args.operation.kind !== "kick") {
+        delete args.material;
+        missing.request.args[0] = JSON.stringify(args);
+        if (spaceFailure(missing) !== "space_params_invalid") fail(`${name}: host material must be required`);
+      }
+      if (args.operation.kind === "invite" && f.payload.result.outcome === "committed") {
+        const pending = structuredClone(f.payload);
+        pending.space_context.journal_phase = "authorized";
+        pending.result.outcome = "pending";
+        pending.result.remaining = null;
+        pending.private_response.status = "pending";
+        pending.private_response.summary = structuredClone(pending.result);
+        pending.finish_maintenance = false;
+        for (const key of ["ledger", "progress"]) if (pending[key]) pending[key].outcome = "pending";
+        if (spaceFailure(pending) !== null) fail(`${name}: private host persistence handshake rejected`);
+        pending.request.method = "control.space.result";
+        if (spaceFailure(pending) !== "space_result_invalid") fail(`${name}: query exposed unpersisted code`);
+      }
+    }
   }
 }
 console.log(`runtime control contract verified: ${boundPaths.size} bound files (624 prior bindings retained with schema/consumer digest updates; 6 positive / 14 negative AgentConfig cases; prior cohorts retained)`);

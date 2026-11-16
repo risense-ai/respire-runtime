@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod maintenance_control;
 pub mod host_control;
+pub mod host_plugin;
 pub mod model_control;
 pub mod secret_control;
 pub mod config_control;
@@ -28,7 +29,7 @@ pub use maintenance_control::{
 pub use metadata_control::SnapshotPreflightPayload;
 pub use model_control::{HostModelParams, ModelInstallIntent, ModelPreparation, HOST_MODEL_SCHEMA_V};
 pub use host_control::{
-    HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
+    HostAuthIdentity, HostAuthKeygenMaterial, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
     HOST_AUTH_SCHEMA_V, HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
     ControlBinding, HostControlLaunchGrant, HostControlMaintenanceBinding,
     HostControlOperation, HostControlParams,

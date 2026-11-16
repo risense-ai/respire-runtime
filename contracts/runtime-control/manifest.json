@@ -1928,23 +1928,23 @@
     },
     {
       "path": "schema/space-control.schema.json",
-      "sha256": "e71a2a3eaa439433f140418b206b2c2f035d9a5015aaeffd2b18d2a68b0ad725"
+      "sha256": "3755d4564ccf1968684d9a40a85dcd07ff64664edce64944bed259d0b059bb5f"
     },
     {
       "path": "fixtures/positive/space-invite-private.json",
-      "sha256": "e62d7d240b696125d598f09eba733422e1b6136c3835f9ff525418672dd50fbe"
+      "sha256": "9f951bb3584cc36ccf639b8a973855d2a44d3b017e56b17a07996a9e737f19b5"
     },
     {
       "path": "fixtures/positive/space-invite-unknown-query.json",
-      "sha256": "35ca094c3750d3644d99c33251b69ac37936f11ade116c872a0468cffb1991c7"
+      "sha256": "12d210b5e77d9dfa41935da9b77ef7529af78638bab97256dadfa6aa4a193240"
     },
     {
       "path": "fixtures/positive/space-join-readonly.json",
-      "sha256": "932cb112a54493d63ed761f65b418e5ef9f512224b829f3177623facd48554fc"
+      "sha256": "3d47fca3b68ce903951053e4399824af55006625ef864bf299080dc8bf01b284"
     },
     {
       "path": "fixtures/positive/space-join-pending.json",
-      "sha256": "60c0cb0d9621632c105ecd8845784f5b18812b76c23735c7b05fbca0716087b6"
+      "sha256": "5f181bcef9088e87a4d68a929006c2133ea562c537d9df5ce42e1a292e4a723c"
     },
     {
       "path": "fixtures/positive/space-kick-partial-query.json",
@@ -1956,35 +1956,35 @@
     },
     {
       "path": "fixtures/positive/space-rejected-query.json",
-      "sha256": "be923f3e5d0900b13c344fbf0b34db9f8848f39c6dd0c0b40721eaa815530591"
+      "sha256": "bc662d3baa6e48ec822ad5679563c8ca946dd4992326fef4f351e72c65aad722"
     },
     {
       "path": "fixtures/negative/space-public-http.json",
-      "sha256": "d84b4c0aee759099353dd3f938aae6730ed21ad3977fa71089dafc8ae99aae3b"
+      "sha256": "54570ea10a11470d50c4900370e6f38d3590047088c3f85704818014178022bb"
     },
     {
       "path": "fixtures/negative/space-public-result.json",
-      "sha256": "476d2b5e5b95e42b77d4b2f966b8ff069d9dab3562509a3d29923a54a11377e7"
+      "sha256": "4d8e02a2bc0aedc3c097df90a31fe4a80eab045a02ee3de93f9fbb2807e0f58a"
     },
     {
       "path": "fixtures/negative/space-secret-ledger.json",
-      "sha256": "67f2e7943ec748ec088129eda3fff7bac340c4a50f030aafead8a0c19c504914"
+      "sha256": "220927f62a6d9c36a08d38cff4ac910a97f915e9afa67721d564081de66b39dc"
     },
     {
       "path": "fixtures/negative/space-secret-progress.json",
-      "sha256": "b6be18738fe8a62d27e66b47e070af0ff94c111f9c4a72c76281e4163767102a"
+      "sha256": "deafdac5f3241e9a88851127e387c3b63804da9942b4c1d91fdd67f212611949"
     },
     {
       "path": "fixtures/negative/space-params-unknown.json",
-      "sha256": "cf3596b1d7a1db98572ac20da03c754a05a862344e0a6169626e87307f58454f"
+      "sha256": "5c3c1217e5ea53e2e11bad338a00cdb18117384914d2b050ac4c495dfa855877"
     },
     {
       "path": "fixtures/negative/space-result-unknown.json",
-      "sha256": "358fd5838618f51cfe86ca5eab897d89f43cedeaf768e9779dfdff0126d13729"
+      "sha256": "8961be85f63c7a9971d901925aeab8f6a9812d8845cc9ec71bf98ef6b55a7396"
     },
     {
       "path": "fixtures/negative/space-operation-unknown.json",
-      "sha256": "5b0b1d82a26af4e557ae3e61aef4eccec6a920eedbc5af65c5c383a09bdc1694"
+      "sha256": "827f53d6b32d424409642099d23e3254c729739b5851eae12cf313203c97f702"
     },
     {
       "path": "fixtures/negative/space-bad-operation-id.json",
@@ -2000,7 +2000,7 @@
     },
     {
       "path": "fixtures/negative/space-method-intent.json",
-      "sha256": "92c962ab21cd0a7b73e8d1006419d24cac2c669f655a2505fec2893a6aa10f06"
+      "sha256": "ffca334e4e56305987d47ce7788044134c0ec3bd286976ae4b15e64a3d662d15"
     },
     {
       "path": "fixtures/negative/space-wrong-key-recovery.json",
@@ -2016,19 +2016,19 @@
     },
     {
       "path": "fixtures/negative/space-join-code-intent.json",
-      "sha256": "3db2dacbf547c73b249a1e2fe3b34a88d336518c00732b8415fe501398e47bc5"
+      "sha256": "3338004d5b5cb7e29056f28908cb1054f7331fda88a0bfdac6c393d8f8e7db04"
     },
     {
       "path": "fixtures/negative/space-join-switch.json",
-      "sha256": "312b244ceefdcc3e002545667e72eaaa2d27f0c246b857bb45a02b2108620096"
+      "sha256": "85467879fd168bfa855c9f9d28a8a62347b198cf4eb288b5cd84713c3d0c81e0"
     },
     {
       "path": "fixtures/negative/space-join-readonly-gate.json",
-      "sha256": "6412c8a06e856407a2a5c2296f7ec68d880db25d62c86649efee58da6475e6da"
+      "sha256": "ecd453bf9a9d5b6efdce9c1d6902e3d25601fd79887eb26e178b796e8ac73362"
     },
     {
       "path": "fixtures/negative/space-join-session-digest.json",
-      "sha256": "706019a49e0b1f864078fe4acbd42c7043db37d5130c321400e395bfcbd8e6a8"
+      "sha256": "0994eb8c2ed20c578b593849d76bdea9d331ae61306369dc35b6724d0358a91f"
     },
     {
       "path": "fixtures/negative/space-kick-dropped-partial.json",
@@ -2052,11 +2052,11 @@
     },
     {
       "path": "fixtures/negative/space-pending-private-secret.json",
-      "sha256": "922e0301152f32abbdeede5ad3ea112afe165132eadf7e4c17a5311efc7e2557"
+      "sha256": "7505b4119f8343490ffadbe59a981bac7272f7dbdea12d7b72d748fc6d204f60"
     },
     {
       "path": "consumers/space_control.rs",
-      "sha256": "471cebc05256235dceb0402affe757af2b9501a0344eb686e617b0266e95c2ba"
+      "sha256": "0c35b2cba0d6d793ad6382068e7c0bc214200d190cae7e751b69ba5b148d24e0"
     },
     {
       "path": "fixtures/positive/host-profile-first-commit.json",

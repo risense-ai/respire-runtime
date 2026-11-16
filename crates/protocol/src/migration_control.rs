@@ -37,11 +37,36 @@ pub struct HostMigrationParams {
     pub binding: ControlBinding,
     pub identity: HostAuthIdentity,
     pub original: HostMigrationOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<HostMigrationMaterial>,
+}
+
+/// Ephemeral factors and custody acknowledgement, excluded from durable intent identity.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostMigrationMaterial {
+    pub candidates: Vec<crate::host_control::HostAuthSessionMaterial>,
+    pub custody: Option<HostMigrationCustody>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostMigrationCustody {
+    pub keyring_account: String,
+    pub keyring_backend: String,
+    pub legacy_secret_backend: Option<String>,
+    pub login_password_retained: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HostMigrationOutcome { Completed, AlreadyMigrated, Unknown }
+pub enum HostMigrationOutcome {
+    Completed,
+    AlreadyMigrated,
+    Unknown,
+    /// Private intermediate response; the host must supply custody before completion.
+    CredentialsRequired,
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

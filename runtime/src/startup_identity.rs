@@ -172,7 +172,7 @@ pub(crate) fn verify_login_recovery_status(
         _ => None,
     };
     validate_control_binding(&params.binding, &context, grant, account)?;
-    respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, &params.identity)
+    respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, &params.identity)
 }
 
 pub(crate) fn authorize_account_completion(grant: LaunchGrant) -> Result<()> {
@@ -282,6 +282,23 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     Ok(())
 }
 
+/// Keygen authenticates its candidate using explicit host material, never a credential broker.
+pub(crate) fn verify_keygen_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    verify_managed_boot()
+}
+
 pub(crate) fn verify_auth_control_binding(
     binding: &respire_protocol::ControlBinding,
     identity: &respire_protocol::HostAuthIdentity,
@@ -289,7 +306,24 @@ pub(crate) fn verify_auth_control_binding(
     let startup = STARTUP.get().context("runtime control grant is not consumed")?;
     let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
-    respire_app::login_transaction::verify_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    verify_managed_boot()
+}
+
+/// Host-owned registration verifies the source receipt without reopening credential custody.
+pub(crate) fn verify_registration_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
     let account = match identity {
         respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
         _ => None,
@@ -333,7 +367,7 @@ pub(crate) fn verify_key_control_result(
     verify_authority_for_mode(Some(grant), &startup.context, startup.paused_control)?;
     let current = current_context(startup.context.port)?;
     validate_key_result_context(&startup.context, launched_identity, &current, result)?;
-    respire_app::login_transaction::verify_auth_identity(&current.root, &current.profile, &result.identity)
+    respire_app::login_transaction::verify_locked_auth_identity(&current.root, &current.profile, &result.identity)
 }
 
 fn validate_key_result_context(original: &LaunchContext, launched_identity: &respire_protocol::HostAuthIdentity,
@@ -398,7 +432,7 @@ pub(crate) fn verify_identity_write_result(
     validate_control_binding(binding, &startup.context, grant, original_account)?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
     verify_authority_for_mode(Some(grant), &startup.context, true)?;
-    respire_app::login_transaction::verify_auth_identity(
+    respire_app::login_transaction::verify_locked_auth_identity(
         &startup.context.root, &startup.context.profile, &result.identity,
     )?;
     validate_identity_write_context(&startup.context, launched_identity,
@@ -1160,6 +1194,8 @@ mod tests {
         request.operation_id = None;
         request.method = "control.arbitrary".into();
         assert!(crate::host_control::validate_request(&request).is_err());
+        request.method = respire_protocol::model_maintenance::MODEL_MAINTENANCE_METHOD.into();
+        assert!(crate::host_control::validate_request(&request).is_err());
         request.method = respire_protocol::HostControlOperation::MemoryRevision.method().into();
         request.args = vec![serde_json::to_string(&params)?];
         request.scope = Some(respire_protocol::RuntimeRequestScope {
@@ -1182,15 +1218,14 @@ mod tests {
             "method": respire_protocol::secret_control::HOST_SECRET_READ_METHOD,
             "args": [serde_json::to_string(&secret_params)?],
         }))?;
-        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_ok());
         assert!(crate::host_control::validate_request(&secret_request).is_err());
         secret_request.operation_id = Some(grant.instance_id.clone());
-        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_err());
+        assert!(crate::host_control::validate_request(&secret_request).is_err());
         secret_request.operation_id = None;
         let mut extra = serde_json::to_value(&secret_params)?;
         extra["unexpected"] = json!(true);
         secret_request.args = vec![serde_json::to_string(&extra)?];
-        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_err());
+        assert!(crate::host_control::validate_request(&secret_request).is_err());
         let sessions = respire_protocol::identity_control::HostIdentitySessionListParams {
             schema_version: respire_protocol::identity_control::HOST_IDENTITY_SCHEMA_V,
             binding: binding.clone(),
@@ -1235,7 +1270,7 @@ mod tests {
             "method": respire_protocol::HOST_AUTH_KEYGEN_METHOD,
             "args": [serde_json::to_string(&respire_protocol::HostAuthKeygenParams {
                 schema_version: respire_protocol::HOST_AUTH_SCHEMA_V,
-                binding, identity: respire_protocol::HostAuthIdentity::Absent, force: false,
+                binding, identity: respire_protocol::HostAuthIdentity::Absent, force: false, material: None,
             })?],
         }))?;
         assert!(crate::host_control::validate_auth_request(&auth).is_ok());
@@ -1247,7 +1282,7 @@ mod tests {
             binding: params.binding.clone(),
             identity: respire_protocol::HostAuthIdentity::Absent,
             addr: "https://example.invalid".into(), user: "fixture-user".into(),
-            password: "fixture-only-password".into(), super_password: None,
+            password: "fixture-only-password".into(), super_password: None, material: None,
         })?];
         assert!(crate::auth_control::AccountRequest::parse(&account_request).is_ok());
         account_request.operation_id = None;
@@ -1316,7 +1351,7 @@ mod tests {
             target_profile: Some(context.root.join("accounts/fivekeys-fixture")),
             account_id: Some(hash(b"fivekeys-fixture")), session_sha256: Some("f".repeat(64)),
             identity: respire_protocol::HostAuthIdentity::Bound { account_id: hash(b"fivekeys-fixture"), session_sha256: "f".repeat(64) },
-            required_inputs: Vec::new(), verification_required: true, super_password: None };
+            required_inputs: Vec::new(), verification_required: true, super_password: None, challenge: None };
         let mut target = context.clone();
         target.profile = key_receipt.target_profile.clone().context("fivekeys target missing")?;
         target.account_id = hash(b"fivekeys-fixture");

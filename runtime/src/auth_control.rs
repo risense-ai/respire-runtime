@@ -66,6 +66,20 @@ impl AccountRequest {
         }
     }
 
+    /// Receipt operations inherit their original family; caller-controlled methods cannot relabel it.
+    pub(crate) fn is_host_registration(&self, request: &RpcRequest) -> Result<bool> {
+        match self {
+            Self::Register(_) => Ok(true),
+            Self::Login(_) => Ok(false),
+            Self::Result(_) | Self::Complete(_) | Self::Rollback(_) => {
+                login_transaction::is_registration_receipt(&self.binding().installation_root,
+                    &self.binding().profile,
+                    request.operation_id.as_deref().context("account operation ID is missing")?,
+                    request.idempotency_key.as_deref().context("account idempotency key is missing")?)
+            }
+        }
+    }
+
     /// Only completion may run alongside the receipt's verified target Runtime.
     pub(crate) fn is_completion(&self) -> bool { matches!(self, Self::Complete(_)) }
 

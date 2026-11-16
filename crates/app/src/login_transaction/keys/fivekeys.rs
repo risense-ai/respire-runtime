@@ -330,7 +330,7 @@ mod tests {
             let (intent, input, urk) = offline_kit(version)?;
             let config = std::fs::read(crate::service::client_config_path()).ok();
             let candidate = prepared(&intent, &input, None, None)?;
-            assert_eq!(candidate.directory, root);
+            assert_eq!(candidate.directory.canonicalize()?, root);
             assert_eq!(candidate.session["user"], "");
             assert_eq!(candidate.session["addr"], "");
             assert_eq!(candidate.session["vault_version"], version);
@@ -403,7 +403,7 @@ mod tests {
         drop(database);
         let database_before = std::fs::read(&database_path)?;
         let good = prepared(&intent, &input, None, None)?;
-        assert_eq!(good.directory, root);
+        assert_eq!(good.directory.canonicalize()?, root);
         let (wrong_intent, wrong_input, _) = offline_kit(4)?;
         assert!(prepared(&wrong_intent, &wrong_input, None, None).is_err());
         let mut online = intent.clone();
