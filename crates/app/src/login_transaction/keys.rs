@@ -406,6 +406,7 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
         super_password: if applied && matches!(op.operation, HostKeyOperation::SuperReset { .. }) {
             Some(crate::keystore::read_imported(&record.alias, "super", record.backend.as_deref().context("reset backend missing")?)?)
         } else { None },
+        challenge: None,
     })
 }
 

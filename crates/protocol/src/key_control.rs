@@ -30,6 +30,18 @@ pub struct HostKeyInput {
     pub super_password: Option<String>,
     pub account_secret: Option<String>,
     pub totp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<HostKeyMaterial>,
+}
+
+/// Private host custody metadata and replacement material, never a public receipt.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostKeyMaterial {
+    pub keyring_account: String,
+    pub keyring_backend: String,
+    pub reset: Option<crate::host_control::HostAuthKeygenMaterial>,
+    pub challenge: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -64,6 +76,9 @@ pub struct HostKeyResult {
     /// Pending until a trusted Runtime verifier completes the selected candidate.
     #[serde(default)]
     pub verification_required: bool,
-    /// Generated only by super-reset. Never copy to public progress or a ledger.
+    /// Private super-reset material. Never copy to public progress or a ledger.
     pub super_password: Option<String>,
+    /// Private challenge continuation; hosts must remove it from public receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<String>,
 }

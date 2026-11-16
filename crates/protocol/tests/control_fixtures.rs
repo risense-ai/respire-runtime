@@ -153,6 +153,22 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     let mut unknown = query;
     unknown["verified"] = json!(true);
     assert!(serde_json::from_value::<HostAuthAccountParams>(unknown).is_err());
+    let key_input = json!({"password":null,"super_password":null,"account_secret":null,"totp":null,
+        "material":{"keyring_account":"fixture-key","keyring_backend":"native",
+            "reset":auth["material"],"challenge":"private-key-continuation"}});
+    let parsed: respire_protocol::key_control::HostKeyInput = serde_json::from_value(key_input.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, key_input);
+    for field in ["keyring_account", "keyring_backend"] {
+        let mut missing = key_input.clone();
+        missing["material"].as_object_mut().context("key material is an object")?.remove(field);
+        assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(missing).is_err());
+    }
+    let mut unknown = key_input.clone();
+    unknown["material"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(unknown).is_err());
+    let mut unknown = key_input;
+    unknown["material"]["reset"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(unknown).is_err());
     Ok(())
 }
 
