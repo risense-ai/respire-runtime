@@ -672,16 +672,17 @@ mod tests {
         let source_kek = crate::memory::crypto::derive_kek(&source_password, &source_secret, &source_salt)?;
         let (source_nonce, source_wrap) = crate::memory::crypto::wrap_key(&crate::memory::crypto::generate_key(), &source_kek)?;
         let source_alias = format!("legacy-host-source-{}", uuid::Uuid::new_v4().simple());
-        let source_backend = crate::keystore::import_credential(&source_alias, "pass", &source_password)?;
+        // The host retains the account secret, while import still requires the user's original password.
         let source_legacy_backend = crate::keystore::import_credential(&source_alias, "legacy-secret", &source_secret)?;
         let source_bytes = serde_json::to_vec(&json!({"user":source_user,"addr":"https://source.invalid",
-            "vault_version":1,"keyring_account":source_alias,"keyring_backend":source_backend,
+            "vault_version":1,"keyring_account":source_alias,"keyring_backend":source_legacy_backend,
             "legacy_secret_backend":source_legacy_backend,
             "kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
         std::fs::write(root.join("session.json"), &source_bytes)?;
         let source_store = crate::transport::local::LocalStore::open(&crate::service::database_path(&root)?)?;
         source_store.meta_set("source_fixture", "existing-library")?;
         drop(source_store);
+        let source_database_before = std::fs::read(crate::service::database_path(&root)?)?;
         let source_identity = HostAuthIdentity::Bound { account_id: digest(source_user.as_bytes()), session_sha256: digest(&source_bytes) };
         let ownership = AuthOwnership::acquire(&root, &root)?;
         let same_id = uuid::Uuid::new_v4().to_string();
@@ -729,7 +730,7 @@ mod tests {
         assert_eq!(missing_source.outcome, HostAuthAccountOutcome::AwaitingInput);
         assert_eq!(missing_source.login.context("source input status missing")?.required_inputs, ["source_secret"]);
         assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
-        assert!(!crate::service::database_path(&root)?.exists());
+        assert_eq!(std::fs::read(crate::service::database_path(&root)?)?, source_database_before);
         import_params.continuation.as_mut().context("import input missing")?.source_secret = Some("synthetic-wrong-source-password".into());
         assert!(control_login(&ownership, &import_id, &import_id, &import_params).is_err());
         assert_eq!(std::fs::read(root.join("session.json"))?, source_bytes);
