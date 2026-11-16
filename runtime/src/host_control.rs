@@ -675,7 +675,7 @@ fn receive_and_execute(
         response.envelope = Some(ResultEnvelope::new("auth-account",
             if result.outcome == HostAuthAccountOutcome::AwaitingInput { Status::Pending }
             else if response.ok { Status::Ok } else { Status::Fail },
-            (if host_registration { serde_json::to_value(result) } else { serde_json::to_value(&reply) })
+            (if host_registration || result.login.is_none() { serde_json::to_value(result) } else { serde_json::to_value(&reply) })
                 .map_err(|_| ("account_outcome_unknown", "account receipt encoding failed"))?,
             Vec::new()));
         return Ok(());
