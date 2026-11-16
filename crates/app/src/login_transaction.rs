@@ -852,6 +852,8 @@ mod tests {
         assert_eq!(control_login(&ownership, &rollback_id, &rollback_id, &import_params)?.outcome,
             HostAuthAccountOutcome::RolledBack);
         assert_eq!(std::fs::read(recovery_path())?, terminal, "terminal query resumed import or authentication");
+        // The completed import fixture is separate from the following missing/invalid database cases.
+        std::fs::remove_file(crate::service::database_path(&root)?)?;
         // Exercise local rejection through the real prepare/login path, without remote requests.
         private_write(&root.join("session.json"), &old_bytes)?;
         let local_identity = HostAuthIdentity::Bound { account_id: digest(b"import-target"),
