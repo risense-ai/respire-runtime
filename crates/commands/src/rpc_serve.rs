@@ -691,6 +691,155 @@ pub fn sync_running() -> bool {
     SYNC_RUNNING.load(Ordering::Acquire)
 }
 
+// One in-flight background notification; the inherited pipe reader owns all acknowledgements.
+#[derive(Default)]
+pub(crate) struct HostPluginChannel {
+    state: Mutex<HostPluginState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct HostPluginState {
+    pending: Option<String>,
+    result: Option<respire_protocol::host_plugin::HostPluginEventResult>,
+    closed: Option<String>,
+}
+
+static HOST_PLUGIN_CHANNEL: OnceLock<Arc<HostPluginChannel>> = OnceLock::new();
+
+#[derive(Debug)]
+pub(crate) struct HostPluginFailure(pub(crate) anyhow::Error);
+
+impl std::fmt::Display for HostPluginFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for HostPluginFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
+}
+
+pub(crate) fn background_sync_retryable(error: &anyhow::Error) -> bool {
+    !error.is::<HostPluginFailure>() && crate::sync_flow::is_retriable_sync_error(error)
+}
+
+impl HostPluginChannel {
+    pub(crate) fn exchange(&self, send: impl FnOnce(&[u8]) -> Result<()>, pulled: u64, pushed: u64) -> Result<Vec<String>> {
+        use respire_protocol::host_plugin::*;
+        let id = uuid::Uuid::new_v4().to_string();
+        {
+            let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+            if let Some(error) = &state.closed {
+                anyhow::bail!("host plugin channel closed: {error}");
+            }
+            anyhow::ensure!(state.pending.is_none(), "host plugin event is already awaiting acknowledgement");
+            state.pending = Some(id.clone());
+        }
+        let request = HostPluginEventRequest { plugin_event: HOST_PLUGIN_SCHEMA_V, id,
+            event: HostPluginEvent::PostSync, data: HostPluginSyncData { pulled, pushed } };
+        let written = (|| -> Result<()> {
+            let bytes = serde_json::to_vec(&request)?;
+            anyhow::ensure!(bytes.len() <= respire_protocol::HOST_CONTROL_MAX_FRAME_BYTES, "host plugin frame exceeds protocol limit");
+            send(&bytes)
+        })();
+        if let Err(error) = written {
+            self.close(format!("host plugin request delivery failed: {error:#}"))?;
+        }
+        let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        loop {
+            if let Some(error) = &state.closed {
+                let error = error.clone();
+                state.pending = None;
+                anyhow::bail!("{error}");
+            }
+            if let Some(result) = state.result.take() {
+                state.pending = None;
+                return match result {
+                    HostPluginEventResult::Completed { warnings } => Ok(warnings),
+                    HostPluginEventResult::Failed { error } => Err(anyhow::anyhow!("host post-sync plugin failed: {error}")),
+                };
+            }
+            state = self.changed.wait(state).map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        }
+    }
+
+    pub(crate) fn acknowledge(&self, ack: respire_protocol::host_plugin::HostPluginEventAck) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        anyhow::ensure!(ack.plugin_event_ack == respire_protocol::host_plugin::HOST_PLUGIN_SCHEMA_V
+            && state.pending.as_deref() == Some(ack.id.as_str()) && state.result.is_none()
+            && state.closed.is_none(), "unexpected host plugin acknowledgement");
+        state.result = Some(ack.result);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn close(&self, error: String) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        state.closed = Some(error);
+        self.changed.notify_all();
+        Ok(())
+    }
+}
+
+fn start_host_plugin_reader() -> Result<()> {
+    match std::env::var("RSRS_HOST_PLUGIN_CHANNEL") {
+        Err(std::env::VarError::NotPresent) => return Ok(()),
+        Ok(value) if value == "1" => {},
+        _ => anyhow::bail!("invalid host plugin channel selection"),
+    }
+    let channel = Arc::new(HostPluginChannel::default());
+    HOST_PLUGIN_CHANNEL.set(channel.clone()).map_err(|_| anyhow::anyhow!("host plugin reader already initialized"))?;
+    std::thread::Builder::new().name("host-plugin-input".into()).spawn(move || {
+        let result = (|| -> Result<()> {
+            let mut input = std::io::stdin().lock();
+            loop {
+                let mut length = [0_u8; 4];
+                input.read_exact(&mut length).context("host plugin parent channel closed")?;
+                let length = u32::from_be_bytes(length) as usize;
+                anyhow::ensure!(length > 0 && length <= respire_protocol::HOST_CONTROL_MAX_FRAME_BYTES,
+                    "invalid host plugin acknowledgement frame size");
+                let mut bytes = vec![0_u8; length];
+                input.read_exact(&mut bytes)?;
+                channel.acknowledge(serde_json::from_slice(&bytes)?)?;
+            }
+        })();
+        if let Err(error) = result {
+            let message = format!("host plugin channel failed: {error:#}");
+            eprintln!("{message}");
+            if let Err(error) = channel.close(message) {
+                eprintln!("host plugin channel cleanup failed: {error:#}");
+            }
+            STOPPING.store(true, Ordering::Release);
+            set_control_state("draining");
+            wake_dispatcher();
+            SYNC_CV.notify_all();
+            INDEX_CV.notify_all();
+        }
+    }).context("start host plugin reader")?;
+    Ok(())
+}
+
+pub(crate) fn deliver_post_sync(pulled: usize, pushed: usize) -> Result<()> {
+    // No initialized channel means this host did not subscribe to plugin events.
+    let Some(channel) = HOST_PLUGIN_CHANNEL.get() else { return Ok(()); };
+    let result = (|| -> Result<()> {
+        // Release stdout before waiting: it is shared with other Runtime diagnostics.
+        let warnings = channel.exchange(|bytes| {
+            let mut output = std::io::stdout().lock();
+            output.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+            output.write_all(bytes)?;
+            output.flush()?;
+            Ok(())
+        }, u64::try_from(pulled)?, u64::try_from(pushed)?)?;
+        for warning in warnings {
+            eprintln!("command=sync status=warn mode=auto hook={warning}");
+        }
+        Ok(())
+    })();
+    result.map_err(|error| HostPluginFailure(error).into())
+}
+
 fn ensure_sync_worker() {
     if FLIGHT_ON
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -886,7 +1035,7 @@ fn flight_loop() {
                     eprintln!("command=sync status=warn mode=auto error={error}");
                 }
                 Err(error) => {
-                    let transport = crate::sync_flow::is_retriable_sync_error(&error);
+                    let transport = background_sync_retryable(&error);
                     let delay = if transport {
                         30_u64.saturating_mul(1 << state.backoff.min(4)).min(300)
                     } else {
@@ -1047,6 +1196,7 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     )
     .context("runtime failed to lock the library")?;
     crate::host_hooks::verify_managed_boot()?;
+    start_host_plugin_reader()?;
     // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
     // pipe/socket fallback is necessary.
     let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;
