@@ -1286,11 +1286,8 @@ pub fn set_data_dir(dir: &str) -> Result<()> {
             o.remove("data_dir");
         }
     } else {
-        if !(dir.starts_with('/')
-            || dir.starts_with("~/")
-            || (dir.len() >= 2 && dir.as_bytes()[1] == b':'))
-        {
-            anyhow::bail!("data dir must be an absolute path (/\u{2026} or ~/\u{2026})");
+        if !requested.is_absolute() {
+            anyhow::bail!("data dir must be an absolute path or a home-relative path");
         }
         data["data_dir"] = serde_json::json!(dir);
     }
@@ -3835,6 +3832,8 @@ mod tests {
             std::fs::create_dir_all(&ordinary_profile)?;
             let canonical_profile = ordinary_profile.canonicalize()?;
             std::env::set_var("RSRS_DATA_DIR", &ordinary_root);
+            set_data_dir(&canonical_profile.to_string_lossy())?;
+            assert_eq!(data_dir(), canonical_profile);
             set_data_dir(&ordinary_profile.to_string_lossy())?;
             for root in [&ordinary_root, &canonical_root] {
                 std::env::set_var("RSRS_DATA_DIR", root);

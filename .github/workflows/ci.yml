@@ -4,6 +4,12 @@ name: Runtime CI
 # Native products and full data-safety suites are accepted after publication.
 on:
   workflow_dispatch:
+    inputs:
+      source_os:
+        description: Runner for targeted source tests; native product acceptance remains post-release
+        type: choice
+        default: ubuntu-latest
+        options: [ubuntu-latest, windows-latest]
   push:
     branches: [main, 'release/**']
   pull_request:
@@ -62,7 +68,7 @@ jobs:
   workspace-tests:
     # Keep the existing required job name; this is a source check, not native acceptance.
     needs: detect
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.source_os || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -107,15 +113,17 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml runtime/src/startup_identity.rs runtime/src/snapshot_authority.rs runtime/src/maintenance_control.rs crates/app/src/login_transaction.rs crates/app/src/login_transaction crates/app-domain/src/auth.rs crates/app-domain/src/credential_io.rs crates/app-domain/src/keystore.rs | grep -q .; then
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml runtime/src/startup_identity.rs runtime/src/snapshot_authority.rs runtime/src/maintenance_control.rs crates/app/src/login_transaction.rs crates/app/src/login_transaction crates/app-domain/src/auth.rs crates/app-domain/src/credential_io.rs crates/app-domain/src/keystore.rs crates/app-domain/src/service.rs | grep -q .; then
             echo 'required=true' >> "$GITHUB_OUTPUT"
           else
             echo 'required=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Run affected authentication recovery unit tests
         if: steps.auth-tests.outputs.required == 'true'
+        shell: bash
         run: |
           cargo test --locked -p respire_app_domain --lib keystore::host_tests::imported_read_preserves_missing_credential_type -- --exact
+          cargo test --locked -p respire_app_domain --lib service::tests::data_dir_config_roundtrip -- --exact
           cargo test --locked -p respire_app --lib login_transaction::tests:: -- --test-threads=1
           cargo test --locked -p respire_app --lib login_transaction::keygen_existing_protocol:: -- --test-threads=1
           cargo test --locked -p respire_runtime --bin rsrs-runtime startup_identity::tests:: -- --test-threads=1
