@@ -140,6 +140,16 @@ jobs:
           else
             echo 'RPC admission unit tests are not affected by this change.'
           fi
+      - name: Run affected host event unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml crates/commands/src/hooks.rs crates/commands/src/engine.rs crates/commands/src/rpc_serve.rs crates/commands/src/runtime_executor.rs crates/commands/src/runtime_executor/legacy_cli_tests/business_coverage.rs | grep -q .; then
+            cargo test --locked -p respire_commands --lib hooks::tests:: -- --test-threads=1
+            cargo test --locked -p respire_commands --lib runtime_executor::legacy_cli_tests::business_coverage::production_executor_defers_writes_and_restores_indexing_scope -- --exact --test-threads=1
+          else
+            echo 'Host event unit tests are not affected by this change.'
+          fi
       - name: Run affected core asset unit tests
         shell: bash
         run: |
