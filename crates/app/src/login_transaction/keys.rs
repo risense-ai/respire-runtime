@@ -141,23 +141,23 @@ fn candidate_session(record: &AuthRecord) -> Result<Value> {
 }
 
 fn factor_keys(session: &Value, input: &HostKeyInput) -> Result<crate::memory::SessionKeys> {
-    let field = |name: &str| session[name].as_str().with_context(|| format!("key vault is missing {name}"));
-    let salt = field("kdf_salt")?;
-    let wrapped = field("wrapped_urk")?;
-    let nonce = field("urk_nonce")?;
+    use respire_protocol::host_control::HostAuthVaultFactors as Factors;
     let version = match session.get("vault_version") {
         None => 1,
         Some(value) => value.as_i64().context("invalid key vault version")?,
     };
-    let keys = match version {
-        1 => crate::memory::SessionKeys::unlock(input.password.as_deref().context("explicit key password required")?,
-            input.account_secret.as_deref().context("explicit Account Secret required")?, salt, wrapped, nonce),
-        2 => crate::memory::SessionKeys::unlock_super(input.super_password.as_deref().context("explicit Super Key required")?, salt, wrapped, nonce),
-        3 => crate::memory::SessionKeys::unlock_vault(input.super_password.as_deref().context("explicit Super Key required")?,
-            input.account_secret.as_deref().context("explicit Secret Key required")?, salt, wrapped, nonce),
-        4 => crate::memory::SessionKeys::unlock_v4(input.super_password.as_deref().context("explicit Super Key required")?, salt, wrapped, nonce),
+    let secret = || input.super_password.clone().context("explicit Super Key required");
+    let legacy = || input.account_secret.clone().context("explicit legacy factor required");
+    let factors = match version {
+        1 => Factors::V1 { password: input.password.clone().context("explicit key password required")?, account_secret: legacy()? },
+        2 => Factors::V2 { super_password: secret()? },
+        3 => Factors::V3 { super_password: secret()?, secret_key: legacy()? },
+        4 => Factors::V4 { super_password: secret()? },
         _ => anyhow::bail!("unsupported key vault version"),
-    }?;
+    };
+    let mut vault = session.clone();
+    vault["vault_version"] = json!(version);
+    let keys = login::factor_keys(&vault, &factors)?;
     if session["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX) {
         crate::memory::SessionKeys::from_urk(keys.urk)
     } else { Ok(keys) }
