@@ -117,6 +117,7 @@ jobs:
         run: |
           cargo test --locked -p respire_app_domain --lib keystore::host_tests::imported_read_preserves_missing_credential_type -- --exact
           cargo test --locked -p respire_app --lib login_transaction::tests:: -- --test-threads=1
+          cargo test --locked -p respire_app --lib login_transaction::keygen_existing_protocol:: -- --test-threads=1
           cargo test --locked -p respire_runtime --bin rsrs-runtime startup_identity::tests:: -- --test-threads=1
           cargo test --locked -p respire_runtime --bin rsrs-runtime snapshot_authority::tests:: -- --test-threads=1
       - name: Run affected legacy database migration unit tests
@@ -129,6 +130,25 @@ jobs:
             cargo test --locked -p respire_app --lib migration:: -- --test-threads=1
           else
             echo 'Legacy migration unit tests are not affected by this change.'
+          fi
+      - name: Run affected RPC admission unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml crates/commands/src/rpc_serve.rs | grep -q .; then
+            cargo test --locked -p respire_commands --lib rpc_serve::tests:: -- --test-threads=1
+          else
+            echo 'RPC admission unit tests are not affected by this change.'
+          fi
+      - name: Run affected host event unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml crates/commands/src/hooks.rs crates/commands/src/engine.rs crates/commands/src/rpc_serve.rs crates/commands/src/runtime_executor.rs crates/commands/src/runtime_executor/legacy_cli_tests/business_coverage.rs | grep -q .; then
+            cargo test --locked -p respire_commands --lib hooks::tests:: -- --test-threads=1
+            cargo test --locked -p respire_commands --lib runtime_executor::legacy_cli_tests::business_coverage::production_executor_defers_writes_and_restores_indexing_scope -- --exact --test-threads=1
+          else
+            echo 'Host event unit tests are not affected by this change.'
           fi
       - name: Run affected core asset unit tests
         shell: bash

@@ -289,6 +289,12 @@ fn production_executor_defers_writes_and_restores_indexing_scope() -> anyhow::Re
     with_isolated_session(|root| {
         use respire_app::core_sdk::indexing_deferred;
         assert!(!indexing_deferred());
+        let marker = root.join("plugin-must-not-run");
+        std::fs::write(root.join("plugins.json"), serde_json::to_vec(&serde_json::json!({"hooks": {
+            "pre-remember": [{"cmd": "exit 1", "on_error": "block"}],
+            "post-remember": [{"cmd": format!("echo executed > \"{}\"", marker.display())}],
+            "post-forget": [{"cmd": format!("echo executed > \"{}\"", marker.display())}]
+        }}))?)?;
         // Call the production entry directly, not the legacy fixture wrapper.
         let written = super::super::capture_run(vec![
             "--json".into(), "remember".into(), "deferred source fixture".into(),
@@ -300,6 +306,12 @@ fn production_executor_defers_writes_and_restores_indexing_scope() -> anyhow::Re
         assert!(!indexing_deferred());
         let id = written.envelope.summary["id"]
             .as_str().context("remember response is missing its ID")?;
+        assert!(!marker.exists(), "Runtime executed a host shell hook");
+        let events = &written.envelope.summary["host_plugin_events"];
+        assert_eq!(events.as_array().map(Vec::len), Some(1));
+        assert_eq!(events[0]["event"], "post-remember");
+        assert_eq!(events[0]["data"]["id"], id);
+        assert_eq!(events[0]["data"]["title"], "deferred source fixture");
         let updated = super::super::capture_run(vec![
             "--json".into(), "update".into(), id.into(),
             "--title".into(), "updated deferred fixture".into(),
@@ -320,6 +332,12 @@ fn production_executor_defers_writes_and_restores_indexing_scope() -> anyhow::Re
         ]);
         assert_ne!(failed.exit, 0);
         assert!(!indexing_deferred(), "failed write leaked its indexing scope");
+        assert_eq!(failed.envelope.summary["host_plugin_events"], serde_json::json!([]));
+        let forgotten = super::super::capture_run(vec!["--json".into(), "forget".into(), id.into()]);
+        assert_eq!(forgotten.exit, 0, "{:?}", forgotten.envelope);
+        assert_eq!(forgotten.envelope.summary["host_plugin_events"][0]["event"], "post-forget");
+        assert_eq!(forgotten.envelope.summary["host_plugin_events"][0]["data"]["id"], id);
+        assert!(!marker.exists(), "Runtime executed a post hook");
         Ok(())
     })
 }

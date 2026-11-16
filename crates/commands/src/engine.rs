@@ -3097,13 +3097,10 @@ pub fn background_sync_once() -> Result<bool> {
     let (session, local, remote) =
         sync_phase(|| Ok((build_session()?, build_local()?, build_remote()?)))?;
     let stats = sync_with_retry(&session, &local, &remote)?;
+    crate::rpc_serve::deliver_post_sync(stats.pulled, stats.pushed)?;
     eprintln!(
         "command=sync status=ok mode=auto pulled={} pushed={}",
         stats.pulled, stats.pushed
-    );
-    crate::hooks::fire(
-        crate::hooks::HookEvent::PostSync,
-        crate::hooks::sync_payload(stats.pulled, stats.pushed),
     );
     Ok(true)
 }
@@ -4208,43 +4205,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     );
                 }
             }
-            // -- Plugin hook pre-remember: may veto the write (sensitive scan etc.). Veto is a normal business state, exit 0 --
-            {
-                let hv = crate::hooks::fire(
-                    crate::hooks::HookEvent::PreRemember,
-                    crate::hooks::remember_payload(
-                        &title,
-                        &importance,
-                        &r#type,
-                        &project,
-                        &content,
-                    ),
-                );
-                if hv.blocked {
-                    let mut result = ResultEnvelope::new(
-                        "remember",
-                        OutputStatus::Pending,
-                        serde_json::json!({
-                            "event": "pre-remember",
-                            "state": "blocked",
-                            "reason": hv.reason,
-                        }),
-                        vec![OutputItem::new(
-                            "pre-remember hook",
-                            OutputStatus::Pending,
-                            "write blocked",
-                        )],
-                    );
-                    result
-                        .actions
-                        .push("inspect the hook veto before retrying".into());
-                    emit_result(result)?;
-                    return Ok(());
-                }
-                for w in &hv.warnings {
-                    eprintln!("WARN {w}");
-                }
-            }
             let (session, profile_owner) = build_session_with_owner()?;
             let store = build_local()?;
             if metadata_patch.is_some() || new_kind {
@@ -4310,7 +4270,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         let metadata_receipt = metadata::prepare(&session, &store, &e)?;
                         let stored = MemoryEngine::seal(&session, embedder!(), &e, &main.user)?;
                         anyhow::ensure!(commit_prepared_write(short_write, write_generation, || store.put_diary_checked(&stored, &main.ciphertext, &tracks[1..]))?, "diary was not saved");
-                        crate::hooks::fire(
+                        crate::hooks::record(
                             crate::hooks::HookEvent::PostRemember,
                             crate::hooks::remember_done_payload(&stored.id, &e.title, &e.importance),
                         );
@@ -4500,7 +4460,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     .unwrap_or_else(|| serde_json::json!({}));
                 let dropped = merged_full.len();
                 report_orphans(&store, "merge");
-                crate::hooks::fire(
+                crate::hooks::record(
                     crate::hooks::HookEvent::PostRemember,
                     crate::hooks::remember_done_payload(
                         &entry.id,
@@ -4606,18 +4566,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 anyhow::ensure!(commit_prepared_write(short_write, write_generation, || store.put_checked(&sealed, None))?, "memory was not saved");
                 sealed
             };
-            // Plugin hook post-remember: observe only, never blocks (failure policy is inside hooks::fire)
-            {
-                let hv = crate::hooks::fire(
-                    crate::hooks::HookEvent::PostRemember,
-                    crate::hooks::remember_done_payload(
-                        &stored.id,
-                        &entry.title,
-                        &entry.importance,
-                    ),
-                );
-                issues.extend(hv.warnings.iter().cloned());
-            }
+            crate::hooks::record(
+                crate::hooks::HookEvent::PostRemember,
+                crate::hooks::remember_done_payload(&stored.id, &entry.title, &entry.importance),
+            );
             // Adoption: explicit attach (--parent) adopts that cause node; --force with no hang is not adoption
             if !parent_id.is_empty() {
                 let _ = store.mark_adopted(&parent_id);
@@ -4873,7 +4825,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         .iter()
                         .map(|r| (r.entry.id.clone(), r.score))
                         .collect();
-                    crate::hooks::fire(
+                    crate::hooks::record(
                         crate::hooks::HookEvent::PostRecall,
                         crate::hooks::recall_payload(
                             &query,
@@ -5237,7 +5189,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             report_orphans(&store, "forget");
             if deleted {
                 // Plugin hook post-forget: observe only
-                crate::hooks::fire(
+                crate::hooks::record(
                     crate::hooks::HookEvent::PostForget,
                     crate::hooks::forget_payload(&full),
                 );
@@ -5857,7 +5809,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 }
             }
             // One hook after all rounds, with the same totals as the final report.
-            crate::hooks::fire(
+            crate::hooks::record(
                 crate::hooks::HookEvent::PostSync,
                 crate::hooks::sync_payload(stats.pulled, stats.pushed),
             );

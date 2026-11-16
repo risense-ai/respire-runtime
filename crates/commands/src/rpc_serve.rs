@@ -278,6 +278,19 @@ struct SyncSchedule {
     blocked_generation: Option<usize>,
     last_success: Option<u64>,
 }
+
+impl SyncSchedule {
+    fn record_success(&mut self, synchronized: bool) {
+        self.backoff = 0;
+        self.blocked_generation = None;
+        if synchronized {
+            self.last_success = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|value| value.as_secs());
+        }
+    }
+}
 static SYNC_CV: Condvar = Condvar::new();
 pub static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
@@ -691,6 +704,155 @@ pub fn sync_running() -> bool {
     SYNC_RUNNING.load(Ordering::Acquire)
 }
 
+// One in-flight background notification; the inherited pipe reader owns all acknowledgements.
+#[derive(Default)]
+pub(crate) struct HostPluginChannel {
+    state: Mutex<HostPluginState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct HostPluginState {
+    pending: Option<String>,
+    result: Option<respire_protocol::host_plugin::HostPluginEventResult>,
+    closed: Option<String>,
+}
+
+static HOST_PLUGIN_CHANNEL: OnceLock<Arc<HostPluginChannel>> = OnceLock::new();
+
+#[derive(Debug)]
+pub(crate) struct HostPluginFailure(pub(crate) anyhow::Error);
+
+impl std::fmt::Display for HostPluginFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for HostPluginFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
+}
+
+pub(crate) fn background_sync_retryable(error: &anyhow::Error) -> bool {
+    !error.is::<HostPluginFailure>() && crate::sync_flow::is_retriable_sync_error(error)
+}
+
+impl HostPluginChannel {
+    pub(crate) fn exchange(&self, send: impl FnOnce(&[u8]) -> Result<()>, pulled: u64, pushed: u64) -> Result<Vec<String>> {
+        use respire_protocol::host_plugin::*;
+        let id = uuid::Uuid::new_v4().to_string();
+        {
+            let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+            if let Some(error) = &state.closed {
+                anyhow::bail!("host plugin channel closed: {error}");
+            }
+            anyhow::ensure!(state.pending.is_none(), "host plugin event is already awaiting acknowledgement");
+            state.pending = Some(id.clone());
+        }
+        let request = HostPluginEventRequest { plugin_event: HOST_PLUGIN_SCHEMA_V, id,
+            event: HostPluginEvent::PostSync, data: HostPluginSyncData { pulled, pushed } };
+        let written = (|| -> Result<()> {
+            let bytes = serde_json::to_vec(&request)?;
+            anyhow::ensure!(bytes.len() <= respire_protocol::HOST_CONTROL_MAX_FRAME_BYTES, "host plugin frame exceeds protocol limit");
+            send(&bytes)
+        })();
+        if let Err(error) = written {
+            self.close(format!("host plugin request delivery failed: {error:#}"))?;
+        }
+        let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        loop {
+            if let Some(error) = &state.closed {
+                let error = error.clone();
+                state.pending = None;
+                anyhow::bail!("{error}");
+            }
+            if let Some(result) = state.result.take() {
+                state.pending = None;
+                return match result {
+                    HostPluginEventResult::Completed { warnings } => Ok(warnings),
+                    HostPluginEventResult::Failed { error } => Err(anyhow::anyhow!("host post-sync plugin failed: {error}")),
+                };
+            }
+            state = self.changed.wait(state).map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        }
+    }
+
+    pub(crate) fn acknowledge(&self, ack: respire_protocol::host_plugin::HostPluginEventAck) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        anyhow::ensure!(ack.plugin_event_ack == respire_protocol::host_plugin::HOST_PLUGIN_SCHEMA_V
+            && state.pending.as_deref() == Some(ack.id.as_str()) && state.result.is_none()
+            && state.closed.is_none(), "unexpected host plugin acknowledgement");
+        state.result = Some(ack.result);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn close(&self, error: String) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("host plugin state poisoned"))?;
+        state.closed = Some(error);
+        self.changed.notify_all();
+        Ok(())
+    }
+}
+
+fn start_host_plugin_reader() -> Result<()> {
+    match std::env::var("RSRS_HOST_PLUGIN_CHANNEL") {
+        Err(std::env::VarError::NotPresent) => return Ok(()),
+        Ok(value) if value == "1" => {},
+        _ => anyhow::bail!("invalid host plugin channel selection"),
+    }
+    let channel = Arc::new(HostPluginChannel::default());
+    HOST_PLUGIN_CHANNEL.set(channel.clone()).map_err(|_| anyhow::anyhow!("host plugin reader already initialized"))?;
+    std::thread::Builder::new().name("host-plugin-input".into()).spawn(move || {
+        let result = (|| -> Result<()> {
+            let mut input = std::io::stdin().lock();
+            loop {
+                let mut length = [0_u8; 4];
+                input.read_exact(&mut length).context("host plugin parent channel closed")?;
+                let length = u32::from_be_bytes(length) as usize;
+                anyhow::ensure!(length > 0 && length <= respire_protocol::HOST_CONTROL_MAX_FRAME_BYTES,
+                    "invalid host plugin acknowledgement frame size");
+                let mut bytes = vec![0_u8; length];
+                input.read_exact(&mut bytes)?;
+                channel.acknowledge(serde_json::from_slice(&bytes)?)?;
+            }
+        })();
+        if let Err(error) = result {
+            let message = format!("host plugin channel failed: {error:#}");
+            eprintln!("{message}");
+            if let Err(error) = channel.close(message) {
+                eprintln!("host plugin channel cleanup failed: {error:#}");
+            }
+            STOPPING.store(true, Ordering::Release);
+            set_control_state("draining");
+            wake_dispatcher();
+            SYNC_CV.notify_all();
+            INDEX_CV.notify_all();
+        }
+    }).context("start host plugin reader")?;
+    Ok(())
+}
+
+pub(crate) fn deliver_post_sync(pulled: usize, pushed: usize) -> Result<()> {
+    // No initialized channel means this host did not subscribe to plugin events.
+    let Some(channel) = HOST_PLUGIN_CHANNEL.get() else { return Ok(()); };
+    let result = (|| -> Result<()> {
+        // Release stdout before waiting: it is shared with other Runtime diagnostics.
+        let warnings = channel.exchange(|bytes| {
+            let mut output = std::io::stdout().lock();
+            output.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+            output.write_all(bytes)?;
+            output.flush()?;
+            Ok(())
+        }, u64::try_from(pulled)?, u64::try_from(pushed)?)?;
+        for warning in warnings {
+            eprintln!("command=sync status=warn mode=auto hook={warning}");
+        }
+        Ok(())
+    })();
+    result.map_err(|error| HostPluginFailure(error).into())
+}
+
 fn ensure_sync_worker() {
     if FLIGHT_ON
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -861,15 +1023,11 @@ fn flight_loop() {
             });
             let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
             match result {
-                Ok(synchronized) => {
-                    state.backoff = 0;
-                    state.blocked_generation = None;
-                    if synchronized {
-                        state.last_success = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|v| v.as_secs());
-                    }
+                Ok(synchronized) => state.record_success(synchronized),
+                Err(error) if error.is::<HostPluginFailure>() => {
+                    // Core sync committed before the host observer failed; retain normal scheduling.
+                    state.record_success(true);
+                    eprintln!("command=sync status=warn mode=auto core=completed host_plugin_error={error}");
                 }
                 Err(error)
                     if error
@@ -886,7 +1044,7 @@ fn flight_loop() {
                     eprintln!("command=sync status=warn mode=auto error={error}");
                 }
                 Err(error) => {
-                    let transport = crate::sync_flow::is_retriable_sync_error(&error);
+                    let transport = background_sync_retryable(&error);
                     let delay = if transport {
                         30_u64.saturating_mul(1 << state.backoff.min(4)).min(300)
                     } else {
@@ -1047,6 +1205,7 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     )
     .context("runtime failed to lock the library")?;
     crate::host_hooks::verify_managed_boot()?;
+    start_host_plugin_reader()?;
     // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
     // pipe/socket fallback is necessary.
     let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;
@@ -1459,7 +1618,7 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             let mut response = status_response(&request);
             let mut summary = json!({"request_id":request.id,"operation_id":id,"scope":scope,
                 "state":state,"response":result,
-                "retention":"last 64 receipts; up to 4096 admission identities until runtime exit; account-directory and generation scoped; unknown is not proof of non-commit; never replay a write automatically"});
+                "retention":"last 64 receipts; admission identities retained until runtime exit; account-directory and generation scoped; unknown is not proof of non-commit; never replay a write automatically"});
             if let Some(key) = &request.idempotency_key {
                 summary["idempotency_key"] = json!(key);
             }
@@ -3603,9 +3762,6 @@ fn admit_locked(
         ));
     }
     // Retain admission tombstones until exit; evicting them could replay a committed write.
-    if idempotency.len() >= 4096 {
-        return Err(("idempotency_capacity".to_owned(), "runtime retained 4096 operation identities; existing results remain queryable, but new operations are not accepted".to_owned()));
-    }
     idempotency.insert(
         operation.storage_key.clone(),
         IdempotencyRecord {
@@ -3734,6 +3890,24 @@ mod tests {
     }
 
     #[test]
+    fn completed_sync_preserves_pending_work_after_host_observer_failure() {
+        for due in [None, Some(Instant::now())] {
+            let mut schedule = SyncSchedule {
+                due,
+                backoff: 3,
+                blocked_generation: Some(7),
+                manual: VecDeque::new(),
+                last_success: None,
+            };
+            schedule.record_success(true);
+            assert_eq!(schedule.due, due, "observer failure must not schedule a replay or discard new work");
+            assert_eq!(schedule.blocked_generation, None, "core autosync must remain eligible");
+            assert_eq!(schedule.backoff, 0);
+            assert!(schedule.last_success.is_some(), "core sync already committed");
+        }
+    }
+
+    #[test]
     fn idempotent_admission_replays_or_reports_unknown() -> Result<()> {
         let _serial = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         struct RestoreConfigEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
@@ -3759,14 +3933,14 @@ mod tests {
                 operation_id: Some("operation-1".to_owned()),
                 idempotency_key: Some("idempotency-1".to_owned()),
                 parent_operation_id: None,
-                method: "runtime.status".to_owned(),
+                method: "cli.exec".to_owned(),
                 args: args.iter().map(|item| item.to_string()).collect(),
                 queue_wait_ms: None,
                 lifecycle: None,
             }
         }
 
-        let first = request("request-1", &["a"]);
+        let first = request("request-1", &["remember", "value"]);
         for (error, code) in [
             ("runtime_maintenance: queued execution was fenced", "runtime_maintenance"),
             ("invalid_config: malformed client config", "invalid_config"),
@@ -3803,7 +3977,7 @@ mod tests {
         assert!(ADMISSIONS.lock().unwrap_or_else(|error| error.into_inner())
             .iter().any(|item| item.operation_id == operation.operation_id));
         assert!(matches!(
-            admit_scoped(&request("request-in-flight", &["a"]), &operation, &current),
+            admit_scoped(&request("request-in-flight", &["remember", "value"]), &operation, &current),
             Ok(Admission::InProgress)
         ));
         for stale in [
@@ -3831,7 +4005,7 @@ mod tests {
             .remove(&operation.storage_id);
         drop(admission);
         assert_eq!(result_state(cached(&operation.storage_id).as_ref(), false), "completed");
-        match admit_scoped(&request("request-2", &["a"]), &operation, &current) {
+        match admit_scoped(&request("request-2", &["remember", "value"]), &operation, &current) {
             Ok(Admission::Replay(replay)) => {
                 assert_eq!(replay.id, "request-2");
                 assert_eq!(replay.operation_id.as_deref(), Some("operation-1"));
@@ -3843,16 +4017,35 @@ mod tests {
             other => panic!("expected replay, got {other:?}"),
         }
 
-        CACHE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
+        for index in 0..4096 {
+            let id = format!("capacity-operation-{index}");
+            let mut fresh = request(&id, &["status"]);
+            fresh.operation_id = Some(id.clone());
+            fresh.idempotency_key = Some(id);
+            let identity = operation_identity_for_scope(&fresh, &current)
+                .map_err(|(code, error)| anyhow::anyhow!("{code}: {error}"))?;
+            let guard = match admit_scoped(&fresh, &identity, &current) {
+                Ok(Admission::New(guard)) => guard,
+                other => panic!("expected admission beyond the old limit, got {other:?}"),
+            };
+            remember(&identity.storage_id, &status_response(&fresh));
+            INFLIGHT
+                .lock()
+                .map_err(|_| anyhow::anyhow!("inflight lock poisoned"))?
+                .remove(&identity.storage_id);
+            drop(guard);
+            if index == 4095 {
+                assert!(matches!(admit_scoped(&fresh, &identity, &current), Ok(Admission::Replay(_))));
+            }
+        }
+        assert_eq!(IDEMPOTENCY.lock().map_err(|_| anyhow::anyhow!("idempotency lock poisoned"))?.len(), 4097);
+        assert!(cached(&operation.storage_id).is_none());
         assert!(matches!(
-            admit_scoped(&request("request-3", &["a"]), &operation, &current),
+            admit_scoped(&request("request-3", &["remember", "value"]), &operation, &current),
             Ok(Admission::Unknown)
         ));
 
-        let changed = request("request-4", &["different"]);
+        let changed = request("request-4", &["remember", "different"]);
         let Some(changed_operation) = operation_identity_for_scope(&changed, &current).ok()
         else {
             panic!("changed operation identity must be valid");
@@ -3862,7 +4055,7 @@ mod tests {
             other => panic!("expected conflict, got {other:?}"),
         }
         let other_scope = fixture_scope("account-b", 1);
-        let mut other_request = request("request-other-account", &["a"]);
+        let mut other_request = request("request-other-account", &["remember", "value"]);
         other_request.scope = Some(other_scope.clone());
         let other_account = match operation_identity_for_scope(&other_request, &other_scope) {
             Ok(value) => value,

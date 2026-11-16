@@ -6,6 +6,39 @@ while releasing independently. The contract's machine-readable pieces are the
 workflow), the `runtime-pin.json` file in the CLI repository, and the
 `respire-protocol` crate published from `crates/protocol` in this repository.
 
+## Frozen host boundary
+
+The host split uses published `respire-protocol` **2.0.0-dev.16** and wire
+protocol **1**. Complete the Runtime implementation against these existing
+types before accepting CLI and Client2 implementations. Do not add mandatory
+fields or change operation semantics during host integration. A later
+incompatible change requires a separately reviewed protocol version.
+
+- Runtime owns authentication transactions, synchronization, encrypted database
+  management, remember/recall, inference and the RPC/MCP interfaces.
+- CLI and Client2 independently own downloads, installation, component selection,
+  system credential storage, private-key custody, sign-in startup and Runtime
+  process supervision. A third-party host can implement the same contract.
+- A Runtime started without host-provided keys stays locked. The host supplies
+  account-bound factors over the private control channel. Public business RPC
+  and MCP do not gain permission to read system credentials or install assets.
+- Login, key operations, migration and snapshot restore receive explicit host
+  material. Runtime validates candidate digests, transaction scope and custody
+  acknowledgements before committing database or account changes. Private
+  handoffs go to the host; missing material is an explicit error or a defined
+  intermediate state, never an implicit credential lookup.
+- Operation identities and unknown outcomes retain their existing result-query
+  semantics. Hosts query the original operation instead of silently replaying a
+  write. Host plugin events use the published request/ack frames.
+- Historical compatibility covers database keys, decryptable records, integrity
+  and pending synchronization. Old host binaries, credential locations and
+  interrupted host credential-cleanup journals are not a compatibility promise;
+  unsupported journals are retained and explicitly rejected.
+
+Freeze the accepted Runtime source and public asset hashes first, then complete
+CLI and finally Client2 against that baseline. Product version numbers remain
+independent; protocol and required capabilities determine compatibility.
+
 ## runtime_version
 
 - The version in `runtime/Cargo.toml` of this repository is `runtime_version`.
