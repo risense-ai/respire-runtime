@@ -248,6 +248,20 @@ mod tests {
                 // Only the historical fixture writes factors; production writes must refuse them.
                 std::fs::write(existing.join("session.json"), &original)?;
                 assert!(private_write(&existing.join("session.json"), &original).is_err());
+                // Simulate the host's custody step before Runtime freezes the source identity.
+                let host_alias = format!("legacy-host-prepared-{version}");
+                let primary_backend = crate::keystore::import_credential(&host_alias,
+                    if version == 1 { "pass" } else { "super" }, &primary)?;
+                let legacy_backend = crate::keystore::import_credential(&host_alias, "legacy-secret", &factor)?;
+                let mut host_session = source.clone();
+                for field in ["pass", "super", "secret", "secret_key"] {
+                    host_session.as_object_mut().context("fixture session is an object")?.remove(field);
+                }
+                host_session["keyring_account"] = json!(host_alias);
+                host_session["keyring_backend"] = json!(primary_backend);
+                host_session["legacy_secret_backend"] = json!(legacy_backend);
+                let host_snapshot = serde_json::to_vec(&host_session)?;
+                private_write(&existing.join("session.json"), &host_snapshot)?;
                 let keys = crate::auth::unlock_session_keys(&source, &primary, Some(&primary), "existing")?;
                 let (item_nonce, ciphertext) = keys.encrypt_content(&serde_json::to_string(&json!({
                     "kind":"Context","tags":"","title":"retained","content":"rollback fixture",
@@ -266,8 +280,8 @@ mod tests {
                 let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &authorized,
                     if version == 1 { String::new() } else { primary.clone() }, vault, None)?;
                 prepared.commit()?;
-                let checkpoint: Value = serde_json::from_slice(&std::fs::read(recovery_path())?)?;
-                assert!(checkpoint["active"]["original"].is_null());
+                let stored_snapshot: Value = serde_json::from_slice(&std::fs::read(recovery_path())?)?;
+                assert_eq!(serde_json::from_value::<Vec<u8>>(stored_snapshot["active"]["original"].clone())?, host_snapshot);
                 assert!(!String::from_utf8(std::fs::read(recovery_path())?)?.contains(&factor));
                 let mut pending = load_journal()?;
                 rollback_record_inner(&mut pending, false)?;
@@ -294,17 +308,29 @@ mod tests {
             let historical_candidate = serde_json::to_vec(&json!({"vault_version":3,
                 "secret_key":"historical-candidate-factor","wrapped_urk":"unchanged-wrap"}))?;
             let historical_sha256 = digest(&historical_candidate);
-            let before_rejected_snapshot = std::fs::read(recovery_path())?;
-            let rejected = save_journal(&mut Journal { schema_version: 2, active: None, operations: vec![AuthRecord {
+            let before_rejected_snapshot = if recovery_path().try_exists()? {
+                Some(std::fs::read(recovery_path())?)
+            } else { None };
+            let mut retained = Journal { schema_version: 2, active: None, operations: vec![AuthRecord {
                 operation_id: uuid::Uuid::new_v4().to_string(), idempotency_key: "retained".into(),
                 fingerprint: keygen_fingerprint(&canonical_root, &canonical_root, false)?,
                 root: canonical_root.clone(), profile: canonical_root, original_sha256: None,
                 candidate: Some(historical_candidate.clone()), candidate_backup: None,
                 candidate_sha256: Some(historical_sha256), restored: None, alias: "login-retained".into(), backend: None,
                 phase: AuthPhase::RolledBack, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None,
-            }] });
+            }] };
+            let rejected = save_journal(&mut retained);
             assert!(rejected.is_err_and(|error| error.to_string().contains("host_preparation_required")));
-            assert_eq!(std::fs::read(recovery_path())?, before_rejected_snapshot);
+            assert_eq!(recovery_path().try_exists()?, before_rejected_snapshot.is_some());
+            if let Some(before) = before_rejected_snapshot { assert_eq!(std::fs::read(recovery_path())?, before); }
+            let retained_backend = crate::keystore::import_credential("login-retained", "super", &code)?;
+            let retained_candidate = serde_json::to_vec(&json!({"vault_version":4,
+                "kdf_salt":vault["kdf_salt"], "wrapped_urk":vault["wrapped_urk"], "urk_nonce":vault["urk_nonce"],
+                "keyring_account":"login-retained", "keyring_backend":retained_backend}))?;
+            retained.operations[0].candidate_sha256 = Some(digest(&retained_candidate));
+            retained.operations[0].candidate = Some(retained_candidate);
+            retained.operations[0].backend = Some(retained_backend.into());
+            save_journal(&mut retained)?;
             let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":"completed-account","token":"new-token"}), code.clone(), vault, None)?;
             prepared.commit()?;
             prepared.complete()?;
@@ -641,9 +667,17 @@ mod tests {
         let source_salt = crate::memory::crypto::random_hex(16);
         let source_kek = crate::memory::crypto::derive_kek(&source_password, &source_secret, &source_salt)?;
         let (source_nonce, source_wrap) = crate::memory::crypto::wrap_key(&crate::memory::crypto::generate_key(), &source_kek)?;
+        let source_alias = format!("legacy-host-source-{}", uuid::Uuid::new_v4().simple());
+        let source_backend = crate::keystore::import_credential(&source_alias, "pass", &source_password)?;
+        let source_legacy_backend = crate::keystore::import_credential(&source_alias, "legacy-secret", &source_secret)?;
         let source_bytes = serde_json::to_vec(&json!({"user":source_user,"addr":"https://source.invalid",
-            "vault_version":1,"secret":source_secret,"kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
+            "vault_version":1,"keyring_account":source_alias,"keyring_backend":source_backend,
+            "legacy_secret_backend":source_legacy_backend,
+            "kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
         std::fs::write(root.join("session.json"), &source_bytes)?;
+        let source_store = crate::transport::local::LocalStore::open(&crate::service::database_path(&root)?)?;
+        source_store.meta_set("source_fixture", "existing-library")?;
+        drop(source_store);
         let source_identity = HostAuthIdentity::Bound { account_id: digest(source_user.as_bytes()), session_sha256: digest(&source_bytes) };
         let ownership = AuthOwnership::acquire(&root, &root)?;
         let same_id = uuid::Uuid::new_v4().to_string();
