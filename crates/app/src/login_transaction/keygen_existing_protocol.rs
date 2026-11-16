@@ -67,6 +67,13 @@ pub(super) fn memory_keyring() -> RestoreMock {
     RestoreMock(store)
 }
 
+pub(super) fn host_material() -> Result<respire_protocol::HostAuthKeygenMaterial> {
+    let (super_password, _, kdf_salt, wrapped_urk, urk_nonce) = crate::auth::new_vault_v4()?;
+    let keyring_account = format!("login-{}", uuid::Uuid::new_v4().simple());
+    let keyring_backend = crate::keystore::import_credential(&keyring_account, "super", &super_password)?;
+    Ok(respire_protocol::HostAuthKeygenMaterial { super_password, kdf_salt, wrapped_urk,
+        urk_nonce, keyring_account, keyring_backend: keyring_backend.to_owned() })
+}
 
 #[test]
 fn original_result_binds_key_force_session_and_unknown_queries_never_replay() -> Result<()> {
@@ -75,20 +82,29 @@ fn original_result_binds_key_force_session_and_unknown_queries_never_replay() ->
     let root = isolated.path().canonicalize()?;
     let id = uuid::Uuid::new_v4().to_string();
     let ownership = AuthOwnership::acquire(&root, &root)?;
-    let result = control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, false)?;
+    assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, false, None).is_err());
+    assert!(!root.join("session.json").exists());
+    let material = host_material()?;
+    let mut invalid = material.clone();
+    invalid.wrapped_urk = "invalid".into();
+    assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, false, Some(&invalid)).is_err());
+    assert!(load_journal()?.operations.is_empty());
+    let result = control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, false, Some(&material))?;
     ensure!(result.outcome == HostAuthOutcome::Committed, "synthetic keygen did not commit");
     let identity = HostAuthIdentity::Unbound { operation_id: id.clone(),
         session_sha256: result.session_sha256.context("fixture digest missing")? };
     let original = std::fs::read(root.join("session.json"))?;
     let before = serde_json::to_vec(&load_journal()?)?;
-    let query = control_keygen(&ownership, &identity, &id, &id, false, true)?;
+    assert!(control_keygen(&ownership, &identity, &id, &id, false, false, Some(&invalid)).is_err());
+    assert!(control_keygen(&ownership, &identity, &id, &id, false, true, None).is_err());
+    let query = control_keygen(&ownership, &identity, &id, &id, false, true, Some(&material))?;
     assert!(query.outcome == HostAuthOutcome::Committed);
     assert_eq!(query.operation_id, id);
-    assert!(control_keygen(&ownership, &identity, &id, &id, true, true).is_err());
-    assert!(control_keygen(&ownership, &identity, &id, "other-key", false, true).is_err());
+    assert!(control_keygen(&ownership, &identity, &id, &id, true, true, None).is_err());
+    assert!(control_keygen(&ownership, &identity, &id, "other-key", false, true, None).is_err());
     let unknown = uuid::Uuid::new_v4().to_string();
-    assert!(control_keygen(&ownership, &identity, &unknown, &unknown, false, true).is_err());
-    assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, true).is_err());
+    assert!(control_keygen(&ownership, &identity, &unknown, &unknown, false, true, None).is_err());
+    assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, true, None).is_err());
     assert_eq!(std::fs::read(root.join("session.json"))?, original);
     assert_eq!(serde_json::to_vec(&load_journal()?)?, before);
     let mut journal = load_journal()?;
@@ -98,20 +114,22 @@ fn original_result_binds_key_force_session_and_unknown_queries_never_replay() ->
     crate::keystore::remove_imported(&record.alias, "super", backend)?;
     verify_locked_auth_identity(&root, &root, &identity)?;
     assert!(verify_auth_identity(&root, &root, &identity).is_err());
+    assert_eq!(control_keygen(&ownership, &identity, &id, &id, false, true, Some(&material))?.outcome,
+        HostAuthOutcome::Committed);
     crate::keystore::import_credential(&record.alias, "super", &secret)?;
     for phase in [AuthPhase::Admitted, AuthPhase::Prepared, AuthPhase::RolledBack] {
         journal.operations[0].phase = phase;
         save_journal(&mut journal)?;
         assert!(verify_locked_auth_identity(&root, &root, &identity).is_err());
-        assert!(control_keygen(&ownership, &identity, &id, &id, false, true).is_err());
+        assert!(control_keygen(&ownership, &identity, &id, &id, false, true, None).is_err());
     }
     journal.operations[0].phase = AuthPhase::Committed;
     save_journal(&mut journal)?;
     std::fs::write(root.join("session.json"), b"{}")?;
-    assert!(control_keygen(&ownership, &identity, &id, &id, false, true).is_err());
+    assert!(control_keygen(&ownership, &identity, &id, &id, false, true, None).is_err());
     std::fs::write(root.join("session.json"), original)?;
     journal.operations[0].idempotency_key = "changed-key".into();
     save_journal(&mut journal)?;
-    assert!(control_keygen(&ownership, &identity, &id, &id, false, true).is_err());
+    assert!(control_keygen(&ownership, &identity, &id, &id, false, true, None).is_err());
     Ok(())
 }

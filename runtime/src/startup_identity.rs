@@ -282,6 +282,23 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     Ok(())
 }
 
+/// Keygen authenticates its candidate using explicit host material, never a credential broker.
+pub(crate) fn verify_keygen_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    verify_managed_boot()
+}
+
 pub(crate) fn verify_auth_control_binding(
     binding: &respire_protocol::ControlBinding,
     identity: &respire_protocol::HostAuthIdentity,
@@ -1246,7 +1263,7 @@ mod tests {
             binding: params.binding.clone(),
             identity: respire_protocol::HostAuthIdentity::Absent,
             addr: "https://example.invalid".into(), user: "fixture-user".into(),
-            password: "fixture-only-password".into(), super_password: None,
+            password: "fixture-only-password".into(), super_password: None, material: None,
         })?];
         assert!(crate::auth_control::AccountRequest::parse(&account_request).is_ok());
         account_request.operation_id = None;
