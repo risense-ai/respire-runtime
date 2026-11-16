@@ -22,7 +22,8 @@ impl SpaceRequest {
             (HOST_SPACE_INVITE_METHOD,HostSpaceOperation::Invite { .. })
             | (HOST_SPACE_JOIN_METHOD,HostSpaceOperation::Join { .. })
             | (HOST_SPACE_KICK_METHOD,HostSpaceOperation::Kick { .. }))), "space method and operation mismatch");
-        ensure!(params.invite_code.is_none() || matches!(params.operation,HostSpaceOperation::Join { .. }), "unexpected space secret input");
+        ensure!(!matches!(params.operation,HostSpaceOperation::Kick { .. })
+            || params.invite_code.is_none() && params.material.is_none(), "unexpected space secret input");
         Ok(Self { params, query_only })
     }
     pub(crate) fn binding(&self) -> &ControlBinding { &self.params.binding }
