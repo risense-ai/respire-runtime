@@ -502,34 +502,7 @@ fn receive_and_execute(
     if [respire_protocol::secret_control::HOST_SECRET_READ_METHOD,
         respire_protocol::secret_control::HOST_KEYS_EXPORT_READ_METHOD]
         .contains(&request.method.as_str()) {
-        let secret = crate::secret_control::SecretRequest::parse(&request)
-            .map_err(|_| ("invalid_request", "invalid private secret read request"))?;
-        if respire_app::login_transaction::auth_recovery_pending()
-            .map_err(|_| ("auth_recovery_pending", "auth recovery status unavailable"))? {
-            return Err(("auth_recovery_pending", "finish auth recovery before reading secrets"));
-        }
-        crate::startup_identity::authorize_auth_control(grant)
-            .map_err(|_| ("unauthorized", "private secret read launch authorization failed"))?;
-        watch_auth_parent(events.clone())
-            .map_err(|_| ("unauthorized", "private secret read parent watch failed"))?;
-        let ownership = crate::startup_identity::acquire_auth_ownership(secret.binding(), secret.identity())
-            .map_err(|_| ("auth_ownership_unavailable", "private secret read ownership unavailable"))?;
-        if respire_app::login_transaction::auth_recovery_pending()
-            .map_err(|_| ("auth_recovery_pending", "auth recovery status unavailable"))? {
-            return Err(("auth_recovery_pending", "finish auth recovery before reading secrets"));
-        }
-        crate::startup_identity::verify_auth_control_binding(secret.binding(), secret.identity())
-            .map_err(|_| ("scope_mismatch", "private secret read identity mismatch"))?;
-        let result = secret.execute(&ownership)
-            .map_err(|_| ("secret_read_unavailable", "private secret read failed"))?;
-        crate::startup_identity::verify_auth_control_binding(secret.binding(), secret.identity())
-            .map_err(|_| ("scope_mismatch", "private secret read identity changed"))?;
-        // Secret payloads go only to the inherited response, never progress or receipts.
-        response.envelope = Some(result);
-        response.ok = true;
-        response.exit = 0;
-        *control_ready = true;
-        return Ok(());
+        return Err(("host_owned_secret", "secret reads and exports are available only in the CLI host"));
     }
     if request.method == respire_protocol::maintenance_control::LEGACY_SNAPSHOT_RECOVERY_METHOD {
         use respire_protocol::maintenance_control::{LegacySnapshotRecoveryResult, MaintenanceState};

@@ -8,7 +8,6 @@ mod startup_identity;
 mod host_control;
 mod maintenance_control;
 mod snapshot_authority;
-mod secret_control;
 mod identity_control;
 mod identity_write_control;
 mod space_control;

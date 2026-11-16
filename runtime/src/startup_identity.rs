@@ -1182,15 +1182,14 @@ mod tests {
             "method": respire_protocol::secret_control::HOST_SECRET_READ_METHOD,
             "args": [serde_json::to_string(&secret_params)?],
         }))?;
-        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_ok());
         assert!(crate::host_control::validate_request(&secret_request).is_err());
         secret_request.operation_id = Some(grant.instance_id.clone());
-        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_err());
+        assert!(crate::host_control::validate_request(&secret_request).is_err());
         secret_request.operation_id = None;
         let mut extra = serde_json::to_value(&secret_params)?;
         extra["unexpected"] = json!(true);
         secret_request.args = vec![serde_json::to_string(&extra)?];
-        assert!(crate::secret_control::SecretRequest::parse(&secret_request).is_err());
+        assert!(crate::host_control::validate_request(&secret_request).is_err());
         let sessions = respire_protocol::identity_control::HostIdentitySessionListParams {
             schema_version: respire_protocol::identity_control::HOST_IDENTITY_SCHEMA_V,
             binding: binding.clone(),
