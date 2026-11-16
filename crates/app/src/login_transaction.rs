@@ -308,7 +308,9 @@ mod tests {
             let historical_candidate = serde_json::to_vec(&json!({"vault_version":3,
                 "secret_key":"historical-candidate-factor","wrapped_urk":"unchanged-wrap"}))?;
             let historical_sha256 = digest(&historical_candidate);
-            let before_rejected_snapshot = std::fs::read(recovery_path())?;
+            let before_rejected_snapshot = if recovery_path().try_exists()? {
+                Some(std::fs::read(recovery_path())?)
+            } else { None };
             let rejected = save_journal(&mut Journal { schema_version: 2, active: None, operations: vec![AuthRecord {
                 operation_id: uuid::Uuid::new_v4().to_string(), idempotency_key: "retained".into(),
                 fingerprint: keygen_fingerprint(&canonical_root, &canonical_root, false)?,
@@ -318,7 +320,8 @@ mod tests {
                 phase: AuthPhase::RolledBack, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None,
             }] });
             assert!(rejected.is_err_and(|error| error.to_string().contains("host_preparation_required")));
-            assert_eq!(std::fs::read(recovery_path())?, before_rejected_snapshot);
+            assert_eq!(recovery_path().try_exists()?, before_rejected_snapshot.is_some());
+            if let Some(before) = before_rejected_snapshot { assert_eq!(std::fs::read(recovery_path())?, before); }
             let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":"completed-account","token":"new-token"}), code.clone(), vault, None)?;
             prepared.commit()?;
             prepared.complete()?;
