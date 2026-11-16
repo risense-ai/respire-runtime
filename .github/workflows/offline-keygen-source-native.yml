@@ -1,13 +1,6 @@
-name: Extra offline keygen source regression (not release acceptance)
+name: Historical offline keygen source diagnostic (not release acceptance)
 on:
-  pull_request:
-    paths:
-      - 'runtime/**'
-      - 'crates/app/**'
-      - 'crates/app-domain/**'
-      - 'crates/protocol/**'
-      - 'crates/host-control/**'
-      - '.github/workflows/offline-keygen-source-native.yml'
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -22,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -39,7 +32,7 @@ jobs:
       - name: Verify exact paired source before any build
         shell: bash
         env:
-          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_RUNTIME_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
@@ -237,7 +230,7 @@ jobs:
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -254,7 +247,7 @@ jobs:
       - name: Verify exact clean source and reviewed Client2 inputs before any build
         shell: bash
         env:
-          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_RUNTIME_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"

@@ -1,13 +1,5 @@
 name: Native candidate background startup
 on:
-  pull_request:
-    paths:
-      - 'runtime/**'
-      - 'crates/commands/src/net_rpc.rs'
-      - 'spawn/**'
-      - 'scripts/fixtures/embedded-keygen/**'
-      - 'scripts/fixtures/client2-background/**'
-      - '.github/workflows/background-start-native.yml'
   workflow_dispatch:
     inputs:
       macos_stop_diagnostic:
