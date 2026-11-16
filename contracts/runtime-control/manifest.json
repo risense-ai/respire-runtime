@@ -2056,7 +2056,7 @@
     },
     {
       "path": "consumers/space_control.rs",
-      "sha256": "2d3f0ad0f0ad3a50ff7320d594a7a94a6d75adcec510f88b2e0f6d6f9cb574c9"
+      "sha256": "74328c91241f51df6f4f5fd32b486dd5f6598fb13b9d243f1d4657acaf976226"
     },
     {
       "path": "fixtures/positive/host-profile-first-commit.json",

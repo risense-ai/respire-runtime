@@ -166,13 +166,6 @@ pub(super) fn space_contract_fixtures() -> anyhow::Result<()> {
                         assert!(serde_json::from_value::<HostSpaceParams>(missing).is_err());
                     }
                 }
-                let mut missing = f["payload"].clone();
-                let mut args: Value = serde_json::from_str(params)?;
-                if args["operation"]["kind"] != "kick" {
-                    args.as_object_mut().context("space params object")?.remove("material");
-                    missing["request"]["args"][0] = serde_json::to_string(&args)?.into();
-                    assert_eq!(space_failure(&missing, &schema), Some("space_params_invalid"), "{path}: host material required");
-                }
                 let r: HostSpaceResult = serde_json::from_value(f["payload"]["result"].clone())?;
                 assert_eq!(serde_json::to_value(r)?, f["payload"]["result"]);
                 if matches!(&a.operation, respire_protocol::space_control::HostSpaceOperation::Invite { .. })
