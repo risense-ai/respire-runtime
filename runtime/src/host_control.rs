@@ -650,8 +650,13 @@ fn receive_and_execute(
             Some(crate::startup_identity::acquire_auth_ownership(account.binding(), account.identity())
                 .map_err(|_| ("auth_ownership_unavailable", "account control library ownership unavailable"))?)
         };
-        crate::startup_identity::verify_auth_control_binding(account.binding(), account.identity())
-            .map_err(|_| ("scope_mismatch", "account control identity does not match the consumed grant"))?;
+        let host_registration = account.is_host_registration(&request)
+            .map_err(|_| ("scope_mismatch", "account control receipt family could not be verified"))?;
+        if host_registration {
+            crate::startup_identity::verify_registration_control_binding(account.binding(), account.identity())
+        } else {
+            crate::startup_identity::verify_auth_control_binding(account.binding(), account.identity())
+        }.map_err(|_| ("scope_mismatch", "account control identity does not match the consumed grant"))?;
         *control_ready = true;
         let result = account.execute(&request, ownership).map_err(|failure| {
             response.error = Some(format!("{failure:#}"));

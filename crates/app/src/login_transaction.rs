@@ -1900,7 +1900,11 @@ pub fn control_login(ownership: &AuthOwnership, operation_id: &str, key: &str,
 /// Result recovery never authenticates again and never resends a registration.
 pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIdentity,
     operation_id: &str, key: &str) -> Result<HostAuthAccountResult> {
-    verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    if is_registration_receipt(&ownership.root, &ownership.profile, operation_id, key)? {
+        verify_locked_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    } else {
+        verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    }
     let mut journal = load_journal()?;
     let index = owned_account_index(&journal, &ownership.root, &ownership.profile, operation_id, key)?;
     let record = &journal.operations[index];
@@ -1941,6 +1945,17 @@ pub fn control_account_result(ownership: &AuthOwnership, identity: &HostAuthIden
     login::resume_import(ownership, &mut journal, index)?;
     login::reconcile_publication(&mut journal, index)?;
     account_result(&journal.operations[index])
+}
+
+/// Classify only an authenticated, receipt-owned account operation without loading factors.
+pub fn is_registration_receipt(root: &Path, profile: &Path, id: &str, key: &str) -> Result<bool> {
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    ensure!(root == crate::service::main_data_dir().canonicalize()?
+        && profile == crate::service::data_dir().canonicalize()?, "account receipt selection changed");
+    let journal = load_journal_metadata()?;
+    let index = owned_account_index(&journal, &root, &profile, id, key)?;
+    Ok(journal.operations[index].account.as_ref().context("account receipt is missing")?.register)
 }
 
 fn owned_account_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &str) -> Result<usize> {
@@ -2077,7 +2092,11 @@ pub fn control_account_complete(root: &Path, profile: &Path, identity: &HostAuth
     ensure!(root == crate::service::main_data_dir().canonicalize()?
         && profile == crate::service::data_dir().canonicalize()?, "completion selection changed");
     let _journal_lock = auth_journal_lock()?;
-    verify_auth_identity(&root, &profile, identity)?;
+    if is_registration_receipt(&root, &profile, operation_id, key)? {
+        verify_locked_auth_identity(&root, &profile, identity)?;
+    } else {
+        verify_auth_identity(&root, &profile, identity)?;
+    }
     let mut journal = load_journal()?;
     let index = owned_account_index(&journal, &root, &profile, operation_id, key)?;
     let record = &journal.operations[index];
@@ -2129,7 +2148,11 @@ pub fn control_account_complete(root: &Path, profile: &Path, identity: &HostAuth
 pub fn control_account_rollback(mut ownership: AuthOwnership, identity: &HostAuthIdentity,
     operation_id: &str, key: &str) -> Result<HostAuthAccountResult> {
     crate::service::require_profile_change_host()?;
-    verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    if is_registration_receipt(&ownership.root, &ownership.profile, operation_id, key)? {
+        verify_locked_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    } else {
+        verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    }
     let mut journal = load_journal()?;
     let index = owned_account_index(&journal, &ownership.root, &ownership.profile, operation_id, key)?;
     let record = &journal.operations[index];
