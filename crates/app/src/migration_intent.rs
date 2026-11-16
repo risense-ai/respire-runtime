@@ -17,7 +17,7 @@ mod registry;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Phase { Copying, Transforming, Ready, RejectedSchema }
+pub(super) enum Phase { Copying, AwaitingCredentials, Transforming, Ready, RejectedSchema }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +27,8 @@ pub(super) struct Intent {
     source: PathBuf,
     session_digest: Option<String>,
     pub(super) stage: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) snapshot_sha256: Option<String>,
     pub(super) phase: Phase,
 }
 
@@ -114,7 +116,10 @@ fn transition(previous: &Intent, next: &Intent) -> Result<()> {
         && previous.session_digest == next.session_digest, "migration intent binding changed");
     anyhow::ensure!(match (previous.phase, next.phase) {
         (Phase::Copying, Phase::Copying) => true,
-        (Phase::Copying, Phase::RejectedSchema) | (Phase::Copying, Phase::Transforming) | (Phase::Transforming, Phase::Ready) => previous.stage == next.stage,
+        (Phase::Copying, Phase::AwaitingCredentials) => previous.stage == next.stage,
+        (Phase::AwaitingCredentials, Phase::Transforming) | (Phase::Transforming, Phase::Ready) =>
+            previous.stage == next.stage && previous.snapshot_sha256 == next.snapshot_sha256,
+        (Phase::Copying, Phase::RejectedSchema) | (Phase::Copying, Phase::Transforming) => previous.stage == next.stage,
         _ => false,
     }, "migration intent phase regressed or changed its transformation stage");
     Ok(())
@@ -190,9 +195,31 @@ pub(super) fn admit_or_load(home: &Path, original: &HostMigrationOperation, prof
         session_digest: session_digest(&profile.source)?,
         stage: home.join(".rsrs-migration-staging").join(uuid::Uuid::new_v4().to_string()),
         phase: Phase::Copying,
+        snapshot_sha256: None,
     };
     save(home, &record)?;
     Ok(record)
+}
+
+pub(super) fn snapshot_digest(stage: &Path) -> Result<Option<String>> {
+    let database = crate::service::database_path(stage)?;
+    no_links(&database)?;
+    if !database.try_exists()? { return Ok(None); }
+    let mut file = std::fs::File::open(database)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 { break; }
+        digest.update(&buffer[..count]);
+    }
+    Ok(Some(hex::encode(digest.finalize())))
+}
+
+pub(super) fn verify_snapshot(record: &Intent) -> Result<()> {
+    anyhow::ensure!(snapshot_digest(&record.stage)? == record.snapshot_sha256,
+        "migration snapshot changed while awaiting host credentials; original data and stage were retained");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -249,7 +276,7 @@ mod tests {
         let (original, profile) = fixture(&home)?;
         let database = profile.source.join("onememory.db");
         Connection::open(&database)?.execute_batch("CREATE TABLE memories (id INTEGER PRIMARY KEY, user TEXT, ciphertext TEXT, nonce TEXT, created_at INTEGER, updated_at INTEGER)")?;
-        let error = migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original))
+        let error = migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original), None)
             .err().context("incompatible schema was accepted")?;
         assert!(error.downcast_ref::<SchemaRejected>().is_some());
         let mut record = load(&home, &original)?.context("missing rejection")?;
@@ -258,7 +285,7 @@ mod tests {
         // Source disappearance must not erase an already durable operation outcome.
         std::fs::remove_file(database)?;
         std::fs::remove_file(profile.source.join("session.json"))?;
-        let error = migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original))
+        let error = migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original), None)
             .err().context("rejected operation was replayed")?;
         assert!(error.downcast_ref::<SchemaRejected>().is_some());
         assert_eq!(std::fs::read(path(&home, &original)?)?, before);
@@ -289,14 +316,14 @@ mod tests {
             Connection::open(profile.source.join("onememory.db"))?.execute_batch(
                 "CREATE TABLE memories (id TEXT, user TEXT, ciphertext TEXT, nonce TEXT, created_at INTEGER, updated_at INTEGER)")?;
             let ownership = crate::login_transaction::AuthOwnership::acquire(&root, &root)?;
-            let error = control_migrate_profile(&ownership, &original, false)
+            let error = control_migrate_profile(&ownership, &original, false, None)
                 .err().context("invalid schema was accepted")?;
             assert!(error.downcast_ref::<SchemaRejected>().is_some());
             let before = std::fs::read(path(&home, &original)?)?;
             let stage = load(&home, &original)?.context("missing rejection")?.stage;
             // The query uses the durable outcome, even if the source is later repaired.
             Connection::open(profile.source.join("onememory.db"))?.execute_batch("DROP TABLE memories")?;
-            let error = control_migrate_profile(&ownership, &original, true)
+            let error = control_migrate_profile(&ownership, &original, true, None)
                 .err().context("rejection query replayed migration")?;
             assert!(error.downcast_ref::<SchemaRejected>().is_some());
             assert_eq!(std::fs::read(path(&home, &original)?)?, before);
@@ -305,7 +332,7 @@ mod tests {
             let mut changed = original.clone();
             changed.account = "changed-binding".into();
             changed.fingerprint = hex::encode(Sha256::digest(changed.fingerprint_bytes()?));
-            let error = control_migrate_profile(&ownership, &changed, true)
+            let error = control_migrate_profile(&ownership, &changed, true, None)
                 .err().context("changed operation accepted rejection")?;
             assert!(error.downcast_ref::<SchemaRejected>().is_none());
             Ok(())
@@ -331,7 +358,7 @@ mod tests {
         assert!(save(&home, &record).is_err());
         std::fs::OpenOptions::new().append(true).open(path(&home, &original)?)?.write_all(b"{\"phase\":\"rejected_schema\"")?;
         assert!(load(&home, &original).is_err());
-        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original)).is_err());
+        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original), None).is_err());
         assert!(!profile.destination.exists());
         Ok(())
     }
@@ -389,7 +416,7 @@ mod tests {
         private_directory(&record.stage)?;
         std::fs::write(record.stage.join("onememory.db"), b"synthetic interrupted copy")?;
         let original_session = std::fs::read(profile.source.join("session.json"))?;
-        migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original))?;
+        migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original), None)?;
         assert!(migration_control_result(&original)?.is_some());
         assert_eq!(std::fs::read(record.stage.join("onememory.db"))?, b"synthetic interrupted copy");
         assert_eq!(std::fs::read(profile.source.join("session.json"))?, original_session);
@@ -413,13 +440,13 @@ mod tests {
         std::fs::write(record.stage.join("rsrs.db"), b"uncertain transform")?;
         save(&home, &record)?;
         let intent_before = std::fs::read(path(&home, &original)?)?;
-        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original)).is_err());
+        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original), None).is_err());
         assert!(!profile.destination.exists());
         assert_eq!(std::fs::read(record.stage.join("rsrs.db"))?, b"uncertain transform");
         assert_eq!(std::fs::read(path(&home, &original)?)?, intent_before);
         record.phase = Phase::Ready;
         save(&home, &record)?;
-        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original)).is_err());
+        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, Some(&original), None).is_err());
         assert!(!profile.destination.exists());
         assert_eq!(std::fs::read(record.stage.join("rsrs.db"))?, b"uncertain transform");
         Ok(())
@@ -459,15 +486,15 @@ mod tests {
             let (mut original, profile) = fixture(&home)?;
             original.fingerprint = hex::encode(Sha256::digest(original.fingerprint_bytes()?));
             let ownership = crate::login_transaction::AuthOwnership::acquire(&root, &root)?;
-            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Unknown);
+            assert!(control_migrate_profile(&ownership, &original, true, None)?.outcome == Outcome::Unknown);
             assert!(!profile.destination.exists());
             assert!(load(&home, &original)?.is_none());
             admit_or_load(&home, &original, &profile)?;
-            let outcome = control_migrate_profile(&ownership, &original, true)?.outcome;
+            let outcome = control_migrate_profile(&ownership, &original, true, None)?.outcome;
             assert!(outcome == Outcome::Completed);
             let receipt_before = std::fs::read(profile.destination.join(RECEIPT))?;
             let intent_before = std::fs::read(path(&home, &original)?)?;
-            assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Completed);
+            assert!(control_migrate_profile(&ownership, &original, true, None)?.outcome == Outcome::Completed);
             assert_eq!(std::fs::read(profile.destination.join(RECEIPT))?, receipt_before);
             assert_eq!(std::fs::read(path(&home, &original)?)?, intent_before);
             // A separate accepted operation exercises the non-replay phases.
@@ -480,7 +507,7 @@ mod tests {
                 record.phase = phase;
                 save(&home, &record)?;
                 let before = std::fs::read(path(&home, &original)?)?;
-                assert!(control_migrate_profile(&ownership, &original, true)?.outcome == Outcome::Unknown);
+                assert!(control_migrate_profile(&ownership, &original, true, None)?.outcome == Outcome::Unknown);
                 assert_eq!(std::fs::read(path(&home, &original)?)?, before);
                 assert!(!crate::service::accounts_root().join(&original.account).exists());
             }
@@ -535,7 +562,7 @@ mod tests {
         assert!(admit_or_load(&home, &other, &profile).is_err());
         other.account = original.account.to_ascii_uppercase();
         assert!(admit_or_load(&home, &other, &profile).is_err());
-        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, None).is_err());
+        assert!(migrate_profile_locked(&home, &original.source_id, &original.account, None, None).is_err());
         assert!(!path(&home, &other)?.exists());
         assert_eq!(std::fs::read(path(&home, &original)?)?, before);
         Ok(())
