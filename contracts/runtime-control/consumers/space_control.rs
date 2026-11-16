@@ -11,6 +11,15 @@ fn space_failure(p: &serde_json::Value, schema: &serde_json::Value) -> Option<&'
     };
     if !valid(&a, "params") { return Some("space_params_invalid"); }
     let op = &a["operation"];
+    let material = &a["material"];
+    if op["kind"] == "kick" {
+        if !material.is_null() || !a["invite_code"].is_null() { return Some("space_params_invalid"); }
+    } else if material["super_password"].as_str().is_none_or(str::is_empty)
+        || material["keyring_account"].as_str().is_none_or(|value| !value.starts_with("login-") || value.len() > 128
+            || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        || !matches!(material["keyring_backend"].as_str(), Some("native" | "secret_service")) {
+        return Some("space_params_invalid");
+    }
     let method = format!("control.space.{}", op["kind"].as_str()?);
     if q["method"] != "control.space.result" && q["method"] != method { return Some("space_method_mismatch"); }
     let r = &p["result"];
@@ -87,7 +96,10 @@ fn space_failure(p: &serde_json::Value, schema: &serde_json::Value) -> Option<&'
         }
         "invite" => {
             if !kick.is_empty() || ["target_profile", "target_account_id", "target_session_sha256"].iter().any(|k| !r[k].is_null()) { return Some("space_result_invalid"); }
-            if outcome == "committed" {
+            if outcome == "committed" || outcome == "pending" && !r["invite_code"].is_null() {
+                if outcome == "pending" && (c["journal_phase"] != "authorized" || q["method"] == "control.space.result") {
+                    return Some("space_result_invalid");
+                }
                 if space_invite(&r["invite_code"]).as_ref().is_none_or(|code| code["session_id"] != r["session_id"]
                     || code["control_operation_id"] != q["operation_id"] || code["control_fingerprint"] != r["fingerprint"] || code["readonly"] != op["readonly"]) {
                     return Some("space_result_invalid");
@@ -138,9 +150,47 @@ pub(super) fn space_contract_fixtures() -> anyhow::Result<()> {
                 assert!(schema_valid(&f, &schema, &schema["$defs"]), "{path}");
                 let _: respire_protocol::RpcRequest = serde_json::from_value(f["payload"]["request"].clone())?;
                 let a: HostSpaceParams = serde_json::from_str(params)?;
-                assert_eq!(serde_json::to_value(a)?, serde_json::from_str::<Value>(params)?);
+                assert_eq!(serde_json::to_value(&a)?, serde_json::from_str::<Value>(params)?);
+                if !matches!(&a.operation, respire_protocol::space_control::HostSpaceOperation::Kick { .. }) {
+                    let mut prepared = serde_json::to_value(&a)?;
+                    prepared["material"] = serde_json::json!({"super_password":"fixture-private-factor",
+                        "keyring_account":"login-space-fixture", "keyring_backend":"native"});
+                    let decoded: HostSpaceParams = serde_json::from_value(prepared.clone())?;
+                    assert_eq!(serde_json::to_value(decoded)?, prepared);
+                    let mut unknown = prepared.clone();
+                    unknown["material"]["unexpected"] = serde_json::json!(true);
+                    assert!(serde_json::from_value::<HostSpaceParams>(unknown).is_err());
+                    for field in ["super_password", "keyring_account", "keyring_backend"] {
+                        let mut missing = prepared.clone();
+                        missing["material"].as_object_mut().context("space material is an object")?.remove(field);
+                        assert!(serde_json::from_value::<HostSpaceParams>(missing).is_err());
+                    }
+                }
+                let mut missing = f["payload"].clone();
+                let mut args: Value = serde_json::from_str(params)?;
+                if args["operation"]["kind"] != "kick" {
+                    args.as_object_mut().context("space params object")?.remove("material");
+                    missing["request"]["args"][0] = serde_json::to_string(&args)?.into();
+                    assert_eq!(space_failure(&missing, &schema), Some("space_params_invalid"), "{path}: host material required");
+                }
                 let r: HostSpaceResult = serde_json::from_value(f["payload"]["result"].clone())?;
                 assert_eq!(serde_json::to_value(r)?, f["payload"]["result"]);
+                if matches!(&a.operation, respire_protocol::space_control::HostSpaceOperation::Invite { .. })
+                    && f["payload"]["result"]["outcome"] == "committed" {
+                    let mut pending = f["payload"].clone();
+                    pending["space_context"]["journal_phase"] = "authorized".into();
+                    pending["result"]["outcome"] = "pending".into();
+                    pending["result"]["remaining"] = Value::Null;
+                    pending["private_response"]["status"] = "pending".into();
+                    pending["private_response"]["summary"] = pending["result"].clone();
+                    pending["finish_maintenance"] = false.into();
+                    for name in ["ledger", "progress"] {
+                        if pending.get(name).is_some() { pending[name]["outcome"] = "pending".into(); }
+                    }
+                    assert_eq!(space_failure(&pending, &schema), None, "{path}: private host persistence handshake");
+                    pending["request"]["method"] = HOST_SPACE_RESULT_METHOD.into();
+                    assert_eq!(space_failure(&pending, &schema), Some("space_result_invalid"), "{path}: queries cannot recover an unpersisted code");
+                }
             } else if matches!(path.rsplit('/').next(), Some("space-params-unknown.json" | "space-operation-unknown.json")) {
                 assert!(serde_json::from_str::<HostSpaceParams>(params).is_err(), "{path}: strict DTO");
             } else if path.ends_with("space-result-unknown.json") {

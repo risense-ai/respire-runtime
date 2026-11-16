@@ -28,6 +28,9 @@ impl SpaceRequest {
     }
     pub(crate) fn binding(&self) -> &ControlBinding { &self.params.binding }
     pub(crate) fn identity(&self) -> &HostAuthIdentity { &self.params.identity }
+    pub(crate) fn verify_binding(&self) -> Result<()> {
+        crate::startup_identity::verify_keygen_control_binding(self.binding(), self.identity())
+    }
     pub(crate) fn execute(&self, request: &RpcRequest, ownership: &AuthOwnership) -> Result<HostSpaceResult> {
         login_transaction::control_space(ownership,
             request.operation_id.as_deref().context("space operation ID missing")?,

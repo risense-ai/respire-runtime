@@ -342,13 +342,13 @@ fn receive_and_execute(
             .map_err(|_| ("unauthorized", "private space parent watch failed"))?;
         let ownership = crate::startup_identity::acquire_auth_ownership(space.binding(),space.identity())
             .map_err(|_| ("auth_ownership_unavailable", "private space ownership unavailable"))?;
-        crate::startup_identity::verify_auth_control_binding(space.binding(),space.identity())
+        space.verify_binding()
             .map_err(|_| ("scope_mismatch", "private space identity mismatch"))?;
         events.send(ControlEvent::LongControlStarted)
             .map_err(|_| ("control_unavailable", "private space deadline unavailable"))?;
         let result = space.execute(&request,&ownership)
             .map_err(|_| ("space_outcome_unknown", "query the original space operation before retrying"))?;
-        crate::startup_identity::verify_auth_control_binding(space.binding(),space.identity())
+        space.verify_binding()
             .map_err(|_| ("space_outcome_unknown", "space source identity changed"))?;
         *control_ready = true;
         response.ok = matches!(result.outcome,HostSpaceOutcome::Committed | HostSpaceOutcome::Pending);

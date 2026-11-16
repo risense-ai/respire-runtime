@@ -602,6 +602,7 @@ pub fn control_space(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
         && journal.operations[index].phase == AuthPhase::Authorized {
         // The remote reply was received, but no host-owned code survived to finish it.
         receipt.outcome = HostSpaceOutcome::Unknown;
+        receipt.session_id = None;
     }
     Ok(receipt)
 }
@@ -643,6 +644,18 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
         "addr":addr,"user":"rejected-user","token":"revoked-token","super":"synthetic-super"}))?));
     params.operation = HostSpaceOperation::Join { invite_sha256:digest(code.as_bytes()),space:"rejected-join".into(),
         addr,user:"rejected-user".into(),readonly:false };
+    let before_missing_material = std::fs::read(recovery_path())?;
+    let missing_id = uuid::Uuid::new_v4().to_string();
+    for query_only in [false,true] {
+        assert!(control_space(&ownership,&missing_id,&missing_id,&params,query_only).is_err());
+    }
+    params.operation = HostSpaceOperation::Invite { note:None,readonly:false };
+    for query_only in [false,true] {
+        assert!(control_space(&ownership,&missing_id,&missing_id,&params,query_only).is_err());
+    }
+    assert_eq!(std::fs::read(recovery_path())?,before_missing_material);
+    params.operation = HostSpaceOperation::Join { invite_sha256:digest(code.as_bytes()),space:"rejected-join".into(),
+        addr: format!("http://{}",server.server_addr()),user:"rejected-user".into(),readonly:false };
     params.material = Some(HostSpaceMaterial { super_password:"synthetic-super".into(),
         keyring_account:format!("login-{}",uuid::Uuid::new_v4().simple()),keyring_backend:"native".into(),legacy_secret:None });
     params.invite_code = Some(code);
