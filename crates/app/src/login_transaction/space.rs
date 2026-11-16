@@ -599,7 +599,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     let mut params = HostSpaceParams { schema_version: HOST_SPACE_SCHEMA_V,
         binding: respire_protocol::ControlBinding { installation_root:root.to_owned(),profile:root.to_owned(),
             launch_id:uuid::Uuid::new_v4().to_string(),expected_account_id:Some(digest(b"space-fixture")) },
-        identity:identity.clone(),source_identity:identity,operation:HostSpaceOperation::Kick { session_id:None,all:true },invite_code:None };
+        identity:identity.clone(),source_identity:identity,operation:HostSpaceOperation::Kick { session_id:None,all:true },invite_code:None,material:None };
     let mut unsupported = serde_json::to_value(&params)?;
     unsupported["argv"] = json!(["unsupported"]);
     assert!(serde_json::from_value::<HostSpaceParams>(unsupported).is_err());

@@ -138,7 +138,22 @@ pub(super) fn space_contract_fixtures() -> anyhow::Result<()> {
                 assert!(schema_valid(&f, &schema, &schema["$defs"]), "{path}");
                 let _: respire_protocol::RpcRequest = serde_json::from_value(f["payload"]["request"].clone())?;
                 let a: HostSpaceParams = serde_json::from_str(params)?;
-                assert_eq!(serde_json::to_value(a)?, serde_json::from_str::<Value>(params)?);
+                assert_eq!(serde_json::to_value(&a)?, serde_json::from_str::<Value>(params)?);
+                if !matches!(&a.operation, respire_protocol::space_control::HostSpaceOperation::Kick { .. }) {
+                    let mut prepared = serde_json::to_value(&a)?;
+                    prepared["material"] = serde_json::json!({"super_password":"fixture-private-factor",
+                        "keyring_account":"login-space-fixture", "keyring_backend":"native"});
+                    let decoded: HostSpaceParams = serde_json::from_value(prepared.clone())?;
+                    assert_eq!(serde_json::to_value(decoded)?, prepared);
+                    let mut unknown = prepared.clone();
+                    unknown["material"]["unexpected"] = serde_json::json!(true);
+                    assert!(serde_json::from_value::<HostSpaceParams>(unknown).is_err());
+                    for field in ["super_password", "keyring_account", "keyring_backend"] {
+                        let mut missing = prepared.clone();
+                        missing["material"].as_object_mut().context("space material is an object")?.remove(field);
+                        assert!(serde_json::from_value::<HostSpaceParams>(missing).is_err());
+                    }
+                }
                 let r: HostSpaceResult = serde_json::from_value(f["payload"]["result"].clone())?;
                 assert_eq!(serde_json::to_value(r)?, f["payload"]["result"]);
             } else if matches!(path.rsplit('/').next(), Some("space-params-unknown.json" | "space-operation-unknown.json")) {

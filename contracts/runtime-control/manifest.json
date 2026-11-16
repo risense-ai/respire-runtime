@@ -1928,7 +1928,7 @@
     },
     {
       "path": "schema/space-control.schema.json",
-      "sha256": "e71a2a3eaa439433f140418b206b2c2f035d9a5015aaeffd2b18d2a68b0ad725"
+      "sha256": "3755d4564ccf1968684d9a40a85dcd07ff64664edce64944bed259d0b059bb5f"
     },
     {
       "path": "fixtures/positive/space-invite-private.json",
@@ -2056,7 +2056,7 @@
     },
     {
       "path": "consumers/space_control.rs",
-      "sha256": "471cebc05256235dceb0402affe757af2b9501a0344eb686e617b0266e95c2ba"
+      "sha256": "6f0e97379a901ebc45369c987a9700664fb618579d47e61be926d6ef1496e827"
     },
     {
       "path": "fixtures/positive/host-profile-first-commit.json",
