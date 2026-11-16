@@ -102,7 +102,95 @@ pub fn load_local_session() -> Result<SessionKeys> {
 /// Unlock keys and retain the profile-owner alias from the same file snapshot.
 /// This is local configuration identity, not proof of remote account authentication.
 pub fn load_local_session_with_owner() -> Result<(SessionKeys, Option<String>)> {
-    unlock_local_session_snapshot(&read_session_json()?)
+    let data = read_session_json()?;
+    if !crate::credential_io::is_private_control() && !cfg!(any(test, feature = "test-support")) {
+        let supplied = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
+        let supplied = supplied.as_ref().ok_or_else(|| anyhow::Error::new(
+            SessionCredentialRequired("runtime_locked: supply private key material from the CLI or Client2")))?;
+        anyhow::ensure!(supplied.profile == crate::service::data_dir().canonicalize()?
+            && supplied.session == session_digest(&data)?, "runtime_locked: session changed; host must supply its key again");
+        return Ok((supplied.keys.clone(), supplied.owner.clone()));
+    }
+    unlock_local_session_snapshot(&data)
+}
+
+struct RuntimeSession {
+    profile: PathBuf,
+    session: String,
+    keys: SessionKeys,
+    owner: Option<String>,
+}
+
+static RUNTIME_SESSION: std::sync::Mutex<Option<RuntimeSession>> = std::sync::Mutex::new(None);
+
+fn session_digest(data: &serde_json::Value) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(data)?)))
+}
+
+/// Accept explicit host input only. Never consult or write a native key store.
+pub fn supply_runtime_session(input: respire_protocol::credentials::RuntimeUnlock) -> Result<()> {
+    supply_runtime_session_inner(input, None)
+}
+
+pub fn supply_runtime_session_v2(input: respire_protocol::credentials::RuntimeUnlockV2) -> Result<()> {
+    use respire_protocol::credentials::{RuntimeUnlock, CREDENTIAL_SCHEMA_V, RUNTIME_UNLOCK_SCHEMA_V2};
+    anyhow::ensure!(input.schema_version == RUNTIME_UNLOCK_SCHEMA_V2, "unsupported runtime unlock schema");
+    let legacy = RuntimeUnlock {
+        schema_version: CREDENTIAL_SCHEMA_V,
+        profile: input.profile,
+        session_sha256: input.session_sha256,
+        instance_id: input.instance_id,
+        generation: input.generation,
+        super_password: input.super_password,
+        login_password: input.login_password,
+        legacy_secret: input.legacy_secret,
+        provider_credentials: Vec::new(),
+    };
+    supply_runtime_session_inner(legacy, Some(input.provider_update))
+}
+
+fn supply_runtime_session_inner(mut input: respire_protocol::credentials::RuntimeUnlock,
+    update: Option<respire_protocol::credentials::ProviderCredentialUpdate>) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(input.schema_version == respire_protocol::credentials::CREDENTIAL_SCHEMA_V
+        && input.profile.is_absolute()
+        && !input.profile.components().any(|part| part == std::path::Component::ParentDir)
+        && input.profile.canonicalize()? == crate::service::data_dir().canonicalize()?,
+        "unlock profile mismatch");
+    let bytes = std::fs::read(session_file()?)?;
+    anyhow::ensure!(format!("{:x}", Sha256::digest(&bytes)) == input.session_sha256,
+        "unlock session revision mismatch");
+    let data: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let user = data["user"].as_str().unwrap_or("");
+    let mut material = data.clone();
+    let version = data["vault_version"].as_u64().unwrap_or(1);
+    let fields = material.as_object_mut().context("session must contain an object")?;
+    for name in ["super", "secret_key", "pass", "secret"] { fields.remove(name); }
+    if let Some(value) = &input.legacy_secret {
+        if version == 3 { material["secret_key"] = serde_json::json!(value); }
+        else if version < 2 { material["secret"] = serde_json::json!(value); }
+    }
+    let keys = unlock_session_keys(&material, input.login_password.as_deref().unwrap_or(""),
+        input.super_password.as_deref(), user)?;
+    anyhow::ensure!(std::fs::read(session_file()?)? == bytes, "session changed during unlock");
+    let session = RuntimeSession {
+        profile: input.profile.canonicalize()?, session: session_digest(&data)?, keys,
+        owner: (!user.trim().is_empty()).then(|| user.to_owned()),
+    };
+    let mut current = RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))?;
+    match update {
+        Some(update) => crate::credential_io::apply_provider_update(update)?,
+        None => crate::credential_io::supply_credentials(std::mem::take(&mut input.provider_credentials))?,
+    }
+    *current = Some(session);
+    Ok(())
+}
+
+pub fn clear_runtime_session() -> Result<()> {
+    *RUNTIME_SESSION.lock().map_err(|_| anyhow!("runtime session lock poisoned"))? = None;
+    crate::credential_io::supply_credentials(Vec::new())?;
+    Ok(())
 }
 
 /// Keep key material and owner inseparable even if the profile changes after reading.
@@ -111,8 +199,15 @@ fn unlock_local_session_snapshot(data: &serde_json::Value) -> Result<(SessionKey
     let explicit_pass = if data["vault_version"] == 1 {
         crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty())
     } else { None };
-    let pass = explicit_pass.or_else(|| data["pass"].as_str().map(ToOwned::to_owned))
-        .or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default();
+    let supplied_pass = explicit_pass.or_else(|| data["pass"].as_str().map(ToOwned::to_owned));
+    let pass = if data["vault_version"].as_i64().unwrap_or(1) == 1 && supplied_pass.is_none() {
+        match data["keyring_backend"].as_str() {
+            Some(backend) => crate::keystore::read_imported_v1_password(
+                data["keyring_account"].as_str().unwrap_or(&user), backend)?,
+            None => crate::keystore::load_login_pass(&user).ok_or_else(|| anyhow::Error::new(
+                SessionCredentialRequired("original login password is required")))?,
+        }
+    } else { supplied_pass.or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default() };
     let keys = unlock_session_keys(data, &pass, None, &user)?;
     let owner = if user.trim().is_empty() { None } else { Some(user) };
     Ok((keys, owner))
@@ -276,11 +371,8 @@ pub fn unlock_session_keys(
                 .or_else(|| data["super"].as_str())
                 .or(stored_super.as_deref())
                 .ok_or_else(|| anyhow::Error::new(SessionCredentialRequired("super password required")))?;
-            let secret_key = data["secret_key"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("Secret Key required"))?;
-            crate::memory::SessionKeys::unlock_vault(super_pass, secret_key, salt, wrapped, nonce)
+            let secret_key = legacy_session_factor(data, user, "secret_key")?;
+            crate::memory::SessionKeys::unlock_vault(super_pass, &secret_key, salt, wrapped, nonce)
         }
         // v2: super password (passphrase) only
         Some(2) => {
@@ -296,7 +388,7 @@ pub fn unlock_session_keys(
         // v1: original login password + Account Secret, retained during normal login.
         _ => crate::memory::SessionKeys::unlock(
             login_pass,
-            data["secret"].as_str().ok_or_else(|| anyhow!("session missing secret"))?,
+            &legacy_session_factor(data, user, "secret")?,
             salt,
             wrapped,
             nonce,
@@ -307,6 +399,16 @@ pub fn unlock_session_keys(
     } else {
         Ok(keys)
     }
+}
+
+fn legacy_session_factor(data: &serde_json::Value, user: &str, field: &str) -> Result<String> {
+    if let Some(value) = data[field].as_str().filter(|value| !value.is_empty()) {
+        return Ok(value.to_owned());
+    }
+    let backend = data["legacy_secret_backend"].as_str().context("original legacy factor is missing")?;
+    anyhow::ensure!(backend != "kernel", "legacy factor requires a persistent host backend");
+    let alias = data["keyring_account"].as_str().unwrap_or(user);
+    crate::keystore::read_imported(alias, "legacy-secret", backend)
 }
 
 /// Missing material is distinguishable from malformed sessions or failed decryption.
@@ -642,37 +744,6 @@ fn unlock_cloud_vault(
     }
 }
 
-/// Reset super password: current code (keyring/--super/input) unwraps URK → mint a new code → rewrap v4 → upload.
-/// URK unchanged, data stays. Requires login (token). Returns the new super password.
-pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String> {
-    let mut data = read_session_json()?;
-    let user = data["user"].as_str().unwrap_or("").to_owned();
-    let token = data["token"].as_str().unwrap_or("").to_owned();
-    anyhow::ensure!(!token.is_empty(), "not logged in \u{2014} run rsrs login before resetting the super password");
-    let addr = match addr.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(a) => a.to_owned(),
-        None => data["addr"].as_str().unwrap_or(crate::service::DEFAULT_SERVER_ADDR).to_owned(),
-    };
-    let keys = unlock_session_keys(&data, data["pass"].as_str().unwrap_or(""), super_arg, &user)
-        .context("unlock failed \u{2014} current super password required (or one stored in the local keyring)")?;
-    let new_super = crypto::generate_secret_key();
-    let (kdf_salt, wrapped_urk, urk_nonce) = if data["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX))
-        || data["crypto_namespace"].as_str() == Some(crypto::RSRS_PREFIX) {
-        wrap_with_rsrs(&new_super, &keys.urk)?
-    } else {
-        wrap_with_v4(&new_super, &keys.urk)?
-    };
-    data["secret_key"] = serde_json::Value::String(new_super.clone());
-    data["kdf_salt"] = serde_json::Value::String(kdf_salt);
-    data["wrapped_urk"] = serde_json::Value::String(wrapped_urk);
-    data["urk_nonce"] = serde_json::Value::String(urk_nonce);
-    data["vault_version"] = serde_json::json!(4);
-    data.as_object_mut().map(|o| o.remove("super"));
-    put_vault(&addr, &token, &data)?;
-    write_session_json(&data)?;
-    crate::keystore::save_super(&user, &new_super).ok();
-    Ok(new_super)
-}
 
 /// Mutate the in-memory candidate session only; do not overwrite saved material on network or unlock failure.
 pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
@@ -1019,6 +1090,55 @@ mod tests {
             assert!(load_local_session()?.urk == second_urk);
         }
         Ok(())
+    }
+
+    #[test]
+    fn unlock_v2_keeps_session_authentication_independent_of_provider_failure() -> Result<()> {
+        use respire_protocol::credentials::{ProviderCredentialStatus, ProviderCredentialUpdate,
+            ProviderUnavailableCode, RuntimeUnlockV2, RUNTIME_UNLOCK_SCHEMA_V2};
+        use sha2::{Digest, Sha256};
+        let _iso = crate::test_lock::Isolate::new()?;
+        let result = (|| -> Result<()> {
+            let salt = crypto::random_hex(16);
+            let kek = crypto::derive_super_kek("synthetic-super", &salt)?;
+            let expected = [17; 32];
+            let (nonce, wrapped) = crypto::wrap_key(&expected, &kek)?;
+            write_session_json(&serde_json::json!({"user":"provider-fixture", "vault_version":2,
+                "kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}))?;
+            let digest = format!("{:x}", Sha256::digest(std::fs::read(session_file()?)?));
+            let input = |password: &str, digest: &str, provider_update| -> Result<RuntimeUnlockV2> {
+                Ok(RuntimeUnlockV2 { schema_version:RUNTIME_UNLOCK_SCHEMA_V2,
+                    profile:crate::service::data_dir().canonicalize()?, session_sha256:digest.into(),
+                    instance_id:"fixture".into(), generation:1,
+                    super_password:Some(password.into()), login_password:None, legacy_secret:None,
+                    provider_update })
+            };
+            supply_runtime_session_v2(input("synthetic-super", &digest,
+                ProviderCredentialUpdate::Unavailable { code:ProviderUnavailableCode::AccessDenied })?)?;
+            {
+                let supplied = RUNTIME_SESSION.lock().map_err(|_| anyhow!("fixture session lock poisoned"))?;
+                let supplied = supplied.as_ref().context("authenticated session was not installed")?;
+                assert_eq!(supplied.keys.urk, expected);
+                assert_eq!(supplied.owner.as_deref(), Some("provider-fixture"));
+            }
+            assert_eq!(crate::credential_io::provider_status()?,
+                ProviderCredentialStatus::Unavailable { code:ProviderUnavailableCode::AccessDenied });
+            assert!(crate::credential_io::ensure_provider_credentials_available().is_err());
+            assert!(matches!(crate::credential_io::Entry::new("rsrs", "classify:typesafe", "native")
+                .get_password(), Err(respire_protocol::credentials::CredentialError::Unavailable)));
+            for (password, revision) in [("wrong-super", digest.as_str()), ("synthetic-super", "wrong-revision")] {
+                assert!(supply_runtime_session_v2(input(password, revision,
+                    ProviderCredentialUpdate::Replace { credentials:Vec::new() })?).is_err());
+                assert_eq!(crate::credential_io::provider_status()?,
+                    ProviderCredentialStatus::Unavailable { code:ProviderUnavailableCode::AccessDenied });
+            }
+            supply_runtime_session_v2(input("synthetic-super", &digest,
+                ProviderCredentialUpdate::Replace { credentials:Vec::new() })?)?;
+            assert_eq!(crate::credential_io::provider_status()?, ProviderCredentialStatus::Ready);
+            Ok(())
+        })();
+        clear_runtime_session()?;
+        result
     }
 
     #[test]

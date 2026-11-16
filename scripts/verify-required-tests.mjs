@@ -44,6 +44,7 @@ function readJSON(path) {
 }
 
 function validateNativeSdk(value, owner, label) {
+  if (owner === "cli" && value === null) return;
   if (owner === "client2") {
     if (value !== null) fail(`${label}: client2 native SDK must be explicit null`);
     return;
@@ -283,6 +284,7 @@ function executionReports() {
     if (!ids.has(report.test_id)) fail(`unexpected execution report: ${key}`);
     if (report.schema !== 2) fail(`${key}: required-execution/v2 report schema required`);
     if (Object.hasOwn(report, "sdk")) fail(`${key}: v2 report forbids ambiguous global sdk`);
+    if (manifest.owner === "cli" && report.actual_native_sdk !== null) fail(`${key}: frontend CLI native SDK must be explicit null`);
     validateNativeSdk(report.actual_native_sdk, manifest.owner, `${key} actual_native_sdk`);
     if (report.status !== "passed" ||
         !["source-test", "real-artifact"].includes(report.coverage) ||
@@ -349,8 +351,9 @@ if (checkRun) {
       const candidateArtifact = candidate.components[manifest.owner].artifacts[target];
       if (!candidateArtifact) fail(`${test.id}/${target}: target absent from final candidate`);
       const expectedSdk = candidateArtifact.native_sdk;
-      if (manifest.owner !== "client2" && ["version", "manifest_sha256", "archive_sha256"].some(
-        (field) => report.actual_native_sdk[field] !== expectedSdk[field])) {
+      if (manifest.owner !== "cli" && (expectedSdk === null ? report.actual_native_sdk !== null :
+          report.actual_native_sdk === null || ["version", "manifest_sha256", "archive_sha256"].some(
+            (field) => report.actual_native_sdk[field] !== expectedSdk[field]))) {
         fail(`${test.id}/${target}: actual native SDK differs from candidate ${manifest.owner}/${target}`);
       }
       const missingCases = test.required_cases.filter((name) =>

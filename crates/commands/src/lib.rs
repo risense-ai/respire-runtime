@@ -19,7 +19,6 @@
 
 pub mod admission;
 pub mod app_version;
-pub mod autostart;
 pub mod bench;
 pub mod classify;
 pub mod cli_def;
@@ -29,7 +28,7 @@ pub mod hooks;
 pub mod host_hooks;
 pub mod i18n;
 pub mod metadata;
-pub mod model_install;
+pub mod model_assets;
 pub mod model_progress;
 pub mod net_rpc;
 pub mod network;
@@ -52,5 +51,3 @@ pub mod util;
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub mod legacy_host;

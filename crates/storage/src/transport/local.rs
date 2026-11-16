@@ -1251,6 +1251,37 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         );",
     )?;
     connection.execute_batch(include_str!("local/revision_schema.sql"))?;
+    // Upgraded libraries can retain content columns absent from the current schema.
+    let mut installed_legacy_revision_trigger = false;
+    for column in ["when_to_use", "superseded_by"] {
+        if cols.iter().any(|existing| existing == column) {
+            let name = format!("memory_revision_{column}_update");
+            if connection.prepare(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1 COLLATE NOCASE AND tbl_name='memories' COLLATE NOCASE",
+            )?.exists([&name])? {
+                continue;
+            }
+            connection.execute_batch(&format!(
+                "CREATE TRIGGER {name}
+                 AFTER UPDATE OF {column} ON memories
+                 WHEN OLD.{column} IS NOT NEW.{column}
+                 BEGIN
+                     UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1';
+                 END;"
+            ))?;
+            installed_legacy_revision_trigger = true;
+        }
+    }
+    if installed_legacy_revision_trigger {
+        // Earlier revisions may have missed updates to these columns.
+        anyhow::ensure!(
+            connection.execute(
+                "UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1'",
+                [],
+            )? == 1,
+            "memory revision unavailable while installing legacy triggers"
+        );
+    }
     witness::install(connection)?;
     Ok(())
 }

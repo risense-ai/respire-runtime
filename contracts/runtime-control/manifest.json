@@ -75,7 +75,6 @@
       "fixtures/positive/host-key-unknown.json",
       "fixtures/positive/host-model-maintenance-install_engines-plan.json",
       "fixtures/positive/host-model-maintenance-install_engines-verify.json",
-      "fixtures/positive/host-model-maintenance-reset_cpu-apply.json",
       "fixtures/positive/host-model-maintenance-reset_cpu-plan.json",
       "fixtures/positive/host-model-maintenance-uninstall_m3-plan.json",
       "fixtures/positive/host-model-maintenance-uninstall_m3-verify.json",
@@ -402,7 +401,8 @@
       "fixtures/negative/host-snapshot-legacy-result-fingerprint.json",
       "fixtures/negative/host-snapshot-legacy-unknown-finishes.json",
       "fixtures/negative/host-snapshot-legacy-public.json",
-      "fixtures/negative/host-snapshot-legacy-phase.json"
+      "fixtures/negative/host-snapshot-legacy-phase.json",
+      "fixtures/negative/host-model-maintenance-reset_cpu-apply.json"
     ]
   },
   "files": [
@@ -832,7 +832,7 @@
     },
     {
       "path": "consumers/private_host_control.rs",
-      "sha256": "660174fe298e264e045937cc66ee34368bebda501be53f2891754e575c23e194"
+      "sha256": "3b60dd07ba3488556833afa54140c824ddc4c59a3d169e593cbb1dfe8b250f93"
     },
     {
       "path": "fixtures/positive/host-model-verify-loaded.json",
@@ -1227,12 +1227,12 @@
       "sha256": "73799568eeef06333065bccfeb99d0d682e1530e5c408d3c1af5a36ff853a97d"
     },
     {
-      "path": "fixtures/positive/host-model-maintenance-reset_cpu-apply.json",
-      "sha256": "f5a301a741dd0143a788568e6e0733265c188a6088b5fe5db0758c095d40d608"
+      "path": "fixtures/negative/host-model-maintenance-reset_cpu-apply.json",
+      "sha256": "3b20c71ba3adedb00d49583de083bf471c293dd3e8317009aecc3b2e51a6cc5a"
     },
     {
       "path": "fixtures/positive/host-model-maintenance-reset_cpu-plan.json",
-      "sha256": "81b07a513b4602a30de11db97c77e4fa232e9c5c93fba429e74e23b5e939f928"
+      "sha256": "b02668333085763fc7c1075171fe60b47bddb7d02701c903debb681bca8a64b1"
     },
     {
       "path": "fixtures/positive/host-model-maintenance-uninstall_m3-plan.json",
@@ -1440,7 +1440,7 @@
     },
     {
       "path": "fixtures/negative/host-model-maintenance-argv.json",
-      "sha256": "60a61fb42d6fb1f6b93865017ff3e1bb89e65d5ee07acfa63fcf824e4695a8d2"
+      "sha256": "bf61409e8ae17a70cf6a46fb47435c13412c912fb721b9b1bda81d403de8af0e"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-catalog-destination.json",
@@ -1460,71 +1460,71 @@
     },
     {
       "path": "fixtures/negative/host-model-maintenance-envelope-copy.json",
-      "sha256": "e55832b61d5625607daf1c1c4da12cfc13beceb155a906c5e728c452557123d0"
+      "sha256": "b33082f95e41cdd530daafb20e5093f4ef59d64966310261eacf7a92d8eef6cd"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-expected.json",
-      "sha256": "eadea5a0ed2407aeebed46d7a446d6c94806431facfa213bcaebd461052006b6"
+      "sha256": "47693fe9619fa67005db2fd59b5229551a8f7f4564aa3bd5bb1ad853bf7b3e8f"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-false-applied.json",
-      "sha256": "1f4ee1f9ca21dbb77b9f6a85be71d610d042ead48ad1719a3caad67e3e6f5a38"
+      "sha256": "b7b07c9be753e5cf8c7211efafe4d3a27f6f75e54c1f20d5b2f4600192ea668d"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-false-verified.json",
-      "sha256": "b117f15d0f14dc2f1dda55c80a53e0d682e933f1b9dd1a080314601e85fe6283"
+      "sha256": "1623f22c637e93c1a2a3ddca0360a4a63c98ad651001b3cba0620ea0079df161"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-finish.json",
-      "sha256": "f8a711382ac4ebfec8cea7b876931a9177d34324cad8bc644da6eb867d2bde61"
+      "sha256": "37a36895b365e864aff03cad2f572c0bba3c8b3834fd8f2dc4f483d109fac204"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-key.json",
-      "sha256": "9a20449fc931ea4f22ea9e3c2341a1ae4feb345028b6faf46a9c20fdf024451b"
+      "sha256": "2fed24de15808a9f5f316baa79b681354d83f6ff97b1d117e7142b73c23e190c"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-npu-ready.json",
-      "sha256": "bdcfde888a55b234b8f706cbb2d81d45b37ddd7001fd577d2f5c7a3f24bfdb30"
+      "sha256": "4e711829d4edda0f54b41843fe79ebb648fe90d745e5b03865142cf627bd5826"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-operation.json",
-      "sha256": "07781a5ce1b801cd50f37254a05edd31dfe2235eff5d20c7100c0d8ae38c9e67"
+      "sha256": "906fd5bc8abcb1705e9e9ef6275bdfc07dd254f17348dfc6815a0243433b93ec"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-params-unknown.json",
-      "sha256": "c69490fae5f152ba87d50b3c6abcb582a1bd23206b7a9949d324c4533660a946"
+      "sha256": "264fc40b577a9433a8c8e6cc973a79d3c4b732c9dd161731b6aea6c1dd79c2ab"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-phase.json",
-      "sha256": "80ea289cc6366681aff140d889333a014b394b77098fe86ca2d86d12bb213deb"
+      "sha256": "825d0f2ff72168e5dd633860319fb02e21be0c6c7107e6eb438a70d3e9c1e80c"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-public.json",
-      "sha256": "fca7929a234079da933234cbf506f7d33acdcba41411289ed967abe0e93fdfe8"
+      "sha256": "3d1b03cc7dcd2ecc4652c1323df2e0b0fc40483e14edc665e04fbaf748ceccca"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-result-unknown.json",
-      "sha256": "3ebb775860b1dc5ede1190425b1748db0a478bee6ab013fac5a4c020a87f79fa"
+      "sha256": "7db71c9ce9a2c2a078f379a8f3b702c33b2eb1ef1fc5c13890fc275f6908cebf"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-review-mismatch.json",
-      "sha256": "a91eceef9e611838a8663430b72eac30a904126b0e93ebca40d612806615f294"
+      "sha256": "2992a2671eff9c03c5a2fd11a4556a6ca3ee92fa9486ef05bb88f45fe76f0a02"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-review-uppercase.json",
-      "sha256": "dd2cce5ee8f43e4784cf42606e17a4a588b2931772bba99c9f183f6b32efe0ed"
+      "sha256": "7b14c520a24d86fb7f2745a3662c2c857ed17a387c5138239be37fe7f1df30ee"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-scope.json",
-      "sha256": "ea598d6ceab7077905d361c8d782e5db2459bd745cbb2060893231ca3d890466"
+      "sha256": "866349652161c5716d4b750dc9f21b7c9cdcb57a9c95f1fc57a7a7ba22e197ea"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-secret.json",
-      "sha256": "ff18d88cc0083787ef78af0bb4729c388527704495be201a34fd498b953ad1b6"
+      "sha256": "50e8bffb23e859a2fc43ce2fe08f29d4bb870a83112deb58c186cc7290b9737d"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-store-ready.json",
-      "sha256": "54ab63a4b4a6c529c31ac8ec6761fe055af1a162fb08a23d70a41e6cdde97d27"
+      "sha256": "30df722aa875f325a3c24e880143d52c93f2c528c744f9c207aa3c1085486b93"
     },
     {
       "path": "fixtures/negative/host-model-maintenance-wrong-phase.json",

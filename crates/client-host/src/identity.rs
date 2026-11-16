@@ -101,7 +101,8 @@ pub fn read_migrated_local_session(
             // Old copy-only migration retained these fields; neither is authority.
             || (matches!(field.as_str(), "pass" | "super") && session[field].is_string())
             || (version == 1 && field == "secret")
-            || (version == 3 && field == "secret_key")), "invalid migrated local session fields");
+            || (version == 3 && field == "secret_key")
+            || (matches!(version, 1 | 3) && field == "legacy_secret_backend")), "invalid migrated local session fields");
     for field in ["kdf_salt", "wrapped_urk", "urk_nonce", "keyring_account", "keyring_backend"] {
         anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
             "migrated local session material is missing");
@@ -111,8 +112,13 @@ pub fn read_migrated_local_session(
         && session["wrapped_urk"].as_str().is_some_and(|value| value.starts_with("rsrs:v1:") == current_namespace)
         && session["keyring_backend"] != "kernel", "invalid migrated local namespace or backend");
     if let Some(field) = match version { 1 => Some("secret"), 3 => Some("secret_key"), _ => None } {
-        anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
-            "original migration factor is missing");
+        match session.get("legacy_secret_backend") {
+            Some(backend) => anyhow::ensure!(backend.as_str().is_some_and(|value| !value.is_empty() && value != "kernel")
+                && ["pass", "super", "secret", "secret_key"].iter().all(|field| session.get(*field).is_none()),
+                "invalid migrated host factor reference"),
+            None => anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
+                "original migration factor is missing"),
+        }
     }
     let receipt_bytes = read_identity_record(&directory.join(".rsrs-migration.json"))?;
     let receipt: Value = serde_json::from_slice(&receipt_bytes).context("invalid migration receipt JSON")?;
@@ -183,10 +189,11 @@ fn offline_recovery_candidate(session: &Value) -> bool {
     let Some(version @ (1 | 2 | 4)) = session["vault_version"].as_i64() else { return false; };
     session["user"] == "" && session["addr"] == ""
         && object.len() == (if version == 1 { 10 } else { 9 })
-        && (version != 1 || session["secret"].as_str().is_some_and(|value| !value.is_empty()))
+        && (version != 1 || session["legacy_secret_backend"].as_str()
+            .is_some_and(|value| !value.is_empty() && value != "kernel"))
         && object.keys().all(|field| matches!(field.as_str(), "user" | "addr" | "vault_version"
             | "kdf_salt" | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "auth_operation_id")
-            || (version == 1 && field == "secret"))
+            || (version == 1 && field == "legacy_secret_backend"))
 }
 
 #[cfg(test)]
@@ -235,6 +242,18 @@ mod tests {
             if version == 3 { migrated["secret_key"] = serde_json::json!("original-secret-key"); }
             assert!(read(&migrated).is_err());
             assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_some());
+            if matches!(version, 1 | 3) {
+                let mut referenced = migrated.clone();
+                referenced.as_object_mut().context("migration fixture must be an object")?
+                    .remove(if version == 1 { "secret" } else { "secret_key" });
+                referenced["legacy_secret_backend"] = serde_json::json!("native");
+                std::fs::write(&path, serde_json::to_vec(&referenced)?)?;
+                assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_some());
+                referenced["legacy_secret_backend"] = serde_json::json!("kernel");
+                std::fs::write(&path, serde_json::to_vec(&referenced)?)?;
+                assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned()).is_err());
+                std::fs::write(&path, serde_json::to_vec(&migrated)?)?;
+            }
             assert!(host_session_user_of_dir(root.path(), |_| "digest".to_owned())?.is_none());
             assert!(session_user_of_dir(root.path()).is_err());
             let mut prior_namespace = migrated.clone();
@@ -282,9 +301,9 @@ mod tests {
                 "kdf_salt":"salt", "wrapped_urk":"wrap", "urk_nonce":"nonce",
                 "keyring_account":"login-fixture", "keyring_backend":"native",
                 "auth_operation_id":"00000000-0000-4000-8000-000000000001"});
-            if version == 1 { session["secret"] = serde_json::json!("synthetic-account-secret"); }
+            if version == 1 { session["legacy_secret_backend"] = serde_json::json!("native"); }
             assert!(offline_recovery_candidate(&session));
-            for field in ["token", "session_id", "pass", "super", "secret_key"] {
+            for field in ["token", "session_id", "pass", "super", "secret", "secret_key"] {
                 let mut changed = session.clone();
                 changed[field] = serde_json::json!("unexpected");
                 assert!(!offline_recovery_candidate(&changed));

@@ -7,8 +7,10 @@ import {pathToFileURL} from 'node:url';
 import {auditSdkDirectory, observeSdkArchive} from './sdk-ci-cache.mjs';
 
 // This creates inputs, never acceptance reports. No SDK archive is uploaded.
-export const FREEZE_TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin'];
-const client2Source = '57bc070826949994c3f7ce9a64277160704bdfe5';
+export const FREEZE_TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin',
+  'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc', 'x86_64-apple-darwin',
+  'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'];
+const client2Source = '6ffa187685734873721ab51f3a54d8b2c29cd269';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 function ordinary(root, name) {
   assert.ok(typeof name === 'string' && name && !/[\\:\0]/.test(name));
@@ -62,13 +64,13 @@ export function validatePart(part, expected, target) {
   for (const key of ['source_sha', 'cli_source_sha', 'run_id', 'run_attempt']) assert.equal(part[key], expected[key]);
   assert.ok(typeof part.runtime_version === 'string' && part.runtime_version);
   assert.ok(typeof part.cli_version === 'string' && part.cli_version);
-  for (const owner of ['runtime', 'cli']) {
+  assert.equal(part.native_sdk.cli, null, 'The frozen CLI is a frontend, not an SDK consumer');
+  for (const owner of ['runtime']) {
     const observed = part.native_sdk[owner];
     assert.deepEqual(Object.keys(observed).sort(), ['archive_sha256', 'manifest_sha256', 'version']);
-    assert.ok(observed.version);
+    assert.ok(typeof observed.version === 'string' && observed.version);
     for (const key of ['archive_sha256', 'manifest_sha256']) assert.match(observed[key], /^[a-f0-9]{64}$/);
   }
-  assert.deepEqual(part.native_sdk.runtime, part.native_sdk.cli);
   assert.ok(Array.isArray(part.files) && part.files.length);
   const names = new Set();
   for (const file of part.files) {
@@ -88,25 +90,37 @@ function staged(sdk, script, output, target) {
   return core;
 }
 function archive(payload, output) {
-  execFileSync('tar', ['--format=ustar', '-czf', output, '-C', payload, '.'], {stdio: 'inherit'});
+  // Git's tar treats Windows drive letters as remote hosts; use the native tool.
+  const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar';
+  execFileSync(tar, ['--format=ustar', '-czf', output, '-C', payload, '.'], {stdio: 'inherit'});
 }
-function packagePart() {
+export function observeConsumerSdk(root, target) {
+  const lock = bytes(root, 'sdk/core-sdk.lock.json');
+  assert.ok(lock.equals(bytes(root, 'crates/core-sdk/core-sdk.lock.json')), 'Consumer SDK lock copies differ');
+  const entry = JSON.parse(lock).targets[target];
+  const observed = observeSdkArchive(bytes(root, `.sdk-archives/${target}/sdk.tar.gz`), target, entry);
+  auditSdkDirectory(join(root, '.sdk', target), target, entry);
+  assert.equal(digest(bytes(root, `.sdk/${target}/manifest.json`)), observed.manifest_sha256);
+  return observed;
+}
+export function frontendMetadata(binary, target, version, context) {
+  assert.ok(binary.length > 0, 'Frozen frontend binary must not be empty');
+  return {schema_version: 2, artifact_layout: 'cli-frontend-v2', version, git_sha: context.cli_source_sha,
+    target, binary_file: `rsrs-${target}${target.includes('windows') ? '.exe' : ''}`,
+    binary_size: binary.length, binary_sha256: digest(binary),
+    producer: {run_id: context.run_id, run_attempt: context.run_attempt}};
+}
+async function packagePart() {
   const context = checkedContext(), target = process.env.RUNTIME_TARGET;
   assert.ok(FREEZE_TARGETS.includes(target));
-  assert.equal(process.platform, target.includes('apple') ? 'darwin' : 'linux');
+  assert.equal(process.platform, target.includes('windows') ? 'win32' : target.includes('apple') ? 'darwin' : 'linux');
   assert.equal(process.arch, target.includes('aarch64') ? 'arm64' : 'x64');
   const cli = resolve('.cli-source');
   assert.equal(execFileSync('git', ['-C', cli, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), context.cli_source_sha);
   assert.equal(execFileSync('git', ['-C', cli, 'diff', '--name-only', 'HEAD'], {encoding: 'utf8'}).trim(), '');
-  const lock = bytes('.', 'sdk/core-sdk.lock.json');
-  for (const path of ['crates/core-sdk/core-sdk.lock.json', '.cli-source/sdk/core-sdk.lock.json', '.cli-source/crates/core-sdk/core-sdk.lock.json']) assert.ok(lock.equals(bytes('.', path)));
-  const entry = JSON.parse(lock).targets[target], native_sdk = {};
-  for (const [owner, root] of [['runtime', resolve('.')], ['cli', cli]]) {
-    native_sdk[owner] = observeSdkArchive(bytes(root, `.sdk-archives/${target}/sdk.tar.gz`), target, entry);
-    auditSdkDirectory(join(root, '.sdk', target), target, entry);
-    assert.equal(digest(bytes(root, `.sdk/${target}/manifest.json`)), native_sdk[owner].manifest_sha256);
-  }
-  assert.deepEqual(native_sdk.runtime, native_sdk.cli);
+  const native_sdk = {runtime: observeConsumerSdk(resolve('.'), target), cli: null};
+  const dependencies = execFileSync('cargo', ['tree', '--locked', '-p', 'respire', '--edges', 'normal', '--prefix', 'none'], {cwd: cli, encoding: 'utf8'});
+  assert.doesNotMatch(dependencies, /^respire_core_sdk\s/m, 'Frontend CLI must not consume the native SDK');
   const runtimeMetadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
   const cliMetadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {cwd: cli, encoding: 'utf8'}));
   const runtimePackage = runtimeMetadata.packages.filter(value => value.name === 'respire_runtime');
@@ -119,13 +133,23 @@ function packagePart() {
   const work = join(process.env.RUNNER_TEMP, `freeze-payload-${target}`); mkdirSync(work);
   const runtimePayload = join(work, 'runtime'), cliPayload = join(work, 'cli');
   staged(resolve('.sdk', target), 'scripts/stage-core-runtime.mjs', runtimePayload, target);
-  staged(join(cli, '.sdk', target), join(cli, 'scripts/stage-core-runtime.mjs'), cliPayload, target);
-  const runtimeName = `rsrs-runtime-${target}`, cliName = `rsrs-${target}`;
-  copyFileSync(ordinary('.', 'target/debug/rsrs-runtime'), join(runtimePayload, runtimeName));
-  copyFileSync(ordinary(cli, 'target/debug/rsrs'), join(cliAssets, cliName));
+  mkdirSync(cliPayload);
+  const suffix = target.includes('windows') ? '.exe' : '';
+  const runtimeName = `rsrs-runtime-${target}${suffix}`, cliName = `rsrs-${target}${suffix}`;
+  const build = target.includes('musl') ? `target/ci/${target}/debug` : `target/${target}/debug`;
+  copyFileSync(ordinary('.', `${build}/rsrs-runtime${suffix}`), join(runtimePayload, runtimeName));
+  copyFileSync(ordinary(cli, `${build}/rsrs${suffix}`), join(cliAssets, cliName));
+  copyFileSync(join(cliAssets, cliName), join(cliPayload, cliName));
   copyFileSync(join(runtimePayload, runtimeName), join(release, runtimeName));
   const inventory = files(runtimePayload).map(path => ({path, size: bytes(runtimePayload, path).length, sha256: digest(bytes(runtimePayload, path))}));
   const runtimeArchive = `rsrs-runtime-${target}.tar.gz`, cliArchive = `rsrs-${target}-runtime.tar.gz`;
+  const cliBuild = frontendMetadata(bytes(cliAssets, cliName), target, cliVersion, context);
+  const {validateBuildMetadata} = await import(pathToFileURL(join(cli, 'npm/scripts/verify-binary.mjs')).href);
+  validateBuildMetadata(cliBuild, json(cli, 'npm/artifact-manifest.json'), target,
+    {sha: context.cli_source_sha, version: cliVersion, run_id: context.run_id, run_attempt: context.run_attempt},
+    {file: cliName, size: cliBuild.binary_size, sha256: cliBuild.binary_sha256});
+  save(join(cliAssets, `cli-build-${target}.json`), cliBuild);
+  copyFileSync(join(cliAssets, `cli-build-${target}.json`), join(cliPayload, `cli-build-${target}.json`));
   archive(runtimePayload, join(release, runtimeArchive)); archive(cliPayload, join(cliAssets, cliArchive));
   const cliHash = digest(bytes(cliAssets, cliName));
   // Candidate identity is created BEFORE freezing or hashing this original sidecar.
@@ -134,11 +158,8 @@ function packagePart() {
     archive_sha256: digest(bytes(release, runtimeArchive)), binary_file: runtimeName,
     binary_sha256: digest(bytes(release, runtimeName)), source_commit: context.source_sha,
     compat: {min_cli: cliVersion, max_cli: '*'}, protocol_range: {minimum: 1, maximum: 1},
-    capabilities: {business_executor: '1', mcp_server: '1'}, files: inventory,
+    capabilities: {business_executor: '1', mcp_server: '1', offline_keygen_handoff: '1'}, files: inventory,
     candidate: {kind: 'unpublished-source-fixture', cli_source_sha: context.cli_source_sha, cli_binary_sha256: cliHash}});
-  save(join(cliAssets, `cli-build-${target}.json`), {version: cliVersion, git_sha: context.cli_source_sha,
-    target, binary_file: cliName, binary_sha256: cliHash, runtime_file: cliArchive,
-    runtime_sha256: digest(bytes(cliAssets, cliArchive))});
   if (target === FREEZE_TARGETS[0]) {
     for (const path of files(cliPayload)) copy(cliPayload, path, cliAssets);
     const desktop = resolve(process.env.RUNNER_TEMP, 'legacy-desktop');
@@ -156,15 +177,30 @@ function packagePart() {
 }
 export function assembleCandidate(parts, expected, artifacts) {
   assert.deepEqual(parts.map(part => part.target).sort(), [...FREEZE_TARGETS].sort());
+  const observedClient2 = artifacts[FREEZE_TARGETS[0]].client2;
+  assert.equal(observedClient2.metadata.source_commit, client2Source);
+  assert.equal(observedClient2.metadata.version, '0.2.56-dev.263', 'Client2 source proof version mismatch');
+  assert.equal(observedClient2.metadata.repository, 'risense-ai/respire-client2');
+  assert.equal(observedClient2.metadata.workflow, '.github/workflows/desktop.yml');
+  assert.equal(observedClient2.metadata.release, 'host-owned-candidate');
+  for (const key of ['run_id', 'run_attempt', 'artifact_id']) {
+    assert.ok(Number.isSafeInteger(observedClient2.metadata[key]) && observedClient2.metadata[key] > 0, `Invalid Client2 proof ${key}`);
+  }
+  assert.match(observedClient2.metadata.artifact_sha256 ?? '', /^[a-f0-9]{64}$/);
+  for (const key of ['archive_sha256', 'binary_sha256']) assert.equal(observedClient2.metadata[key], observedClient2[key]);
   const components = {runtime: {source_sha: expected.source_sha, version: parts[0].runtime_version, artifacts: {}},
     cli: {source_sha: expected.cli_source_sha, version: parts[0].cli_version, artifacts: {}},
-    client2: {source_sha: client2Source, version: '0.2.56', artifacts: {}}};
+    client2: {source_sha: client2Source, version: observedClient2.metadata.version,
+      native_artifact: {...observedClient2.metadata}, artifacts: {}}};
   for (const part of parts) {
     validatePart(part, expected, part.target);
     assert.equal(part.runtime_version, components.runtime.version); assert.equal(part.cli_version, components.cli.version);
     assert.equal(part.native_sdk.runtime.version, parts[0].native_sdk.runtime.version);
-    for (const owner of ['runtime', 'cli']) components[owner].artifacts[part.target] = {...artifacts[part.target][owner], native_sdk: part.native_sdk[owner]};
-    if (part.target === FREEZE_TARGETS[0]) components.client2.artifacts[part.target] = {...artifacts[part.target].client2, native_sdk: null};
+    for (const owner of ['runtime', 'cli']) {
+      components[owner].artifacts[part.target] = {...artifacts[part.target][owner], native_sdk: part.native_sdk[owner]};
+    }
+    if (part.target === FREEZE_TARGETS[0]) components.client2.artifacts[part.target] = {
+      archive_sha256: observedClient2.archive_sha256, binary_sha256: observedClient2.binary_sha256, native_sdk: null};
   }
   for (const component of Object.values(components)) for (const artifact of Object.values(component.artifacts)) {
     for (const key of ['archive_sha256', 'binary_sha256']) assert.match(artifact[key], /^[a-f0-9]{64}$/);
@@ -197,19 +233,21 @@ function assemble() {
       assert.ok(!existsSync(join(output, file.path)), 'Parts must not overwrite each other');
       copy(root, file.path, output);
     }
+    const suffix = target.includes('windows') ? '.exe' : '';
     const runtime = json(root, `release-assets/runtime-build-${target}.json`), cli = json(root, `cli-assets/cli-build-${target}.json`);
     assert.equal(runtime.source_commit, expected.source_sha); assert.equal(runtime.target_triple, target);
     assert.equal(runtime.runtime_version, part.runtime_version); assert.equal(cli.git_sha, expected.cli_source_sha);
     assert.equal(cli.target, target); assert.equal(cli.version, part.cli_version);
     assert.deepEqual(runtime.candidate, {kind: 'unpublished-source-fixture', cli_source_sha: expected.cli_source_sha,
-      cli_binary_sha256: digest(bytes(root, `cli-assets/rsrs-${target}`))});
+      cli_binary_sha256: digest(bytes(root, `cli-assets/rsrs-${target}${suffix}`))});
     const pair = (prefix, binary, archive) => ({binary_sha256: digest(bytes(root, `${prefix}/${binary}`)), archive_sha256: digest(bytes(root, `${prefix}/${archive}`))});
-    const runtimeArtifact = pair('release-assets', `rsrs-runtime-${target}`, `rsrs-runtime-${target}.tar.gz`);
-    const cliArtifact = pair('cli-assets', `rsrs-${target}`, `rsrs-${target}-runtime.tar.gz`);
+    const runtimeArtifact = pair('release-assets', `rsrs-runtime-${target}${suffix}`, `rsrs-runtime-${target}.tar.gz`);
+    const cliArtifact = pair('cli-assets', `rsrs-${target}${suffix}`, `rsrs-${target}-runtime.tar.gz`);
     assert.equal(runtime.binary_sha256, runtimeArtifact.binary_sha256); assert.equal(runtime.archive_sha256, runtimeArtifact.archive_sha256);
-    assert.equal(cli.binary_sha256, cliArtifact.binary_sha256); assert.equal(cli.runtime_sha256, cliArtifact.archive_sha256);
+    assert.deepEqual(cli, frontendMetadata(bytes(root, `cli-assets/rsrs-${target}${suffix}`), target, part.cli_version, expected));
     observedArtifacts[target] = {runtime: runtimeArtifact, cli: cliArtifact};
-    if (target === FREEZE_TARGETS[0]) observedArtifacts[target].client2 = pair('client2-assets', 'respire', 'respire-linux-amd64.tar.gz');
+    if (target === FREEZE_TARGETS[0]) observedArtifacts[target].client2 = {
+      ...pair('client2-assets', 'respire', 'respire-linux-amd64.tar.gz'), metadata: json(root, 'client2-assets/desktop-source.json')};
     parts.push(part);
   }
   execFileSync('python3', ['scripts/verify-business-archive-payloads.py'], {stdio: 'inherit'});
@@ -220,5 +258,5 @@ function assemble() {
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   assert.ok(['package', 'assemble'].includes(process.argv[2]));
-  if (process.argv[2] === 'package') packagePart(); else assemble();
+  if (process.argv[2] === 'package') await packagePart(); else assemble();
 }

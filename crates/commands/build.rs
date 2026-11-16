@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-fn main() {
+fn main() -> Result<(), std::env::VarError> {
     println!("cargo:rerun-if-changed=../../Cargo.toml");
     let manifest_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
@@ -26,6 +26,10 @@ fn main() {
         ),
     };
     println!("cargo:rustc-env=RSRS_CLI_VERSION={version}");
+    if std::env::var("TARGET")?.contains("apple-darwin") {
+        println!("cargo:rustc-link-arg-examples=-Wl,-rpath,@executable_path");
+    }
+    Ok(())
 }
 
 /// Read `[workspace.package] version` from the runtime workspace manifest.

@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 pub const DEFAULT_RPC_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RPC_PORT: u16 = 15169;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(all(test, unix))]
 const STOP_POLLS: usize = 40;
+#[cfg(all(test, unix))]
 const STOP_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -62,18 +64,6 @@ pub struct Health {
     pub credential_state: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct StopAccepted {
-    #[serde(default)]
-    pub request_id: String,
-    #[serde(default)]
-    pub operation_id: String,
-    #[serde(default)]
-    pub deadline_ms: Option<u64>,
-    #[serde(default)]
-    pub timeout_state: Option<String>,
-}
-
 impl Health {
     pub fn inference_stalled(&self) -> bool {
         self.inference["host_recovery_required"] == true
@@ -96,24 +86,6 @@ pub fn rpc_base_url() -> String {
     format!("http://{DEFAULT_RPC_HOST}:{}", rpc_port())
 }
 
-pub fn no_autostart() -> bool {
-    crate::runtime_policy::client_only()
-}
-
-/// Stable path of the installed CLI binary. Runtime process identity checks
-/// compare a suspect process image against this location (previously provided
-/// by the CLI's mcp module; the transport owns the same rule in one place).
-pub fn stable_bin_path() -> PathBuf {
-    let name = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
-    if let Ok(raw) = respire_app::env::var("RSRS_BIN_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed).join(name);
-        }
-    }
-    respire_app::service::main_data_dir().join("bin").join(name)
-}
-
 pub fn token_path() -> PathBuf {
     crate::rpc_worker::runtime_dir_path().join("token")
 }
@@ -123,7 +95,7 @@ fn load_token() -> Option<String> {
     read_token().ok().flatten()
 }
 
-fn read_token() -> Result<Option<String>> {
+pub(crate) fn read_token() -> Result<Option<String>> {
     if let Ok(raw) = respire_app::env::var("RSRS_RPC_TOKEN") {
         let trimmed = raw.trim().to_owned();
         if !trimmed.is_empty() {
@@ -164,13 +136,51 @@ fn check_connection() -> Result<()> {
     }
 }
 
-pub fn port_is_open() -> bool {
-    port_is_open_on(rpc_port())
-}
-
 pub fn port_is_open_on(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+/// Query the local TCP table without treating a failed query as an absent listener.
+#[cfg(windows)]
+pub fn windows_listener_pid_on(port: u16) -> std::io::Result<Option<u32>> {
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!("netstat TCP listener query failed: {}", out.status)));
+    }
+    windows_listener_pid_from_netstat(&out.stdout, port)
+}
+
+#[cfg(windows)]
+fn windows_listener_pid_from_netstat(stdout: &[u8], port: u16) -> std::io::Result<Option<u32>> {
+    let needle = format!(":{port}");
+    let mut owner = None;
+    for line in stdout.split(|byte| *byte == b'\n') {
+        let line = line.trim_ascii_start();
+        // Localized headings use the OEM code page; TCP data rows use ASCII fields.
+        if line.split(|byte| byte.is_ascii_whitespace()).next() != Some(&b"TCP"[..]) {
+            continue;
+        }
+        let text = std::str::from_utf8(line)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let fields: Vec<_> = text.split_whitespace().collect();
+        if fields.len() != 5 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid TCP table row"));
+        }
+        let pid = fields[4].parse::<u32>()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if fields[3] == "LISTENING" {
+            if pid == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "TCP listener PID is zero"));
+            }
+            if fields[1].ends_with(&needle) && owner.is_none() {
+                owner = Some(pid);
+            }
+        }
+    }
+    Ok(owner)
 }
 
 pub fn pid_listening_on(port: u16) -> Option<u32> {
@@ -373,131 +383,6 @@ pub fn health() -> Result<Health> {
     serde_json::from_value(parsed).context("runtime health shape mismatch")
 }
 
-pub fn request_stop() -> Result<StopAccepted> {
-    request_stop_with_timeout(HTTP_TIMEOUT)
-}
-
-pub fn request_stop_with_timeout(timeout: Duration) -> Result<StopAccepted> {
-    request_stop_for(&health()?, timeout)
-}
-
-pub fn request_stop_for(health: &Health, timeout: Duration) -> Result<StopAccepted> {
-    crate::runtime_policy::require_host("runtime shutdown")?;
-    anyhow::ensure!(
-        !health.installation_id.is_empty()
-            && !health.instance_id.is_empty()
-            && !health.account_id.is_empty()
-            && health.generation > 0,
-        "runtime stop identity is incomplete"
-    );
-    let expected = json!({
-        "installation_id": health.installation_id,
-        "instance_id": health.instance_id,
-        "account_id": health.account_id,
-        "generation": health.generation,
-    })
-    .to_string();
-    let url = format!("{}/api/runtime/stop", rpc_base_url());
-    let response = send_loopback(
-        agent()
-            .post(&url)
-            .timeout(timeout)
-            .set("X-Respire-Lifecycle", "coordinator-v1"),
-        |request| request.send_string(&expected),
-    )?;
-    let value: Value = response
-        .into_json()
-        .context("runtime stop reply is not JSON")?;
-    anyhow::ensure!(
-        value["ok"] == true && value["state"] == "accepted",
-        "runtime did not accept a stop operation"
-    );
-    let accepted: StopAccepted = serde_json::from_value(value)?;
-    anyhow::ensure!(
-        !accepted.request_id.is_empty() && !accepted.operation_id.is_empty(),
-        "runtime stop acknowledgement lacks request or operation ID"
-    );
-    Ok(accepted)
-}
-
-pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result<Value> {
-    anyhow::ensure!(
-        !health.instance_id.is_empty()
-            && health.instance_id.len() <= 128
-            && health
-                .instance_id
-                .bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_'),
-        "invalid runtime stop instance ID"
-    );
-    let root = respire_app::service::main_data_dir();
-    anyhow::ensure!(
-        !health.installation_root.is_empty()
-            && fs::canonicalize(&health.installation_root)? == fs::canonicalize(&root)?,
-        "stopped runtime belongs to another installation"
-    );
-    let path = root
-        .join("runtime")
-        .join(format!("stop-{}.json", health.instance_id));
-    let file = fs::File::open(&path).context("final runtime stop receipt is missing")?;
-    let metadata = file.metadata()?;
-    anyhow::ensure!(
-        metadata.is_file() && metadata.len() <= 1024 * 1024,
-        "invalid stop receipt file"
-    );
-    let mut data = Vec::new();
-    use std::io::Read;
-    file.take(1024 * 1024 + 1).read_to_end(&mut data)?;
-    anyhow::ensure!(data.len() <= 1024 * 1024, "stop receipt exceeds 1 MiB");
-    let receipt: Value = serde_json::from_slice(&data).context("invalid final stop receipt")?;
-    validate_final_stop_receipt(health, operation_id, &receipt)?;
-    Ok(receipt)
-}
-
-pub fn validate_final_stop_receipt(
-    health: &Health,
-    operation_id: Option<&str>,
-    receipt: &Value,
-) -> Result<()> {
-    let expected = serde_json::to_value(health)?;
-    for key in [
-        "installation_id",
-        "instance_id",
-        "process_start_id",
-        "image_path",
-        "image_sha256",
-        "runtime_version",
-        "account_id",
-    ] {
-        anyhow::ensure!(
-            expected[key]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-                && receipt[key] == expected[key],
-            "stop receipt identity mismatch: {key}"
-        );
-    }
-    anyhow::ensure!(
-        health.pid > 0
-            && health.generation > 0
-            && receipt["schema_version"] == 1
-            && receipt["protocol_version"] == health.v
-            && receipt["pid"] == health.pid
-            && receipt["generation"] == health.generation
-            && receipt["operation_id"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
-            && operation_id.is_none_or(|id| receipt["operation_id"] == id),
-        "stop receipt does not match the stopped instance and operation"
-    );
-    anyhow::ensure!(
-        receipt["state"] == "drained"
-            && receipt["unfinished"].as_array().is_some_and(Vec::is_empty),
-        "runtime stopped without a proven complete drain"
-    );
-    Ok(())
-}
-
 pub fn instance_is_running(health: &Health) -> Result<bool> {
     anyhow::ensure!(
         health.pid > 0 && !health.process_start_id.is_empty(),
@@ -555,18 +440,6 @@ pub fn instance_is_running(health: &Health) -> Result<bool> {
     }
 }
 
-pub fn wait_for_instance_exit(health: &Health, timeout: Duration) -> Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
-    while instance_is_running(health)? {
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "runtime drain is pending; no process was forced to exit"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Ok(())
-}
-
 pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
     rpc_method("cli.exec", args)
 }
@@ -609,7 +482,7 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     let command: Vec<_> = crate::rpc_worker::command_words(args).take(2).collect();
     if matches!(
         command.as_slice(),
-        ["model", "install" | "install-m3" | "activate"]
+        ["model", "activate"]
     ) || command
         .first()
         .is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
@@ -681,18 +554,9 @@ pub(crate) fn rpc_method_with_timeout(
     Ok(parsed)
 }
 
-pub fn wait_until_down() -> Result<()> {
-    for _ in 0..STOP_POLLS {
-        if !port_is_open() {
-            return Ok(());
-        }
-        std::thread::sleep(STOP_WAIT);
-    }
-    bail!("runtime did not exit after stop")
-}
-
 /// A closed listener does not prove that the library holder has exited.
-pub fn wait_until_exited(pid: u32) -> Result<()> {
+#[cfg(all(test, unix))]
+fn wait_until_exited(pid: u32) -> Result<()> {
     for _ in 0..STOP_POLLS {
         if !process_is_running(pid)? {
             return Ok(());
@@ -925,71 +789,6 @@ fn darwin_runtime_identity(process: &str, image: &str) -> Result<RuntimeProcessI
     Ok(RuntimeProcessIdentity { started_at: started_at.to_owned(), executable: executable.to_owned() })
 }
 
-pub fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
-    crate::runtime_policy::require_host("runtime recovery")?;
-    anyhow::ensure!(
-        pid != std::process::id() && pid_is_respire(pid),
-        "refusing to terminate an unverified runtime process {pid}"
-    );
-    anyhow::ensure!(
-        &runtime_process_identity(pid)? == identity,
-        "runtime process {pid} changed during shutdown; termination refused"
-    );
-    #[cfg(windows)]
-    {
-        let expected = respire_spawn::ProcessIdentity {
-            birth: identity
-                .started_at
-                .parse()
-                .context("invalid verified process creation time")?,
-            executable: std::path::PathBuf::from(&identity.executable),
-        };
-        respire_spawn::terminate_runtime(pid, &expected)?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let expected = respire_spawn::ProcessIdentity {
-            birth: identity
-                .started_at
-                .parse()
-                .context("invalid verified process creation time")?,
-            executable: std::path::PathBuf::from(&identity.executable),
-        };
-        respire_spawn::terminate_runtime(pid, &expected)?;
-    }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        let status = std::process::Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()?;
-        anyhow::ensure!(
-            status.success(),
-            "failed to terminate runtime process {pid}"
-        );
-    }
-    Ok(())
-}
-
-pub fn kill_pid(pid: u32) {
-    if pid == 0 || pid == std::process::id() {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-    }
-}
-
 /// Used by tests and doctor: ensure the token file exists without starting HTTP.
 pub fn ensure_token_file() -> Result<PathBuf> {
     let token = load_or_create_token()?;
@@ -1198,8 +997,7 @@ mod tests {
             vec!["--model-task-id", "task-one", "import", "synthetic.json"],
             vec!["import", "synthetic.json"],
             vec!["reembed"],
-            vec!["model", "install"],
-            vec!["--json", "--progress-id", "model", "model", "install-m3"],
+            vec!["--json", "--progress-id", "model", "model", "activate", "m3"],
             vec!["model", "--model-task-id", "install", "activate", "m3"],
         ] {
             let parsed = valid_timeout_args(&args);
@@ -1400,6 +1198,37 @@ mod tests {
         let port = listener.local_addr().map_err(|err| err.to_string())?.port();
         if !port_is_open_on(port) {
             return Err(format!("listener on {port} should be open"));
+        }
+        #[cfg(windows)]
+        {
+            let localized = b"\r\n\xbb\xee\xb6\xaf\xc1\xac\xbd\xd3\r\n  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  1234\r\n  TCP  [::1]:43211  [::]:0  TIME_WAIT  0\r\n";
+            if windows_listener_pid_from_netstat(localized, 43210).map_err(|err| err.to_string())? != Some(1234) {
+                return Err("localized headings hid a valid TCP listener".into());
+            }
+            if windows_listener_pid_from_netstat(localized, 43211).map_err(|err| err.to_string())?.is_some() {
+                return Err("TIME_WAIT was treated as a listener".into());
+            }
+            for invalid in [
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  invalid\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  \xff\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  0\r\n"[..],
+                &b"  TCP  127.0.0.1:43210  0.0.0.0:0  LISTENING  1234\r\n  TCP  127.0.0.1:43211  0.0.0.0:0  LISTENING  invalid\r\n"[..],
+            ] {
+                match windows_listener_pid_from_netstat(invalid, 43210) {
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {},
+                    other => return Err(format!("invalid TCP row was not rejected: {other:?}")),
+                }
+            }
+            let owner = windows_listener_pid_on(port).map_err(|err| err.to_string())?;
+            if owner != Some(std::process::id()) {
+                return Err(format!("listener on {port} has unexpected owner: {owner:?}"));
+            }
+            drop(listener);
+            let owner = windows_listener_pid_on(port).map_err(|err| err.to_string())?;
+            if owner.is_some() {
+                return Err(format!("closed listener on {port} still has an owner: {owner:?}"));
+            }
         }
         Ok(())
     }

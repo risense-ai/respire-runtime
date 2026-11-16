@@ -177,7 +177,7 @@ fn fixed_write_model_failure(payload: &Value, params: &Value, kind: &str, schema
         }
     } else {
         let plan = &result["plan"];
-        if params["phase"] != "plan" && params["expected"] != plan["review"] { return Some("model_review_mismatch"); }
+        if !params["expected"].is_null() && params["expected"] != plan["review"] { return Some("model_review_mismatch"); }
         if plan["kind"] != params["kind"] || result["phase"] != params["phase"]
             || result["verified"] != (params["phase"] != "plan") || result["config_applied"] != (params["phase"] == "apply")
             || params["kind"] == "reset_cpu" && (plan["cpu_candidate_sha256"].is_null()
@@ -638,8 +638,9 @@ fn failure(payload: &Value, schema: &Value) -> Option<&'static str> {
         || matches!(method, "control.key.fivekeys" | "control.key.complete") && params["operation"]["kind"] != "fivekeys") { return Some("host_params_invalid"); }
     if spec["params"] == "identityWriteParams" && method != "control.identity.write_result"
         && (method == "control.identity.logout") != (params["operation"]["kind"] == "logout") { return Some("host_params_invalid"); }
-    if spec["params"] == "modelMaintenanceParams" && ((params["phase"] == "plan") != params["expected"].is_null()
-        || params["phase"] == "apply" && params["kind"] != "reset_cpu"
+    if spec["params"] == "modelMaintenanceParams" && (params["phase"] != "plan" && params["expected"].is_null()
+        || params["phase"] == "plan" && !params["expected"].is_null() && params["kind"] != "reset_cpu"
+        || params["phase"] == "apply"
         || params["phase"] == "verify" && params["kind"] == "reset_cpu") { return Some("host_params_invalid"); }
     if spec["params"] == "modelParams" && if method == "control.model_install_plan" {
         !params["selection_sha256"].is_null()

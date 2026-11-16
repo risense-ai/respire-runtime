@@ -567,13 +567,24 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     } else {
         support::install_runtime_fixture(&root)?;
     }
-    let session_bytes = br#"{"user":"original","addr":"https://previous.invalid"}"#;
+    let super_password = crypto::generate_secret_key();
+    let session_bytes = if support::legacy_cli()?.is_some() {
+        br#"{"user":"original","addr":"https://previous.invalid"}"#.to_vec()
+    } else {
+        // Explicit rollback recovery must be able to unlock the retained source account.
+        let salt = crypto::random_hex(16);
+        let (nonce, wrapped) = crypto::wrap_key(&[43_u8; 32],
+            &crypto::derive_kek_v4(&super_password, &salt)?)?;
+        serde_json::to_vec(&json!({"user":"original","addr":"https://previous.invalid",
+            "vault_version":4,"kdf_salt":salt,
+            "wrapped_urk":wrapped,"urk_nonce":nonce}))?
+    };
+    let session_bytes = session_bytes.as_slice();
     std::fs::write(original.join("session.json"), session_bytes)?;
     let config_bytes = serde_json::to_vec(
         &json!({"data_dir":original,"api_base":"https://previous.invalid","addr":"http://config.invalid","custom":"preserve"}),
     )?;
     std::fs::write(root.join("client.json"), &config_bytes)?;
-    let super_password = crypto::generate_secret_key();
     let salt = crypto::random_hex(16);
     let urk = [42_u8; 32];
     let (nonce, wrapped) = crypto::wrap_key(&urk, &crypto::derive_kek_v4(&super_password, &salt)?)?;
@@ -816,6 +827,9 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         // RemoteUnknown, committed operations and pending/published remote effects.
         let rolled_back = execute(&["--json", "runtime", "account-rollback", "--operation-id",
             operation, "--source-profile", source_arg, "--confirm"])?;
+        if !rolled_back.status.success() {
+            authorization_failure_evidence(&root, &original, &rolled_back);
+        }
         let envelope: Value = serde_json::from_slice(&rolled_back.stdout)?;
         assert_eq!(envelope["command"], "auth-account");
         let receipt: HostAuthAccountResult = serde_json::from_value(envelope["summary"].clone())?;
@@ -1200,6 +1214,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             )
             .into());
         }
+        eprintln!("account-checkpoint oauth_completed");
         let envelope: Value = serde_json::from_slice(&authorized.stdout)?;
         if envelope["status"] != "ok" || envelope["summary"]["user"] != "authorized" {
             return Err("OAuth login did not report the verified account".into());
@@ -1260,10 +1275,12 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         {
             return Err("login session does not match its committed credential receipt".into());
         }
+        eprintln!("account-checkpoint receipt_verified");
         let stopped = execute(&["--runtime-internal", "--stop"])?;
         if !stopped.status.success() {
             return Err("could not stop the isolated OAuth runtime".into());
         }
+        eprintln!("account-checkpoint oauth_runtime_stopped");
 
         // Seed an encrypted cloud-only record, absent from this target's local store.
         assert!(execute(&[
@@ -1278,7 +1295,9 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         ])?
         .status
         .success());
+        eprintln!("account-checkpoint cloud_memory_seeded");
         let peer_store = LocalStore::open(&target.join("rsrs.db"))?;
+        eprintln!("account-checkpoint cloud_store_opened");
         let peers = peer_store.all(false)?;
         let peer = peers.first().ok_or("cloud fixture row missing")?;
         remote_blobs
@@ -1294,6 +1313,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             }
         }
 
+        eprintln!("account-checkpoint cloud_fixture_staged");
         // The source owns its recovery code; target --super is never a source factor.
         let source_urk = [43_u8; 32];
         let source_secret = crypto::generate_secret_key();
@@ -1760,8 +1780,11 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         );
         assert_eq!(std::fs::read(root.join("client.json"))?, retained_config);
         *cloud.lock().map_err(|error| error.to_string())? = cloud_snapshot;
-        assert!(execute(&["--json", "logout", "--full"])?.status.success());
+        let logged_out = execute(&["--json", "logout", "--full"])?;
+        assert!(logged_out.status.success(), "{}", String::from_utf8_lossy(&logged_out.stdout));
         assert!(!target.join("session.json").exists());
+        let logged_out_health = runtime_health(runtime_port, "full-logout")?;
+        assert_eq!(logged_out_health["store_ready"], false, "full logout left the database open");
         let recovered = execute(&[
             "--json",
             "login",

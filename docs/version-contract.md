@@ -52,7 +52,7 @@ The runtime `/health` body carries, in addition to the existing fields:
 ```json
 {
   "runtime_version": "1.4.0",
-  "runtime_compat": { "min_cli": "1.0.21-dev.5", "max_cli": "*" }
+  "runtime_compat": { "min_cli": "2.0.0-dev.11", "max_cli": "*" }
 }
 ```
 
@@ -62,9 +62,9 @@ The runtime `/health` body carries, in addition to the existing fields:
   the same window into every `runtime-build-<triple>.json`; the values are
   defined once as workflow-level environment variables (`RUNTIME_MIN_CLI`,
   `RUNTIME_MAX_CLI`).
-- The scoped request and lifecycle identity contract requires CLI
-  `1.0.21-dev.5` or later. Released CLI `1.0.20` sends unscoped business requests
-  and an empty stop body, so it is not compatible with this Runtime train.
+- The host-owned credential channel and foreground Runtime lifecycle require CLI
+  `2.0.0-dev.11` or later. Earlier CLIs cannot supply the required host credentials
+  or launch this Runtime through its current lifecycle contract.
 - The CLI installer validates the metadata's CLI window before installation.
   Its `runtime_acceptable(health)` check additionally requires the Runtime's
   version to be in the CLI's accept window, the expected managed path, and no
@@ -80,7 +80,10 @@ The runtime `/health` body carries, in addition to the existing fields:
 
 - `crates/protocol` in **this** repository is the source of truth; it is
   published to crates.io as `respire-protocol` by `publish-crates.yml`.
-- The crate version moves in lockstep with `PROTOCOL_V`.
+- The crate version identifies the shared types. Compatible schema additions may
+  publish a new crate without changing `PROTOCOL_V`; an incompatible wire change
+  requires an explicit protocol-version change. Neither version requires equal
+  CLI, Runtime, Client2 or Core product versions.
 - Both repositories consume only **published** versions of the crate; neither
   may vendor or path-dependency across the repository boundary.
 
@@ -97,6 +100,46 @@ When a change touches the RPC contract:
 
 
 ## Current stage-one DEV scope
+
+The coordinated DEV update validates the new CLI, Runtime and Client2 together.
+Compatibility is determined by the shared protocol and required capabilities,
+not matching component version numbers, source commits or workflow runs. Exact
+candidate source and artifact identities are regression provenance only.
+
+Historical releases provide databases for upgrade testing: prepare data with the
+historical stack, upgrade the hosts and Runtime, then validate that data with the
+new stack. Latest applicable stable and historical stable database upgrades
+remain required. DEV-to-DEV upgrades are required for persistent-format changes;
+DEV revisions without such changes do not add a separate migration baseline.
+Old-client/new-Runtime and new-client/old-Runtime compatibility are not release
+requirements. See [Client2 upgrades](client2-split-compatibility.md).
+
+After the new Runtime release exists, update both the CLI download default and
+its minimum supported Runtime to this host-owned generation. Upgrading the CLI
+must not silently reuse dev.17 just because the old accept range includes it.
+Later Runtime releases may remain reusable when the protocol, capabilities and
+supported range match; no equal-version requirement is introduced.
+
+Runtime 2.0.0-dev.18 removes the embedded host command entry points. Both
+Client2 0.2.56 and 2.0.0-dev.5 still select their installed Runtime image for
+host operations and require the removed model catalog/progress RPCs. Upgrade
+those clients before selecting this Runtime; their historical compatibility
+checks do not establish compatibility with the pure Runtime.
+
+The G1 freeze workflow authenticates the selected new Client2 candidate from its
+successful Desktop client workflow. Each frozen run records the actual source,
+build identity, workflow, run, artifact ID, ZIP digest, archive digest and
+executable digest. Confirm these identities against the selected candidate
+before acceptance. An unpublished input is not a released-client or passing G1
+claim, and a recorded source hash is not a production compatibility requirement.
+All seven lifecycle cases and process identity, RPC boundary and cleanup
+assertions remain required. Each ready-library case first runs public CLI
+keygen in the existing hosted private Secret Service fixture, stops the setup
+owner, then tests automatic host key delivery without inherited key variables.
+The fixture verifies credential ownership and removal. Credential-free restart
+locking remains a separate required native check. Current Windows checks and published
+upgrade acceptance remain separate. Interactive Keychain authorization is not
+established by this evidence.
 
 Runtime 1.0.21-dev.3 and later provide a standalone doctor that
 executes Runtime-owned store, asset/backend, index and optional bounded remote

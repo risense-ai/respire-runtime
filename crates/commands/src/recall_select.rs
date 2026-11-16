@@ -111,7 +111,7 @@ pub fn recall_with_mode<E: respire_app::memory::search::Embedder>(
         Ok(budget)
     }).transpose()?;
     let provider = if mode == "quality" {
-        configured_provider()
+        configured_provider()?
     } else {
         None
     };
@@ -175,7 +175,8 @@ pub fn recall_with_mode<E: respire_app::memory::search::Embedder>(
     Ok((result.items, result.mode, result.warning, result.routing, result.retrieval, result.budget))
 }
 
-fn configured_provider() -> Option<crate::classify::Backend> {
+fn configured_provider() -> Result<Option<crate::classify::Backend>> {
+    respire_app::credential_io::ensure_provider_credentials_available()?;
     let config = respire_app::service::read_agent_config();
     let base = config["recall_api_base"]
         .as_str()
@@ -183,13 +184,15 @@ fn configured_provider() -> Option<crate::classify::Backend> {
         .or_else(respire_app::keystore::load_ds_last_base)
         .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned());
     let slot = format!("ds@{}", respire_app::keystore::host_of(&base));
-    let key = respire_app::env::var("RSRS_RECALL_API_KEY")
+    let Some(key) = respire_app::env::var("RSRS_RECALL_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
-        .or_else(|| respire_app::keystore::load_classify_key(&slot))?;
+        .or_else(|| respire_app::keystore::load_classify_key(&slot)) else {
+            return Ok(None);
+        };
     let model = config["recall_model"]
         .as_str()
         .unwrap_or(crate::classify::DEFAULT_DS_MODEL);
-    Some(crate::classify::Backend { name: "ds", endpoint: crate::classify::ds_endpoint(&base),
-        key, model: model.to_owned(), base_shown: base })
+    Ok(Some(crate::classify::Backend { name: "ds", endpoint: crate::classify::ds_endpoint(&base),
+        key, model: model.to_owned(), base_shown: base }))
 }

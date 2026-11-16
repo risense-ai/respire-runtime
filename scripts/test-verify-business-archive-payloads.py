@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix="g1-real-schema-pure-") as temporary:
     with tarfile.open(cli / "native.tar.gz", "w:gz", format=tarfile.GNU_FORMAT) as stream:
         for name in ("core-runtime.json", "library.so"):
             stream.add(cli / name, arcname=name, recursive=False)
-    (desktop / "respire").write_bytes(b"\0" * 19002960)
+    (desktop / "respire").write_bytes(b"\0" * 19183600)
     with tarfile.open(desktop / "respire-linux-amd64.tar.gz", "w:gz", format=tarfile.GNU_FORMAT) as stream:
         stream.add(desktop / "respire", arcname="respire", recursive=False)
     previous = Path.cwd()
@@ -81,6 +81,43 @@ with tempfile.TemporaryDirectory(prefix="g1-real-schema-pure-") as temporary:
             pass
         else:
             raise AssertionError("CLI path/hash-only schema did not protect actual payload")
+        binary_name = "rsrs-x86_64-unknown-linux-gnu"
+        sidecar_name = "cli-build-x86_64-unknown-linux-gnu.json"
+        (cli / binary_name).write_bytes(b"synthetic-frontend-binary")
+        frontend = {"schema_version": 2, "artifact_layout": "cli-frontend-v2",
+                    "target": "x86_64-unknown-linux-gnu", "git_sha": "a" * 40,
+                    "version": "2.0.0-dev.11", "binary_file": binary_name,
+                    "binary_size": (cli / binary_name).stat().st_size,
+                    "binary_sha256": hashlib.sha256((cli / binary_name).read_bytes()).hexdigest()}
+        (cli / sidecar_name).write_text(json.dumps(frontend), encoding="utf-8")
+        for mutation in ("valid", "different-binary", "different-sidecar", "missing-sidecar",
+                         "unexpected-sdk", "duplicate", "symlink"):
+            with tarfile.open(cli / "rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz", "w:gz",
+                              format=tarfile.USTAR_FORMAT) as stream:
+                for name in (binary_name, sidecar_name):
+                    if mutation == "missing-sidecar" and name == sidecar_name:
+                        continue
+                    data = (cli / name).read_bytes()
+                    if (mutation == "different-binary" and name == binary_name
+                            or mutation == "different-sidecar" and name == sidecar_name):
+                        data = b"x" * len(data)
+                    item = tarfile.TarInfo(name)
+                    item.size = len(data)
+                    if mutation == "symlink" and name == binary_name:
+                        item.type = tarfile.SYMTYPE
+                        item.linkname = sidecar_name
+                        item.size = 0
+                    stream.addfile(item, io.BytesIO(data))
+                    if mutation == "duplicate" and name == sidecar_name:
+                        stream.addfile(item, io.BytesIO(data))
+                if mutation == "unexpected-sdk":
+                    stream.add(cli / "library.so", arcname="library.so", recursive=False)
+            try:
+                archives.main()
+            except AssertionError:
+                assert mutation != "valid"
+            else:
+                assert mutation == "valid"
     finally:
         os.chdir(previous)
-print("10 pure archive checks passed; no product execution")
+print("17 pure archive checks passed, including frontend binary/sidecar integrity; no product execution")

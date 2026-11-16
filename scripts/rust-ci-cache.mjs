@@ -6,7 +6,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 export function cacheKey(kind, identity) {
-  if (!['workspace', 'coverage'].includes(kind)) throw Error('Unknown Rust cache kind');
+  if (!['workspace', 'coverage', 'native'].includes(kind)) throw Error('Unknown Rust cache kind');
   return `rust-ci-v1-${kind}-${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
 }
 
@@ -19,17 +19,21 @@ export function releaseKey(target, identity) {
   return `rust-release-v1-${target}-${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
 }
 
-function release(action, target) {
+function release(action, target, native = false) {
   releaseKey(target, {});
-  const stage = '.rust-release-cache', output = '.rust-release-save';
+  const kind = native ? 'native' : 'release', profile = native ? 'debug' : 'release';
+  const targetDir = native ? 'target' : 'target/ci';
+  const stage = `.rust-${kind}-cache`, output = native ? stage : '.rust-release-save';
+  const keyFile = `.rust-${kind}-key`;
   const registry = path.join(process.env.CARGO_HOME || path.join(homedir(), '.cargo'), 'registry');
-  const paths = [['target/ci/release', 'host/release'], [`target/ci/${target}/release`, 'target/release']]
+  const paths = [[`${targetDir}/${profile}`, `host/${profile}`], [`${targetDir}/${target}/${profile}`, `target/${profile}`]]
     .flatMap(([from, to]) => ['deps', 'build', '.fingerprint'].map(name => [`${from}/${name}`, `${to}/${name}`]));
   paths.push([path.join(registry, 'cache'), 'cargo/cache']);
   if (action === 'key') {
     const files = [...metadata().packages.map(p => p.manifest_path), 'Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml',
       'sdk/core-sdk.lock.json', 'crates/core-sdk/core-sdk.lock.json', 'scripts/rust-ci-cache.mjs',
-      'scripts/build-linux-musl.sh', 'scripts/build-linux-musl-container.sh', '.github/workflows/release-validation.yml'];
+      'scripts/build-linux-musl.sh', 'scripts/build-linux-musl-container.sh', '.github/workflows/release-validation.yml',
+      ...(native ? ['.cargo/config', '.github/workflows/ci.yml', '.github/workflows/freeze-g1-candidate.yml', fileURLToPath(import.meta.url)] : [])];
     const identity = {
       target, rust: execFileSync('rustc', ['-Vv'], {encoding: 'utf8'}), cargo: execFileSync('cargo', ['-V'], {encoding: 'utf8'}),
       platform: process.platform, arch: process.arch, image: [process.env.ImageOS || null, process.env.ImageVersion || null],
@@ -38,15 +42,16 @@ function release(action, target) {
       alpine: existsSync('/etc/alpine-release') ? readFileSync('/etc/alpine-release', 'utf8') : null,
       packages: target.endsWith('-musl') ? execFileSync('apk', ['info', '-v'], {encoding: 'utf8'}).split('\n').sort() : null,
       flags: Object.entries(process.env).filter(([name]) => /^(?:CARGO_PROFILE_|CARGO_TARGET_|CFLAGS|CXXFLAGS|CC_|CXX_|AR_|OPENSSL_|PKG_CONFIG)/.test(name) ||
-        ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','CC','CXX','AR','RSRS_CORE_TEST_MODE'].includes(name)).sort(),
+        ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','CC','CXX','AR','RSRS_CORE_TEST_MODE','RUST_CI_FEATURES'].includes(name)).sort(),
       files: files.filter(existsSync).sort().map(file => [path.relative(process.cwd(), path.resolve(file)).replaceAll('\\', '/'), createHash('sha256').update(readFileSync(file)).digest('hex')]),
     };
+    if (native && !identity.rust.split(/\r?\n/).includes(`host: ${target}`)) throw Error('Native dependency cache requires the actual host target');
     if (target.endsWith('-musl') && (!identity.container || !identity.alpine)) throw Error('musl cache identity requires the actual Alpine container');
-    const key = releaseKey(target, identity);
-    writeFileSync('.rust-release-key', key + '\n');
+    const key = native ? cacheKey('native', identity) : releaseKey(target, identity);
+    writeFileSync(keyFile, key + '\n');
     appendFileSync(process.env.GITHUB_OUTPUT, `key=${key}\n`);
   } else if (action === 'restore') {
-    if (existsSync(stage) && (!existsSync(`${stage}/key`) || readFileSync(`${stage}/key`, 'utf8').trim() !== readFileSync('.rust-release-key', 'utf8').trim())) throw Error('Release dependency cache identity mismatch');
+    if (existsSync(stage) && (!existsSync(`${stage}/key`) || readFileSync(`${stage}/key`, 'utf8').trim() !== readFileSync(keyFile, 'utf8').trim())) throw Error('Dependency cache identity mismatch');
     for (const [to, from] of paths) {
       if (existsSync(`${stage}/${from}`)) { mkdirSync(path.dirname(to), {recursive: true}); cpSync(`${stage}/${from}`, to, {recursive: true, preserveTimestamps: true}); }
     }
@@ -55,19 +60,30 @@ function release(action, target) {
     if (!/^[a-f0-9]{40}$/.test(source.sha || '') || !/^[1-9][0-9]*$/.test(source.run_id || '') || !/^[1-9][0-9]*$/.test(source.run_attempt || '')) throw Error('Missing exact release cache producer');
     const packages = metadata().packages.flatMap(p => ['-p', p.name]);
     // Remove both host and target workspace products; only third-party compilation is reusable.
-    for (const extra of [[], ['--target', target]]) execFileSync('cargo', ['clean', '--release', '--target-dir', 'target/ci', ...extra, ...packages], {stdio: 'inherit'});
+    for (const extra of [[], ['--target', target]]) execFileSync('cargo', ['clean', ...(native ? ['--profile', 'dev'] : ['--release']), '--target-dir', targetDir, ...extra, ...packages], {stdio: 'inherit'});
     rmSync(output, {recursive: true, force: true}); mkdirSync(output, {recursive: true});
-    const key = readFileSync('.rust-release-key', 'utf8').trim();
-    if (!new RegExp(`^rust-release-v1-${target}-[a-f0-9]{64}$`).test(key)) throw Error('Release cache key changed');
+    const key = readFileSync(keyFile, 'utf8').trim();
+    if (!new RegExp(native ? '^rust-ci-v1-native-[a-f0-9]{64}$' : `^rust-release-v1-${target}-[a-f0-9]{64}$`).test(key)) throw Error('Dependency cache key changed');
     writeFileSync(`${output}/key`, key + '\n');
     writeFileSync(`${output}/source.json`, JSON.stringify(source) + '\n');
     for (const [from, to] of paths) if (existsSync(from)) { mkdirSync(path.dirname(`${output}/${to}`), {recursive: true}); cpSync(from, `${output}/${to}`, {recursive: true, preserveTimestamps: true, dereference: true}); }
-    execFileSync('tar', ['-czf', '.rust-release-save.tar.gz', '-C', output, '.'], {stdio: 'inherit'});
+    if (native) {
+      // The SDK build script stages libraries in deps outside Cargo's package cleanup.
+      const sdk = process.env.RSRS_CORE_SDK_DIR;
+      if (!sdk) throw Error('Native dependency packing requires the audited SDK');
+      const manifest = JSON.parse(readFileSync(path.join(sdk, 'manifest.json'), 'utf8'));
+      if (manifest.target !== target || manifest.test_only) throw Error('Native dependency SDK target mismatch');
+      for (const file of manifest.files.filter(file => file.path.startsWith('runtime/'))) {
+        const name = file.path.slice('runtime/'.length);
+        if (!name || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw Error('SDK runtime cache exclusion must be a flat filename');
+        for (const where of [`host/${profile}/deps`, `target/${profile}/deps`]) rmSync(path.join(output, where, name), {force: true});
+      }
+    } else execFileSync('tar', ['-czf', '.rust-release-save.tar.gz', '-C', output, '.'], {stdio: 'inherit'});
   } else throw Error('Expected release key, restore or pack');
 }
 
 function main(action, kind, releaseTarget) {
-  if (kind === 'release') return release(action, releaseTarget);
+  if (kind === 'release' || kind === 'native') return release(action, releaseTarget, kind === 'native');
   cacheKey(kind, {});
   const target = kind === 'coverage' ? 'target/llvm-cov-target' : 'target';
   const registry = path.join(process.env.CARGO_HOME || path.join(homedir(), '.cargo'), 'registry');

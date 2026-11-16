@@ -123,9 +123,13 @@ fn inventory(path: &Path) -> Result<(u64, i64)> {
 }
 
 fn schema_digest(path: &Path) -> Result<String> {
+    schema_digest_without_triggers(path, &[])
+}
+
+fn schema_digest_without_triggers(path: &Path, omitted: &[String]) -> Result<String> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut statement=db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name<>'snapshot_key_check' ORDER BY type,name")?;
-    let rows = statement
+    let mut rows = statement
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -134,11 +138,70 @@ fn schema_digest(path: &Path) -> Result<String> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.retain(|(kind, name, _)| kind != "trigger" || !omitted.contains(name));
     let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(version, rows))?)
     ))
+}
+
+fn legacy_revision_trigger_sql(column: &str) -> String {
+    format!(
+        "CREATE TRIGGER memory_revision_{column}_update
+                 AFTER UPDATE OF {column} ON memories
+                 WHEN OLD.{column} IS NOT NEW.{column}
+                 BEGIN
+                     UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1';
+                 END;"
+    )
+}
+
+fn missing_legacy_revision_triggers(live: &Path, source: &Path) -> Result<Vec<&'static str>> {
+    let live = Connection::open_with_flags(live, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let source = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut missing = Vec::new();
+    for column in ["when_to_use", "superseded_by"] {
+        let name = format!("memory_revision_{column}_update");
+        let has_column: bool = source.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        let has_trigger = source.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1 COLLATE NOCASE",
+        )?.exists([&name])?;
+        let current: Option<String> = live.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1 AND tbl_name='memories'",
+            [&name],
+            |row| row.get(0),
+        ).optional()?;
+        let expected = legacy_revision_trigger_sql(column);
+        if has_column && !has_trigger && current.as_deref() == Some(expected.trim_end_matches(';')) {
+            missing.push(column);
+        }
+    }
+    Ok(missing)
+}
+
+fn install_legacy_revision_triggers(path: &Path, columns: &[&str]) -> Result<()> {
+    let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;")?;
+    let transaction = db.transaction()?;
+    for column in columns {
+        transaction.execute_batch(&legacy_revision_trigger_sql(column))?;
+    }
+    // A trigger on meta must not change snapshot content during this refresh.
+    let before = transaction.total_changes();
+    anyhow::ensure!(
+        transaction.execute(
+            "UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1'",
+            [],
+        )? == 1 && transaction.total_changes() == before + 1,
+        "memory revision could not be refreshed without other changes"
+    );
+    transaction.commit()?;
+    Ok(())
 }
 
 fn valid_id(id: &str) -> bool {
@@ -305,11 +368,21 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
         schema_digest(&database)? == manifest.database_schema_sha256,
         "snapshot schema digest mismatch"
     );
+    verify_witness(&database, &manifest)?;
+    let (entries, version) = inventory(&database)?;
+    anyhow::ensure!(
+        entries == manifest.entries && version == manifest.sqlite_user_version,
+        "snapshot inventory mismatch"
+    );
+    Ok(manifest)
+}
+
+fn verify_witness(database: &Path, manifest: &Manifest) -> Result<()> {
     anyhow::ensure!(
         manifest.witness_problem.is_none(),
         "snapshot witness checkpoint is unverifiable; diagnostic copy cannot be a restore target"
     );
-    match crate::transport::local::witness_checkpoint_file(&database)? {
+    match crate::transport::local::witness_checkpoint_file(database)? {
         None => anyhow::ensure!(
             manifest.witness_head.is_none()
                 && manifest.witness_count.is_none()
@@ -329,12 +402,7 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
             );
         }
     }
-    let (entries, version) = inventory(&database)?;
-    anyhow::ensure!(
-        entries == manifest.entries && version == manifest.sqlite_user_version,
-        "snapshot inventory mismatch"
-    );
-    Ok(manifest)
+    Ok(())
 }
 
 pub(crate) fn verify_backup(root: &Path, id: &str, keys: &crate::SessionKeys) -> Result<Manifest> {
@@ -980,11 +1048,22 @@ fn restore_operation_with_hook(
             && selected.account_fingerprint == account_fingerprint,
         "snapshot belongs to another account or library"
     );
-    anyhow::ensure!(
-        schema_digest(&live)? == selected.database_schema_sha256,
-        "snapshot schema differs from the initialized library; explicit migration is required"
-    );
     let source = root.join("snapshots").join(format!("{id}.db"));
+    let legacy_columns = if schema_digest(&live)? == selected.database_schema_sha256 {
+        Vec::new()
+    } else {
+        // This preflight permits only known additions; the staged schema is checked in full below.
+        let columns = missing_legacy_revision_triggers(&live, &source)?;
+        let omitted: Vec<String> = columns.iter()
+            .map(|column| format!("memory_revision_{column}_update"))
+            .collect();
+        anyhow::ensure!(
+            !columns.is_empty()
+                && schema_digest_without_triggers(&live, &omitted)? == selected.database_schema_sha256,
+            "snapshot schema differs from the initialized library; explicit migration is required"
+        );
+        columns
+    };
     crate::metadata_gate::ensure_restore_allowed(&live, &source)?;
     verify_key(&source, &selected, keys)?;
     let before = create(root, account, &format!("before restore {id}"), keys)?;
@@ -1019,15 +1098,35 @@ fn restore_operation_with_hook(
         uuid::Uuid::new_v4().simple()
     ));
     let mut replacement_attempted = false;
+    let mut temporary_owned = false;
     let result = (|| -> Result<()> {
         hook("after_backups")?;
-        checkpoint_closed(&live)?;
-        copy_private(&source, &temporary)?;
+        let mut input = fs::File::open(&source)?;
+        let mut target = private_new(&temporary)?;
+        temporary_owned = true;
+        std::io::copy(&mut input, &mut target)?;
+        target.sync_all()?;
+        drop(target);
+        drop(input);
         anyhow::ensure!(
             digest_file(&temporary)? == selected.database_sha256,
             "snapshot changed during restore preparation"
         );
         verify_key(&temporary, &selected, keys)?;
+        if !legacy_columns.is_empty() {
+            install_legacy_revision_triggers(&temporary, &legacy_columns)?;
+            verify_key(&temporary, &selected, keys)?;
+            verify_witness(&temporary, &selected)?;
+            let (entries, version) = inventory(&temporary)?;
+            anyhow::ensure!(
+                entries == selected.entries && version == selected.sqlite_user_version,
+                "snapshot inventory mismatch after legacy trigger migration"
+            );
+        }
+        anyhow::ensure!(
+            schema_digest(&temporary)? == schema_digest(&live)?,
+            "snapshot schema differs from the initialized library; explicit migration is required"
+        );
         let staged = Connection::open(&temporary)?;
         staged.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;")?;
         staged.execute("INSERT INTO meta(key,value) VALUES('snapshot_sync_quarantine_v1',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1040,6 +1139,8 @@ fn restore_operation_with_hook(
             .open(&temporary)?
             .sync_all()?;
         hook("before_replace")?;
+        // Read-only schema checks can recreate WAL sidecars; close them before replacing live.
+        checkpoint_closed(&live)?;
         // A durable replacement can report an fsync error after rename, so mark
         // the attempt before calling it. Either outcome rolls back from image.
         replacement_attempted = true;
@@ -1052,15 +1153,25 @@ fn restore_operation_with_hook(
         Ok(())
     })();
     if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
+        let cleanup_result = if temporary_owned {
+            match fs::remove_file(&temporary) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(())
+        };
         let rollback_result = if replacement_attempted {
             rollback_locked(root, &receipt, ownership)
         } else {
             clear_recovery(root, &receipt)
         };
-        return match rollback_result {
-            Ok(())=>Err(error.context(format!("restore aborted; original state retained/restored; pre-restore snapshot {}",receipt.before_restore))),
-            Err(rollback_error)=>Err(error.context(format!("restore recovery required: {rollback_error:#}; journal {RECOVERY_FILE}; pre-restore snapshot {}",receipt.before_restore))),
+        return match (rollback_result, cleanup_result) {
+            (Ok(()), Ok(())) => Err(error.context(format!("restore aborted; original state retained/restored; pre-restore snapshot {}", receipt.before_restore))),
+            (Ok(()), Err(cleanup_error)) => Err(error.context(format!("restore aborted; original state retained/restored; temporary copy cleanup failed: {cleanup_error}; pre-restore snapshot {}", receipt.before_restore))),
+            (Err(rollback_error), Ok(())) => Err(error.context(format!("restore recovery required: {rollback_error:#}; journal {RECOVERY_FILE}; pre-restore snapshot {}", receipt.before_restore))),
+            (Err(rollback_error), Err(cleanup_error)) => Err(error.context(format!("restore recovery required: {rollback_error:#}; temporary copy cleanup failed: {cleanup_error}; journal {RECOVERY_FILE}; pre-restore snapshot {}", receipt.before_restore))),
         };
     }
     Ok(receipt)
@@ -1503,6 +1614,29 @@ mod tests {
         )?;
         Ok((directory, db))
     }
+
+    fn legacy_fixture(
+        columns: &[&str],
+        preinstalled: Option<&str>,
+    ) -> Result<(tempfile::TempDir, Connection, Manifest)> {
+        let (directory, db) = fixture()?;
+        drop(db);
+        let path = directory.path().join("rsrs.db");
+        crate::transport::local::validate_migration_snapshot(&path)?;
+        let db = Connection::open(&path)?;
+        crate::transport::local::register_witness_functions(&db)?;
+        for column in columns {
+            db.execute_batch(&format!("ALTER TABLE memories ADD COLUMN {column} TEXT"))?;
+        }
+        if let Some(column) = preinstalled {
+            anyhow::ensure!(columns.contains(&column), "preinstalled trigger column missing");
+            db.execute_batch(&legacy_revision_trigger_sql(column))?;
+        }
+        let keys = crate::SessionKeys::from_urk([7; 32])?;
+        let snapshot = create(directory.path(), "account", "legacy", &keys)?;
+        crate::transport::local::validate_migration_snapshot(&path)?;
+        Ok((directory, db, snapshot))
+    }
     #[test]
     fn snapshot_captures_committed_wal_excludes_grants_and_preserves_source() -> Result<()> {
         let (directory, db) = fixture()?;
@@ -1632,6 +1766,65 @@ mod tests {
         assert_eq!(live.query_row("SELECT count(*) FROM memories WHERE id='after-o2'", [], |row| row.get::<_, u64>(0))?, 1);
         assert_eq!(list(root)?.len(), snapshot_count);
         assert_eq!(fs::read(root.join(RECOVERY_FILE))?, before_retry);
+
+        for (columns, preinstalled) in [
+            (&["when_to_use"][..], None),
+            (&["superseded_by"][..], None),
+            (&["when_to_use", "superseded_by"][..], None),
+            (&["when_to_use", "superseded_by"][..], Some("when_to_use")),
+            (&["when_to_use", "superseded_by"][..], Some("superseded_by")),
+        ] {
+            let (directory, db, snapshot) = legacy_fixture(columns, preinstalled)?;
+            let root = directory.path();
+            let live = root.join("rsrs.db");
+            let snapshot_db = root.join("snapshots").join(format!("{}.db", snapshot.id));
+            let snapshot_json = root.join("snapshots").join(format!("{}.json", snapshot.id));
+            let original_db = fs::read(&snapshot_db)?;
+            let original_json = fs::read(&snapshot_json)?;
+            let saved = Connection::open_with_flags(&snapshot_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let saved_revision: String = saved.query_row(
+                "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get(0),
+            )?;
+            drop(saved);
+            let expected_schema = schema_digest(&live)?;
+            db.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')", [])?;
+            drop(db);
+            let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+            assert!(restore_locked(root, "wrong-account", &keys, &snapshot.id, &ownership).is_err());
+            assert!(restore_locked(
+                root, "account", &crate::SessionKeys::from_urk([8; 32])?, &snapshot.id, &ownership,
+            ).is_err());
+            assert_eq!(list(root)?.len(), 1);
+            let receipt = restore_locked(root, "account", &keys, &snapshot.id, &ownership)?;
+            assert!(receipt.sync_quarantined);
+            assert_eq!(schema_digest(&live)?, expected_schema);
+            assert_eq!(fs::read(&snapshot_db)?, original_db);
+            assert_eq!(fs::read(&snapshot_json)?, original_json);
+            verify_backup(root, &snapshot.id, &keys)?;
+            let restored = Connection::open(&live)?;
+            crate::transport::local::register_witness_functions(&restored)?;
+            assert_eq!(restored.query_row("SELECT count(*) FROM memories", [], |row| row.get::<_, u64>(0))?, 1);
+            let revision: String = restored.query_row(
+                "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get(0),
+            )?;
+            assert_ne!(revision, saved_revision);
+            crate::transport::local::validate_migration_snapshot(&live)?;
+            let reopened_revision: String = restored.query_row(
+                "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get(0),
+            )?;
+            assert_eq!(reopened_revision, revision);
+            complete_restore(root, &receipt)?;
+            for column in columns {
+                let before: String = restored.query_row(
+                    "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get(0),
+                )?;
+                restored.execute(&format!("UPDATE memories SET {column}='restored' WHERE id='synthetic'"), [])?;
+                let after: String = restored.query_row(
+                    "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get(0),
+                )?;
+                assert_ne!(after, before, "restored trigger did not track {column}");
+            }
+        }
         Ok(())
     }
 
@@ -1664,22 +1857,52 @@ mod tests {
                 "schema mismatch should not begin restore"
             );
         }
+        let (directory, db, snapshot) = legacy_fixture(&["when_to_use"], None)?;
+        db.execute_batch("ALTER TABLE memories ADD COLUMN future_schema TEXT")?;
+        let live = directory.path().join("rsrs.db");
+        let schema = schema_digest(&live)?;
+        let ownership = crate::lock::LibraryLock::acquire(
+            directory.path(), std::time::Duration::from_secs(1),
+        )?;
+        assert!(restore_locked(
+            directory.path(), "account", &crate::SessionKeys::from_urk([7; 32])?,
+            &snapshot.id, &ownership,
+        ).is_err());
+        assert_eq!(schema_digest(&live)?, schema);
+        assert_eq!(list(directory.path())?.len(), 1);
+
+        let (directory, db) = fixture()?;
+        db.execute_batch("ALTER TABLE memories ADD COLUMN when_to_use TEXT")?;
+        let keys = crate::SessionKeys::from_urk([7; 32])?;
+        let snapshot = create(directory.path(), "account", "wrong trigger", &keys)?;
+        db.execute_batch("CREATE TRIGGER memory_revision_when_to_use_update
+            AFTER UPDATE OF when_to_use ON memories BEGIN SELECT 1; END;")?;
+        let ownership = crate::lock::LibraryLock::acquire(
+            directory.path(), std::time::Duration::from_secs(1),
+        )?;
+        assert!(restore_locked(directory.path(), "account", &keys, &snapshot.id, &ownership).is_err());
+        assert_eq!(list(directory.path())?.len(), 1);
         Ok(())
     }
 
     #[test]
     fn injected_failures_restore_original_grants_outbox_and_state() -> Result<()> {
-        for stage in [
+        let keys = crate::SessionKeys::from_urk([7; 32])?;
+        for (legacy, stage) in [false, true].into_iter().flat_map(|legacy| [
             "after_backups",
             "before_replace",
             "after_replace",
             "after_cache_clear",
             "after_installed",
-        ] {
-            let (directory, db) = fixture()?;
+        ].into_iter().map(move |stage| (legacy, stage))) {
+            let (directory, db, snapshot) = if legacy {
+                legacy_fixture(&["when_to_use", "superseded_by"], None)?
+            } else {
+                let (directory, db) = fixture()?;
+                let snapshot = create(directory.path(), "account", "baseline", &keys)?;
+                (directory, db, snapshot)
+            };
             let root = directory.path();
-            let keys = crate::SessionKeys::from_urk([7; 32])?;
-            let snapshot = create(root, "account", "baseline", &keys)?;
             db.execute(
                 "INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')",
                 [],
@@ -1730,6 +1953,52 @@ mod tests {
                 list(root)?.len() >= 2,
                 "portable prebackup missing: {stage}"
             );
+        }
+        for failure in [
+            "CREATE TRIGGER reject_revision BEFORE UPDATE OF value ON meta
+             WHEN NEW.key='memory_revision_v1'
+             BEGIN SELECT RAISE(ABORT,'synthetic revision failure'); END;",
+            "CREATE TRIGGER reject_revision BEFORE UPDATE OF value ON meta
+             WHEN NEW.key='memory_revision_v1'
+             BEGIN SELECT RAISE(IGNORE); END;",
+            "CREATE TABLE synthetic_effect(id INTEGER);
+             CREATE TRIGGER revision_side_effect AFTER UPDATE OF value ON meta
+             WHEN NEW.key='memory_revision_v1'
+             BEGIN INSERT INTO synthetic_effect VALUES(1); END;",
+        ] {
+            let (directory, db) = fixture()?;
+            let root = directory.path();
+            db.execute_batch("ALTER TABLE memories ADD COLUMN when_to_use TEXT")?;
+            db.execute_batch(failure)?;
+            let snapshot = create(root, "account", "legacy failure", &keys)?;
+            let snapshot_db = root.join("snapshots").join(format!("{}.db", snapshot.id));
+            let original_snapshot = fs::read(&snapshot_db)?;
+            db.execute_batch(&legacy_revision_trigger_sql("when_to_use"))?;
+            let revision: String = db.query_row(
+                "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get(0),
+            )?;
+            drop(db);
+            let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+            let error = match restore_locked(root, "account", &keys, &snapshot.id, &ownership) {
+                Ok(_) => panic!("legacy trigger migration ignored a failure"),
+                Err(error) => error,
+            };
+            let message = format!("{error:#}");
+            assert!(message.contains("synthetic revision failure")
+                || message.contains("memory revision could not be refreshed without other changes"));
+            let live = Connection::open(root.join("rsrs.db"))?;
+            assert_eq!(live.query_row("SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get::<_, String>(0))?, revision);
+            assert_eq!(live.query_row("SELECT count(*) FROM memories", [], |row| row.get::<_, u64>(0))?, 1);
+            assert_eq!(live.query_row("SELECT count(*) FROM access_grants", [], |row| row.get::<_, u64>(0))?, 1);
+            if failure.contains("synthetic_effect") {
+                assert_eq!(live.query_row("SELECT count(*) FROM synthetic_effect", [], |row| row.get::<_, u64>(0))?, 0);
+            }
+            assert_eq!(fs::read(&snapshot_db)?, original_snapshot);
+            verify_backup(root, &snapshot.id, &keys)?;
+            assert!(!root.join(RECOVERY_FILE).exists());
+            for entry in fs::read_dir(root)? {
+                assert!(!entry?.file_name().to_string_lossy().starts_with(".snapshot-restore-"));
+            }
         }
         Ok(())
     }
@@ -2120,6 +2389,77 @@ mod tests {
             .join(format!("{}.db", manifest.id));
         fs::write(database, b"damaged")?;
         assert!(list(directory.path()).is_err());
+
+        let (directory, db, snapshot) = legacy_fixture(&["when_to_use"], None)?;
+        assert!(snapshot.witness_head.is_some());
+        let manifest_path = directory.path().join("snapshots").join(format!("{}.json", snapshot.id));
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+        manifest["witness_head"] = serde_json::json!("tampered");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+        drop(db);
+        let ownership = crate::lock::LibraryLock::acquire(
+            directory.path(), std::time::Duration::from_secs(1),
+        )?;
+        let error = match restore_locked(
+            directory.path(), "account", &crate::SessionKeys::from_urk([7; 32])?,
+            &snapshot.id, &ownership,
+        ) {
+            Ok(_) => panic!("restore accepted a mismatched witness"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("witness checkpoint mismatch"));
+        let live = Connection::open(directory.path().join("rsrs.db"))?;
+        assert_eq!(live.query_row("SELECT count(*) FROM memories", [], |row| row.get::<_, u64>(0))?, 1);
+        assert!(!directory.path().join(RECOVERY_FILE).exists());
+
+        let (directory, db, snapshot) = legacy_fixture(&["when_to_use"], None)?;
+        let root = directory.path();
+        let snapshot_db = root.join("snapshots").join(format!("{}.db", snapshot.id));
+        db.execute("INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')", [])?;
+        let revision: String = db.query_row(
+            "SELECT value FROM meta WHERE key='memory_revision_v1'",
+            [],
+            |row| row.get(0),
+        )?;
+        drop(db);
+        let ownership =
+            crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+        let error = match restore_with_hook(
+            root,
+            "account",
+            &crate::SessionKeys::from_urk([7; 32])?,
+            &snapshot.id,
+            &ownership,
+            &|stage| {
+                if stage == "after_backups" {
+                    let mut changed = fs::read(&snapshot_db)?;
+                    changed.push(0);
+                    fs::write(&snapshot_db, changed)?;
+                }
+                Ok(())
+            },
+        ) {
+            Ok(_) => panic!("restore accepted a snapshot changed after validation"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("snapshot changed during restore preparation"));
+        let live = Connection::open(root.join("rsrs.db"))?;
+        assert_eq!(
+            live.query_row("SELECT count(*) FROM memories", [], |row| row.get::<_, u64>(0))?,
+            2
+        );
+        assert_eq!(
+            live.query_row(
+                "SELECT value FROM meta WHERE key='memory_revision_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            revision
+        );
+        assert!(!root.join(RECOVERY_FILE).exists());
+        for entry in fs::read_dir(root)? {
+            assert!(!entry?.file_name().to_string_lossy().starts_with(".snapshot-restore-"));
+        }
         Ok(())
     }
     #[test]

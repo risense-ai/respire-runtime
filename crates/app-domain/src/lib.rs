@@ -33,6 +33,7 @@ pub mod sync;
 pub mod taxonomy;
 pub mod transport;
 pub mod keystore;
+pub mod credential_io;
 pub mod prompt;
 pub mod share;
 

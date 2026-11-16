@@ -86,11 +86,13 @@ fn owned_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &s
             } else { record.original_sha256.clone() }, "key recovery owner mismatch");
     }
     let current = read_original(profile)?;
-    let source_matches = record.profile == profile && current.as_deref().map(digest) == record.original_sha256;
+    let source_matches = record.profile == profile && (current.as_deref().map(digest) == record.original_sha256
+        || recovery_credentials::matches_restored(record, profile, &current));
     let candidate_matches = target_matches && current.is_some() && current == record.candidate
         && matches!(record.phase, AuthPhase::Prepared | AuthPhase::AwaitingVerification | AuthPhase::Committed);
-    let restoring_target = record.phase == AuthPhase::RollingBack && target_matches
-        && current.as_deref().map(digest) == op.target_original_sha256;
+    let restoring_target = target_matches && (record.phase == AuthPhase::RollingBack
+        && current.as_deref().map(digest) == op.target_original_sha256
+        || recovery_credentials::matches_restored(record, profile, &current));
     ensure!(source_matches || candidate_matches || restoring_target, "key receipt no longer owns the selected session");
     Ok(Some(index))
 }
@@ -105,16 +107,16 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostKeyParams)
     let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
     journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(), config: None,
         alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(),
-        directory_existed: true, operation_id: Some(id.to_owned()), owns_config: false });
+        directory_existed: true, operation_id: Some(id.to_owned()), owns_config: false, ..Recovery::default() });
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint: fingerprint(&ownership.root, &ownership.profile, &params.source_identity, &params.operation)?,
         root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted,
+        candidate: None, candidate_backup: None, candidate_sha256: None, restored: None, alias, backend: None, phase: AuthPhase::Admitted,
         account: None, identity: None, space_operation: None, profile_remove: None, key_operation: Some(KeyOperation { operation: params.operation.clone(),
             source_identity: params.source_identity.clone(), target: None, target_original_sha256: None,
             original_vault: None, credential_ready: false, required_inputs: Vec::new(), fivekeys: None }) });
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     Ok((journal, index))
 }
 
@@ -136,15 +138,10 @@ fn candidate_session(record: &AuthRecord) -> Result<Value> {
 fn candidate_keys(record: &AuthRecord) -> Result<crate::memory::SessionKeys> {
     let session = candidate_session(record)?;
     let backend = record.backend.as_deref().context("key credential backend is missing")?;
-    require_persistent_auth_backend(backend)?;
-    let version = session["vault_version"].as_i64().context("key candidate version missing")?;
-    let secret = if version == 1 { crate::keystore::read_imported_v1_password(&record.alias, backend)? }
-        else { crate::keystore::read_imported(&record.alias, "super", backend)? };
-    crate::auth::unlock_session_keys(&session, if version == 1 { &secret } else { "" },
-        Some(if version == 1 { "" } else { &secret }), &record.alias)
+    session_material_keys(&session, &record.alias, backend)
 }
 
-pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, profile: &Path) -> Result<()> {
+pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, profile: &Path, credentials: bool) -> Result<()> {
     let op = record.key_operation.as_ref().context("offline recovery receipt missing")?;
     let HostKeyOperation::Fivekeys { addr, user, kdf_salt, wrapped_urk, urk_nonce, use_super } = &op.operation
         else { anyhow::bail!("unbound recovery is not a fivekeys operation"); };
@@ -157,7 +154,7 @@ pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, p
         ensure!(matches!(record.phase, AuthPhase::Prepared | AuthPhase::AwaitingVerification)
             && active.operation_id.as_deref() == Some(record.operation_id.as_str())
             && same_directory(&active.directory, profile)? && active.alias == record.alias && active.owns_config
-            && active.original.as_deref().map(digest) == op.target_original_sha256,
+            && recovery_credentials::original_digest(active)? == op.target_original_sha256,
             "offline recovery no longer owns its candidate");
         verify_account_config(active)?;
     }
@@ -174,8 +171,9 @@ pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, p
     ensure!(object.len() == (if version == 1 { 10 } else { 9 })
         && object.keys().all(|field| matches!(field.as_str(), "user" | "addr" | "vault_version"
             | "kdf_salt" | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "auth_operation_id")
-            || (version == 1 && field == "secret")), "offline recovery contains unexpected identity material");
-    candidate_keys(record).map(|_| ())
+            || (version == 1 && field == "legacy_secret_backend")), "offline recovery contains unexpected identity material");
+    if credentials { candidate_keys(record)?; }
+    Ok(())
 }
 
 pub(super) fn verify_boot_candidate(record: &AuthRecord, active: &Recovery) -> Result<()> {
@@ -188,11 +186,12 @@ pub(super) fn verify_boot_candidate(record: &AuthRecord, active: &Recovery) -> R
         && active.alias == record.alias && read_original(&active.directory)? == record.candidate,
         "runtime verification does not own the active fivekeys candidate");
     verify_account_config(active)?;
-    candidate_keys(record).map(|_| ())
+    candidate_session(record)?;
+    require_persistent_auth_backend(record.backend.as_deref().context("key backend is missing")?)
 }
 
 fn checkpoint_credentials(journal: &mut Journal, index: usize, session: &mut Value,
-    super_password: &str, password: Option<&str>) -> Result<()> {
+    super_password: &str, password: Option<&str>, legacy_secret: Option<&str>) -> Result<()> {
     let alias = journal.operations[index].alias.clone();
     session["keyring_account"] = json!(alias);
     let version = session["vault_version"].as_i64().context("key candidate version missing")?;
@@ -219,6 +218,8 @@ fn checkpoint_credentials(journal: &mut Journal, index: usize, session: &mut Val
             })?;
         }
     }
+    checkpoint_legacy_secret(journal, session, &alias, legacy_secret)?;
+    checkpoint_account_candidate(journal, index, session)?;
     candidate_keys(&journal.operations[index])?;
     operation_mut(journal, index)?.credential_ready = true;
     save_journal(journal)
@@ -314,7 +315,7 @@ fn prepare_reset(journal: &mut Journal, index: usize, input: &HostKeyInput) -> R
     let op = operation_mut(journal, index)?;
     op.target = Some(target); op.target_original_sha256 = original_sha256;
     op.original_vault = Some(original_vault); op.required_inputs.clear();
-    checkpoint_credentials(journal, index, &mut session, &secret, password.as_deref())?;
+    checkpoint_credentials(journal, index, &mut session, &secret, password.as_deref(), None)?;
     ensure!(candidate_keys(&journal.operations[index])?.urk == keys.urk, "reset candidate changed the data key");
     Ok(())
 }
@@ -494,11 +495,12 @@ pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, p
         || same_directory(&target, &ownership.profile)? { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
     let current = read_original(&target)?;
-    ensure!(current == active.original || current == journal.operations[index].candidate, "key rollback target changed");
+    ensure!(recovery_credentials::matches_original(active, &current) || current == journal.operations[index].candidate,
+        "key rollback target changed");
     if active.owns_config { verify_account_config(active)?; }
     journal.operations[index].phase = AuthPhase::RollingBack;
-    save_journal(&journal)?;
-    rollback_record_inner(journal.active.as_ref().context("key recovery missing")?, false)?;
+    save_journal(&mut journal)?;
+    rollback_record_inner(&mut journal, false)?;
     drop(target_lock);
     if let Some(active) = journal.active.as_ref() {
         if !active.directory_existed && same_directory(&active.directory, &ownership.profile)? {
@@ -538,7 +540,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     let op = operation_mut(&mut journal, index)?;
     op.target = Some(root.to_owned()); op.target_original_sha256 = Some(digest(&original));
     journal.operations[index].phase = AuthPhase::RemotePending;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     let pending = std::fs::read(recovery_path())?;
     // An unrecoverable credential fails before GET/POST and cannot become success.
     assert!(control_key_result(&ownership, &id, &id, &params).is_err());
@@ -550,7 +552,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     params.operation = HostKeyOperation::SuperReset { addr: None };
     // Before any remote effect, a failed checkpoint is explicit and compensatable.
     journal.operations[index].phase = AuthPhase::Admitted;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     let admitted = std::fs::read(recovery_path())?;
     assert!(control_key(&ownership, &id, &id, &params).is_err());
     assert_eq!(std::fs::read(recovery_path())?, admitted);

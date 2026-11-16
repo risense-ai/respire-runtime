@@ -92,18 +92,26 @@ fn original_result_binds_key_force_session_and_unknown_queries_never_replay() ->
     assert_eq!(std::fs::read(root.join("session.json"))?, original);
     assert_eq!(serde_json::to_vec(&load_journal()?)?, before);
     let mut journal = load_journal()?;
+    let record = &journal.operations[0];
+    let backend = record.backend.as_deref().context("fixture backend missing")?;
+    let secret = crate::keystore::read_imported(&record.alias, "super", backend)?;
+    crate::keystore::remove_imported(&record.alias, "super", backend)?;
+    verify_locked_auth_identity(&root, &root, &identity)?;
+    assert!(verify_auth_identity(&root, &root, &identity).is_err());
+    crate::keystore::import_credential(&record.alias, "super", &secret)?;
     for phase in [AuthPhase::Admitted, AuthPhase::Prepared, AuthPhase::RolledBack] {
         journal.operations[0].phase = phase;
-        save_journal(&journal)?;
+        save_journal(&mut journal)?;
+        assert!(verify_locked_auth_identity(&root, &root, &identity).is_err());
         assert!(control_keygen(&ownership, &identity, &id, &id, false, true).is_err());
     }
     journal.operations[0].phase = AuthPhase::Committed;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     std::fs::write(root.join("session.json"), b"{}")?;
     assert!(control_keygen(&ownership, &identity, &id, &id, false, true).is_err());
     std::fs::write(root.join("session.json"), original)?;
     journal.operations[0].idempotency_key = "changed-key".into();
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     assert!(control_keygen(&ownership, &identity, &id, &id, false, true).is_err());
     Ok(())
 }

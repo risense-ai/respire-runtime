@@ -132,15 +132,21 @@ const cases = [
 // Each mutation uses synthetic native SDK bytes/identities, never a real CI result.
 function v2Case(name, owner, mutate = () => {}, error) {
   const value = { owner, candidate: structuredClone(candidate), report: {
-    ...structuredClone(report), repository: `fixture/${owner}`, actual_native_sdk: nativeSdk(owner, "target-a"),
+    ...structuredClone(report), repository: `fixture/${owner}`, actual_native_sdk: owner === "cli" ? null : nativeSdk(owner, "target-a"),
   } };
   mutate(value);
   value.report.candidate_sha256 = createHash("sha256").update(JSON.stringify(value.candidate)).digest("hex");
   return { name, ...value, error };
 }
 cases.push(
-  v2Case("CLI keeps dev.20 while Runtime keeps dev.21", "cli"),
+  v2Case("frontend CLI does not adopt the historical candidate SDK identity", "cli"),
+  v2Case("frontend CLI report missing null", "cli", v => {delete v.report.actual_native_sdk;}, "must be explicit null"),
+  v2Case("frontend CLI report cannot borrow Runtime SDK", "cli", v => {v.report.actual_native_sdk = nativeSdk("runtime", "target-a");}, "must be explicit null"),
   v2Case("Client2 explicit null", "client2"),
+  v2Case("frontend CLI explicit null", "cli", v => {
+    v.candidate.components.cli.artifacts["target-a"].native_sdk = null;
+    v.report.actual_native_sdk = null;
+  }),
   v2Case("candidate v1 rejected", "runtime", v => { v.candidate.schema = 1; }, "candidate schema 2 required"),
   v2Case("report v1 rejected", "runtime", v => { v.report.schema = 1; }, "required-execution/v2 report schema required"),
   v2Case("registry v1 rejected", "runtime", v => { v.tests = [{...ready, report_schema: "required-execution/v1"}]; }, "required-execution/v2 report schema required"),
@@ -151,7 +157,7 @@ cases.push(
   v2Case("Client2 report missing null", "client2", v => { delete v.report.actual_native_sdk; }, "must be explicit null"),
   v2Case("Client2 report cannot claim Runtime SDK", "client2", v => { v.report.actual_native_sdk = nativeSdk("runtime", "target-a"); }, "must be explicit null"),
 );
-for (const owner of ["runtime", "cli"]) {
+for (const owner of ["runtime"]) {
   cases.push(
     v2Case(`${owner} candidate missing SDK`, owner, v => { delete v.candidate.components[owner].artifacts["target-a"].native_sdk; }, "requires native SDK"),
     v2Case(`${owner} candidate null SDK`, owner, v => { v.candidate.components[owner].artifacts["target-a"].native_sdk = null; }, "requires native SDK"),
@@ -175,14 +181,14 @@ for (const owner of ["runtime", "cli", "client2"]) {
   const scenario = v2Case(`${owner} eight distinct target SDK bindings`, owner, v => {
     for (const component of ["runtime", "cli", "client2"]) v.candidate.components[component].artifacts =
       Object.fromEntries(nativeTargets.map(target => [target, {
-        archive_sha256: "b".repeat(64), binary_sha256: "c".repeat(64), native_sdk: nativeSdk(component, target),
+        archive_sha256: "b".repeat(64), binary_sha256: "c".repeat(64), native_sdk: component === "cli" ? null : nativeSdk(component, target),
       }]));
     v.tests = [{...ready, required_targets: nativeTargets}];
   });
   scenario.reports = nativeTargets.map((target, index) => ({...scenario.report, target,
     artifact_id: 31 + index, artifact_name: `${report.artifact_name}-${target}`,
     artifact_sha256: createHash("sha256").update(`${owner}/${target}/raw`).digest("hex"),
-    actual_native_sdk: nativeSdk(owner, target)}));
+    actual_native_sdk: owner === "cli" ? null : nativeSdk(owner, target)}));
   scenario.artifacts = scenario.reports.map(item => ({...goodArtifact, id: item.artifact_id,
     name: item.artifact_name, digest: `sha256:${item.artifact_sha256}`}));
   cases.push(scenario, {...scenario, name: `${owner} eight-target reports cannot shrink`, reports: scenario.reports.slice(0, 1), error: "target set is missing or different"});

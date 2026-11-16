@@ -50,7 +50,7 @@ fn progress(journal: &Journal, index: usize) -> Result<&FivekeysProgress> {
 }
 
 fn save_authorization(journal: &mut Journal, index: usize, authorization: Value) -> Result<()> {
-    ensure!(authorization.get("pass").is_none() && authorization.get("secret").is_none(),
+    ensure!(["pass", "super", "secret", "secret_key"].iter().all(|field| authorization.get(*field).is_none()),
         "authorization must not contain decryption factors");
     operation_mut(journal, index)?.fivekeys.as_mut().context("fivekeys continuation missing")?
         .authorization = Some(authorization);
@@ -132,7 +132,8 @@ fn stage(ownership: &AuthOwnership, journal: &mut Journal, index: usize, mut pre
     if prepared.user.is_empty() {
         prepared.session["auth_operation_id"] = json!(journal.operations[index].operation_id);
     }
-    checkpoint_credentials(journal, index, &mut prepared.session, &prepared.super_password, prepared.login_password.as_deref())?;
+    checkpoint_credentials(journal, index, &mut prepared.session, &prepared.super_password,
+        prepared.login_password.as_deref(), prepared.legacy_secret.as_deref())?;
     journal.operations[index].phase = AuthPhase::Prepared;
     operation_mut(journal, index)?.required_inputs.clear();
     save_journal(journal)
@@ -264,7 +265,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     // A query or a continuation must not restart a remotely unknown login.
     journal.operations[index].phase = AuthPhase::RemotePending;
     operation_mut(&mut journal, index)?.required_inputs.clear();
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     let pending = std::fs::read(recovery_path())?;
     assert!(control_key_result(&ownership, &id, &id, &params)?.outcome == HostKeyOutcome::Unknown);
     params.input = Some(bad_input);
@@ -276,7 +277,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     assert_eq!(std::fs::read(crate::service::client_config_path()).ok(), config);
     // Restore only this synthetic receipt's pre-network phase for compensation.
     journal.operations[index].phase = AuthPhase::Admitted;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     assert!(control_key_rollback(ownership, &id, &id, &params)?.outcome == HostKeyOutcome::RolledBack);
     assert_eq!(read_original(root)?, Some(original));
     assert!(!auth_recovery_pending()?);
@@ -357,6 +358,7 @@ mod tests {
             let secret = if version == 1 { crate::keystore::read_imported_v1_password(&alias, backend)? }
                 else { crate::keystore::read_imported(&alias, slot, backend)? };
             crate::keystore::remove_imported(&alias, slot, backend)?;
+            verify_locked_auth_identity(&root, &root, &receipt.identity)?;
             assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());
             crate::keystore::import_credential(&alias, slot, "synthetic-wrong-credential")?;
             assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());

@@ -5,8 +5,25 @@ repository that links the closed-source Respire Core. The managed runtime releas
 here is consumed by `respire-cli` (which discovers, downloads and supervises it)
 and by `respire-client2` (which shares the same managed layout and download rules).
 
-Boundary in one sentence: **runtime = core capability + RPC; every install,
-download, registration and configuration entry point lives in the CLI.**
+Boundary in one sentence: **runtime = core capability + RPC; the CLI or Client2
+owns downloads, installation, component management and persistent private keys.**
+
+Core capabilities include account authentication, synchronization, database
+management, recall and remember. A serving Runtime never accesses the OS
+credential store. After restart it reports `credential_state: "required"` and
+`store_ready: false`, keeps the library closed, and pauses indexing and sync.
+The host reads the existing system credentials and submits them to
+`POST /api/runtime/unlock`. This loopback endpoint requires the host bearer
+token and binds the request to the exact profile, session revision, Runtime
+instance and generation. Keys remain in process memory and are cleared at exit.
+
+The CLI supplies credentials during startup and through `rsrs runtime unlock`.
+Client2 requests the same CLI operation when an existing Runtime needs its key.
+Other hosts can implement this protocol without adopting either frontend.
+Private account-control helpers use the inherited framed channel to request
+credential custody from their host; they never load a native credential backend.
+These exchanges keep the existing transaction checkpoints and parent lifetime
+checks, including confirmation before encrypted account state is committed.
 
 ## Status
 
@@ -62,6 +79,11 @@ On PowerShell, set `$env:RSRS_CORE_SDK_DIR`. The staged runtime libraries and
 notices must ship next to the binary; release packaging does this automatically.
 The runtime binary never downloads models or assets on its own; missing assets
 are reported through `health` and `assets.status`, and the CLI installs them.
+Model verification, switching and background indexing only inspect installed assets.
+The business command parser contains no installer, uninstaller, startup
+registration, plugin-management, injection or CLI-update commands. Asset
+requirements and verification remain read-only RPC capabilities; the host owns
+the actual file changes. Host directory migration never runs before business RPC.
 
 ## Runtime surface (unchanged from the combined binary)
 

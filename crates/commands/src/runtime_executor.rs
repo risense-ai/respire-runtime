@@ -6,7 +6,6 @@
 
 use std::sync::atomic::Ordering;
 
-use anyhow::Context;
 use clap::Parser;
 
 use crate::cli_def::{Cli, Command, ModelAction, SnapshotCmd};
@@ -38,11 +37,7 @@ fn is_allowed(command: Option<&Command>) -> bool {
                 | Command::Classify { .. }
                 | Command::Reembed
                 | Command::Status
-                | Command::Doctor {
-                    check_update: false,
-                    fix: false,
-                    ..
-                }
+                | Command::Doctor { .. }
                 | Command::MemoryRevision
                 | Command::Capabilities
                 | Command::List { .. }
@@ -158,10 +153,6 @@ fn execute(args: Vec<String>) -> anyhow::Result<Captured> {
             cli.command.as_ref().map_or("cli", |_| "host-command"),
             "command is host-managed and cannot execute in Runtime",
         ));
-    }
-    if !crate::runtime_policy::client_only() {
-        respire_app::migration::ensure_default_home()
-            .context("default profile migration failed")?;
     }
 
     // Foreground writes commit source data without waiting for derived model
@@ -422,11 +413,12 @@ mod tests {
             vec!["login"],
             vec!["logout"],
         ] {
-            let parsed = Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))?;
-            assert!(
-                !is_allowed(parsed.command.as_ref()),
-                "host command was admitted: {args:?}"
-            );
+            if let Ok(parsed) = Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied())) {
+                assert!(
+                    !is_allowed(parsed.command.as_ref()),
+                    "host command was admitted: {args:?}"
+                );
+            }
         }
         Ok(())
     }

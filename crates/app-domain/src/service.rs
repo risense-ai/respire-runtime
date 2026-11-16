@@ -3255,9 +3255,14 @@ pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
     let alias = session["keyring_account"].as_str().unwrap_or(user);
     let version = session["vault_version"].as_i64().unwrap_or(1);
     let password = if version == 1 {
-        source_secret.map(str::to_owned)
-            .or_else(|| session["pass"].as_str().map(str::to_owned))
-            .or_else(|| crate::keystore::load_login_pass(alias)).unwrap_or_default()
+        match source_secret.or_else(|| session["pass"].as_str()) {
+            Some(value) => value.to_owned(),
+            None => match session["keyring_backend"].as_str() {
+                Some(backend) => crate::keystore::read_imported_v1_password(alias, backend)?,
+                None => crate::keystore::load_login_pass(alias).ok_or_else(|| anyhow::Error::new(
+                    crate::auth::SessionCredentialRequired("original source password required")))?,
+            },
+        }
     } else { String::new() };
     let keys = crate::auth::unlock_session_keys(&session, &password,
         if version == 1 { None } else { source_secret }, alias)?;

@@ -52,7 +52,7 @@ pub(crate) fn execute(
         "finish authentication recovery before changing client configuration"
     );
     crate::startup_identity::authorize_auth_control(grant)?;
-    respire_spawn::watch_control_parent()?;
+    crate::host_control::watch_control_parent()?;
     let _ownership =
         crate::startup_identity::acquire_auth_ownership(&params.binding, &params.identity)?;
     let _source = if params.source_profile != params.binding.installation_root
@@ -167,7 +167,7 @@ pub(crate) fn execute_agent_config(grant: HostControlLaunchGrant, request: &RpcR
         "agent config original operation binding changed");
     anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?, "finish authentication recovery first");
     crate::startup_identity::authorize_auth_control(grant)?;
-    respire_spawn::watch_control_parent()?;
+    crate::host_control::watch_control_parent()?;
     let root = respire_app::service::main_data_dir().canonicalize()?;
     let profile = respire_app::service::data_dir().canonicalize()?;
     anyhow::ensure!(root == review.installation_root && profile == review.profile, "agent config selection changed");

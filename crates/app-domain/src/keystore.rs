@@ -1,10 +1,6 @@
-//! keystore — super-password (v4 single-factor key) storage.
-//!
-//! Read priority: explicit nonempty RSRS_SUPER, then native credentials.
-//! Native priority: persistent Secret Service on Linux, then its volatile kernel
-//! store; Keychain/Credential Manager elsewhere.
-//! > none. Plaintext is never written to session.json from v4 on — a disk copy cannot decrypt.
-//! Headless servers (no keyring) use RSRS_SUPER or pass --super each time.
+//! Account transactions request credential custody through the private host pipe.
+//! The host owns native stores and environment overrides. Serving Runtime uses
+//! explicit in-memory input and never loads or writes a native credential store.
 
 use anyhow::{anyhow, Context, Result};
 
@@ -13,54 +9,40 @@ const VAULT_SERVICE: &str = "rsrs";
 
 #[derive(Clone, Copy)]
 enum Backend {
-    #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
+    #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
     Native,
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
     SecretService,
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
     Kernel,
 }
 
 impl Backend {
     fn name(self) -> &'static str {
         match self {
-            #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
+            #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
             Self::Native => "native",
-            #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+            #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
             Self::SecretService => "secret_service",
-            #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+            #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
             Self::Kernel => "kernel",
         }
     }
 }
 
 fn backends() -> &'static [Backend] {
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
     {
         &[Backend::SecretService, Backend::Kernel]
     }
-    #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
+    #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
     {
         &[Backend::Native]
     }
 }
 
-fn credential_entry(service: &str, label: &str, backend: Backend) -> Result<keyring::Entry> {
-    match backend {
-        #[cfg(any(not(target_os = "linux"), test, feature = "test-support"))]
-        Backend::Native => keyring::Entry::new(service, label)
-            .map_err(|_| anyhow!("keyring initialization failed")),
-        #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
-        Backend::SecretService => keyring::secret_service::default_credential_builder()
-            .build(None, service, label)
-            .map(keyring::Entry::new_with_credential)
-            .map_err(|_| anyhow!("Secret Service initialization failed")),
-        #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
-        Backend::Kernel => keyring::keyutils::default_credential_builder()
-            .build(None, service, label)
-            .map(keyring::Entry::new_with_credential)
-            .map_err(|_| anyhow!("kernel keyring initialization failed")),
-    }
+fn credential_entry(service: &str, label: &str, backend: Backend) -> Result<crate::credential_io::Entry> {
+    Ok(crate::credential_io::Entry::new(service, label, backend.name()))
 }
 
 /// Read every applicable legacy backend without writing or self-healing it.
@@ -82,6 +64,8 @@ fn save_label(label: &str, value: &str) -> Result<()> {
     for backend in backends() {
         let entry = credential_entry(SERVICE, label, *backend)?;
         if entry.set_password(value).is_ok() {
+            anyhow::ensure!(entry.get_password().context("host credential write could not be verified")? == value,
+                "host credential write did not round-trip");
             if backend.name() == "kernel" {
                 eprintln!("warning: Linux credentials are in the volatile kernel keyring; enabling Secret Service alone does not preserve existing keys across reboot; restore or re-import them into the persistent store");
             }
@@ -97,7 +81,7 @@ fn delete_label(label: &str) {
     for backend in backends() {
         let result = credential_entry(SERVICE, label, *backend).and_then(|entry| {
             match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Ok(()) | Err(respire_protocol::credentials::CredentialError::NoEntry) => Ok(()),
                 Err(_) => Err(anyhow!("keyring deletion failed")),
             }
         });
@@ -163,16 +147,16 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
                 ))
             }
             Ok(_) => {}
-            Err(keyring::Error::NoEntry) => {
+            Err(respire_protocol::credentials::CredentialError::NoEntry) => {
                 checkpoint(backend.name())?;
                 if entry.set_password(value).is_err() {
                     continue;
                 }
                 created = true;
             }
-            Err(keyring::Error::Ambiguous(_))
-            | Err(keyring::Error::BadEncoding(_))
-            | Err(keyring::Error::Invalid(_, _)) => {
+            Err(respire_protocol::credentials::CredentialError::Ambiguous)
+            | Err(respire_protocol::credentials::CredentialError::BadEncoding)
+            | Err(respire_protocol::credentials::CredentialError::Invalid) => {
                 return Err(anyhow!("migration keyring destination is ambiguous or invalid; original credentials were preserved"));
             }
             Err(_) => continue,
@@ -195,7 +179,7 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
             Err(_) => {
                 if created {
                     match entry.delete_credential() {
-                        Ok(()) | Err(keyring::Error::NoEntry) => {},
+                        Ok(()) | Err(respire_protocol::credentials::CredentialError::NoEntry) => {},
                         Err(error) => return Err(anyhow!("credential readback failed and its new entry could not be removed: {error}")),
                     }
                 }
@@ -222,7 +206,7 @@ fn read_imported_inner(account: &str, slot: &str, backend_name: &str, allow_empt
     let backend = backends().iter().find(|backend| backend.name() == backend_name)
         .ok_or_else(|| anyhow!("credential backend is unavailable during recovery"))?;
     let value = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?
-        .get_password().map_err(|_| anyhow!("recovery credential is unavailable"))?;
+        .get_password().context("recovery credential is unavailable")?;
     anyhow::ensure!(!value.is_empty() || allow_empty_v1 && slot == "pass", "recovery credential is empty");
     Ok(value)
 }
@@ -233,7 +217,7 @@ pub fn remove_imported(account: &str, slot: &str, backend_name: &str) -> Result<
         .ok_or_else(|| anyhow!("credential backend is unavailable during login rollback"))?;
     let entry = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?;
     match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Ok(()) | Err(respire_protocol::credentials::CredentialError::NoEntry) => Ok(()),
         Err(error) => Err(anyhow!("login credential rollback failed: {error}")),
     }
 }
@@ -290,9 +274,7 @@ pub fn save_login_pass(user: &str, pass: &str) -> Result<()> {
 
 /// Load the server login password from the OS keyring. None if the slot is missing.
 pub fn load_login_pass(user: &str) -> Option<String> {
-    read_credentials(SERVICE, &format!("pass:{}", credential_account(user)))
-        .into_iter()
-        .next()
+    configured_password(&format!("pass:{}", credential_account(user)))
 }
 
 /// Delete the stored login password (logout --full).
@@ -304,11 +286,12 @@ pub fn delete_login_pass(user: &str) {
 /// Headless login supplies its verified key through the environment; an old
 /// credential for the same user must not replace that explicitly selected key.
 pub fn load_super(user: &str) -> Option<String> {
-    crate::env::var("RSRS_SUPER").ok().filter(|s| !s.is_empty()).or_else(|| {
-        read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
-            .into_iter()
-            .next()
-    })
+    configured_password(&format!("super:{}", credential_account(user)))
+}
+
+fn configured_password(label: &str) -> Option<String> {
+    backends().iter().find_map(|backend| credential_entry(SERVICE, label, *backend).ok()?
+        .get_configured_password().ok().filter(|value| !value.is_empty()))
 }
 
 /// Delete the super password from the keyring (logout --full / post-reset cleanup).
@@ -343,6 +326,30 @@ mod host_tests {
         assert_eq!(host_of("https://api.deepseek.com/v1"), "api.deepseek.com");
         assert_eq!(host_of("api.b.ai/chat"), "api.b.ai");
         assert_eq!(host_of("  https://x.test/a?b=1#c  "), "x.test");
+    }
+
+    #[test]
+    #[cfg(not(feature = "native-credential-fixtures"))]
+    fn imported_read_preserves_missing_credential_type() -> Result<()> {
+        let _guard = crate::test_lock::guard();
+        let account = format!("missing-recovery-{}", uuid::Uuid::new_v4().simple());
+        let backend = backends().first().context("test credential backend is missing")?.name();
+        for result in [read_imported(&account, "super", backend), read_imported_v1_password(&account, backend)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => anyhow::bail!("missing credential unexpectedly succeeded"),
+            };
+            assert_eq!(error.to_string(), "recovery credential is unavailable");
+            assert!(matches!(error.downcast_ref::<respire_protocol::credentials::CredentialError>(),
+                Some(respire_protocol::credentials::CredentialError::NoEntry)));
+        }
+        let error = match read_imported(&account, "super", "unsupported-test-backend") {
+            Err(error) => error,
+            Ok(_) => anyhow::bail!("unsupported credential backend unexpectedly succeeded"),
+        };
+        assert_eq!(error.to_string(), "credential backend is unavailable during recovery");
+        assert!(error.downcast_ref::<respire_protocol::credentials::CredentialError>().is_none());
+        Ok(())
     }
 
     #[test]

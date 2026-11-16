@@ -180,8 +180,7 @@ fn read_challenge(journal: &Journal, index: usize) -> Result<crate::auth::Passwo
 
 fn save_authorization(journal: &mut Journal, index: usize, mut authorization: Value) -> Result<()> {
     let object = authorization.as_object_mut().context("authorization must be an object")?;
-    object.remove("pass");
-    object.remove("secret");
+    for field in ["pass", "super", "secret", "secret_key"] { object.remove(field); }
     journal.operations[index].account.as_mut().context("login receipt missing")?.authorization = Some(authorization);
     journal.operations[index].phase = AuthPhase::Authorized;
     let login = progress(journal, index)?;
@@ -213,7 +212,7 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
     }
     if fresh {
         journal.operations[index].phase = AuthPhase::RemotePending;
-        save_journal(&journal)?;
+        save_journal(&mut journal)?;
         let step = match &params.authorization {
             HostAuthAuthorization::Password { password, .. } =>
                 crate::auth::begin_password_authorization(addr, &params.user, password),
@@ -228,7 +227,7 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             Ok(crate::auth::PasswordAuthorizationStep::TotpRequired(challenge)) => checkpoint_challenge(&mut journal, index, challenge)?,
             Err(error) => {
                 journal.operations[index].phase = AuthPhase::RemoteUnknown;
-                save_journal(&journal)?;
+                save_journal(&mut journal)?;
                 return Err(error.context("authorization outcome unknown; query the original operation, do not resend"));
             }
         }
@@ -243,21 +242,21 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         let challenge = read_challenge(&journal, index)?;
         journal.operations[index].phase = AuthPhase::RemotePending;
         progress(&mut journal, index)?.required_inputs.clear();
-        save_journal(&journal)?;
+        save_journal(&mut journal)?;
         match crate::auth::continue_password_authorization(addr, &params.user, &challenge, code) {
             Ok(authorization) => save_authorization(&mut journal, index, authorization)?,
             Err(error) => {
                 journal.operations[index].phase = AuthPhase::RemoteUnknown;
-                save_journal(&journal)?;
+                save_journal(&mut journal)?;
                 return Err(error.context("TOTP outcome unknown; query the original operation, do not resend"));
             }
         }
     }
     let mut authorized = journal.operations[index].account.as_ref()
         .and_then(|account| account.authorization.clone()).context("authorized login receipt is missing")?;
-    let password = input.legacy_password.as_deref().filter(|value| !value.is_empty())
+    let password = input.legacy_password.as_deref()
         .or_else(|| match &params.authorization {
-            HostAuthAuthorization::Password { password, .. } if !password.is_empty() => Some(password.as_str()),
+            HostAuthAuthorization::Password { password, .. } => Some(password.as_str()),
             _ => None,
         });
     if let Some(password) = password { authorized["pass"] = json!(password); }
@@ -268,20 +267,23 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
         authorized["secret_key"] = json!(secret);
     }
     let mut prepared = if input.migrate_vault {
-        let local = crate::auth::read_session_json()?;
+        let mut local = crate::auth::read_session_json()?;
         let version = local["vault_version"].as_i64().context("local vault missing version")?;
         ensure!((1..=4).contains(&version), "unsupported local vault version");
         if version == 1 {
             ensure!(params.super_password.is_none(), "v1 requires the original password and Account Secret, not a super key");
         }
         let Some(password) = password else { return require_inputs(&mut journal, index, &["legacy_password"]); };
-        let alias = local["keyring_account"].as_str().unwrap_or(&params.user);
+        let alias = local["keyring_account"].as_str().unwrap_or(&params.user).to_owned();
+        if let Some(secret) = session_legacy_secret(&local, &alias)? {
+            local[if version == 1 { "secret" } else { "secret_key" }] = json!(secret);
+        }
         if version == 1 && input.account_secret.as_deref().or(input.secret_key.as_deref()).is_none()
             && local["secret"].as_str().is_none() {
             return require_inputs(&mut journal, index, &["account_secret"]);
         }
         if version != 1 && (params.super_password.as_deref().is_some_and(str::is_empty)
-            || params.super_password.is_none() && crate::keystore::load_super(alias).is_none()) {
+            || params.super_password.is_none() && crate::keystore::load_super(&alias).is_none()) {
             return require_inputs(&mut journal, index, &["super_password"]);
         }
         if version == 3 && input.secret_key.as_deref().or(input.account_secret.as_deref()).is_none()
@@ -298,7 +300,7 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             let vault = PreparedLogin::fetch_vault(addr, &authorized)?;
             ensure!(!vault.is_null(), "account has no cloud vault; use explicit vault migration; original material retained");
             journal.operations[index].account.as_mut().context("login receipt missing")?.vault = Some(vault.clone());
-            save_journal(&journal)?;
+            save_journal(&mut journal)?;
             vault
         };
         let version = vault["version"].as_i64().context("vault missing version")?;
@@ -307,22 +309,30 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             ensure!(params.super_password.is_none(), "v1 requires the original password and Account Secret, not a super key");
         }
         let target = login_directory(addr, &params.user)?;
-        let local: Value = read_original(&target)?.map(|bytes| serde_json::from_slice(&bytes)).transpose()?.unwrap_or(json!({}));
+        let mut local: Value = read_original(&target)?.map(|bytes| serde_json::from_slice(&bytes)).transpose()?.unwrap_or(json!({}));
         ensure!(local.is_object(), "target account session must be an object");
-        let alias = local["keyring_account"].as_str().unwrap_or(&params.user);
+        let alias = local["keyring_account"].as_str().unwrap_or(&params.user).to_owned();
+        if let Some(secret) = session_legacy_secret(&local, &alias)? {
+            local[if version == 1 { "secret" } else { "secret_key" }] = json!(secret);
+        }
         let super_password = if version == 1 { String::new() } else {
-            params.super_password.clone().or_else(|| crate::keystore::load_super(alias)).unwrap_or_default()
+            params.super_password.clone().or_else(|| crate::keystore::load_super(&alias)).unwrap_or_default()
         };
         if version == 1 {
-            if authorized["pass"].as_str().is_none_or(|value| value.is_empty()) {
-                let found = local["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned)
+            if authorized["pass"].as_str().is_none() {
+                let mut found = local["pass"].as_str().map(str::to_owned)
                     .or_else(|| crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty()))
-                    .or_else(|| crate::keystore::load_login_pass(alias));
+                    .or_else(|| crate::keystore::load_login_pass(&alias));
+                if found.is_none() {
+                    if let Some(backend) = local["keyring_backend"].as_str() {
+                        found = Some(crate::keystore::read_imported_v1_password(&alias, backend)?);
+                    }
+                }
                 if let Some(found) = found { authorized["pass"] = json!(found); }
             }
             if authorized["secret"].as_str().is_none_or(|value| value.is_empty()) { authorized["secret"] = local["secret"].clone(); }
             let missing: Vec<_> = [("pass", "legacy_password"), ("secret", "account_secret")].iter()
-                .filter(|(field, _)| authorized[*field].as_str().is_none_or(|value| value.is_empty()))
+                .filter(|(field, _)| authorized[*field].as_str().is_none_or(|value| *field != "pass" && value.is_empty()))
                 .map(|(_, input)| *input).collect();
             if !missing.is_empty() { return require_inputs(&mut journal, index, &missing); }
         } else if super_password.is_empty() {
@@ -350,7 +360,7 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
     };
     if let Some(confirmed) = input.merge_local {
         progress(&mut journal, index)?.confirm_merge(&prepared.directory, confirmed)?;
-        save_journal(&journal)?;
+        save_journal(&mut journal)?;
     }
     let prepared_is_source = prepared.directory.try_exists()?
         && prepared.directory.canonicalize()? == ownership.profile;
@@ -374,8 +384,7 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
             ensure!(original.sha256 == digest(snapshot.as_bytes()) && original.target == prepared.directory,
                 "admitted import source or destination changed; retain its original operation");
         }
-        let keys = crate::auth::unlock_session_keys(&prepared.session,
-            prepared.login_password.as_deref().unwrap_or_default(), Some(&prepared.super_password), &prepared.alias)?;
+        let keys = prepared.material_keys()?;
         let encryption = import_key(&keys, &journal.operations[index], &prepared.directory)?;
         let (nonce, ciphertext) = crate::memory::crypto::encrypt_bytes(&encryption, snapshot.as_bytes())?;
         progress(&mut journal, index)?.snapshot = Some(ImportSnapshot { target: prepared.directory.clone(),
@@ -385,7 +394,7 @@ pub(super) fn control_login(ownership: &AuthOwnership, id: &str, key: &str,
     login.required_inputs.clear();
     login.migration_cloud = prepared.migration_cloud.clone();
     login.migration_salt = prepared.migration_auth.as_ref().and_then(|auth| auth["salt"].as_str()).map(str::to_owned);
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     commit_account(ownership, &mut journal, index, &mut prepared)?;
     resume_import(ownership, &mut journal, index)?;
     account_result(&journal.operations[index])
@@ -551,7 +560,7 @@ pub(super) fn finish_migration(journal: &mut Journal, index: usize) -> Result<()
         Ok(json!({"salt":salt,"pass_hash":crate::memory::crypto::derive_pass_hash(&password, salt)?}))
     }).transpose()?;
     let prepared = PreparedLogin { user: account.user.clone(), directory: account.target.clone().context("migration target missing")?,
-        original: None, session, super_password: String::new(), login_password: None, alias: record.alias.clone(),
+        original: None, session, super_password: String::new(), login_password: None, legacy_secret: None, alias: record.alias.clone(),
         recovery_written: false, migration_cloud: if login.vault_done { None } else { login.migration_cloud.clone() }, migration_auth };
     prepared.finish_migration_guarded(&addr, &authorized, |step, complete| {
         let login = progress(journal, index)?;

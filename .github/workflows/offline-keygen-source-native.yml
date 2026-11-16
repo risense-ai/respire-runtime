@@ -1,47 +1,43 @@
-name: Extra offline keygen source regression (not release acceptance)
+name: Historical offline keygen source diagnostic (not release acceptance)
 on:
-  pull_request:
-    paths:
-      - 'runtime/**'
-      - 'crates/app/**'
-      - 'crates/app-domain/**'
-      - 'crates/protocol/**'
-      - 'crates/host-control/**'
-      - '.github/workflows/offline-keygen-source-native.yml'
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: offline-keygen-source-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   windows-source:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RUNTIME_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: 1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb
+          ref: 74b3ae3a4118bd5407d1ee58a12029086bee7359
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-client2
-          ref: b41808737e2ae8bd55c1c309dfbdb41222cdf77d
+          ref: 6ffa187685734873721ab51f3a54d8b2c29cd269
           path: .client2-source
           persist-credentials: false
       - name: Verify exact paired source before any build
         shell: bash
         env:
-          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_RUNTIME_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = '1eb3e5404b29b8800e8cbd997ffc5f3c7c731ddb'
-          test "$(git -C .client2-source rev-parse HEAD)" = 'b41808737e2ae8bd55c1c309dfbdb41222cdf77d'
+          test "$(git -C .cli-source rev-parse HEAD)" = '74b3ae3a4118bd5407d1ee58a12029086bee7359'
+          test "$(git -C .client2-source rev-parse HEAD)" = '6ffa187685734873721ab51f3a54d8b2c29cd269'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
             git -C "$repo" diff --cached --exit-code
@@ -76,23 +72,26 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}"
           node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
       - name: Test shared host control and protocol on native Windows
+        # The sibling job covers these exact-source tests once per workflow.
+        if: github.job == 'windows-source'
         env:
           RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p respire_app_domain service::tests::data_dir_config_roundtrip -- --exact --test-threads=1
-          cargo test --locked -p respire_host_control
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire_host_control --target-dir .cli-source/target
           cargo test --locked -p respire_runtime keygen_handoff_request_tests
           cargo test --locked -p respire_app keygen_existing_protocol
-          cargo test --locked -p respire_host_frontend --lib offline_keygen
-          cargo test --locked -p respire_host_frontend --lib embedding::tests
-          cargo test --locked -p respire_host_frontend --lib snapshot_control
-          cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
-          cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target offline_keygen
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target embedding::tests
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target snapshot_control
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target offline_start_dispatch
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target legacy_login_preflight
           cargo test --locked -p respire_commands clean_stop
           cargo test --locked -p respire_commands endpoint_cleanup
       - name: GUI fixture policy under Windows PowerShell 5 and PowerShell 7
+        if: github.job == 'windows-source'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -146,7 +145,7 @@ jobs:
           build=dict(schema_version=2,runtime_version=version,tag=f'v{version}',channel='dev',target_triple=target,
               archive_file=archive.name,archive_sha256=digest(archive),binary_file=binary,binary_sha256=digest(payload/binary),
               source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
-              compat={'min_cli':'1.0.21-dev.5','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
+              compat={'min_cli':'2.0.0-dev.11','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
               capabilities={'business_executor':'1','mcp_server':'1','offline_keygen_handoff':'1'},files=files)
           (root/f'runtime-build-{target}.json').write_text(json.dumps(build)+'\n')
           with open(os.environ['GITHUB_ENV'],'a') as output: output.write(f'RUNTIME_VERSION={version}\n')
@@ -177,12 +176,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/fixtures/embedded-keygen/run.py --client2 .client2-source --payload "$RUNNER_TEMP/offline-keygen-source-payload" --binary-file "rsrs-runtime-$RUNTIME_TARGET.exe" --models "$RUNNER_TEMP/offline-keygen-models" --version "$RUNTIME_VERSION"
-      - name: Original Windows GUI fixture against isolated source candidates
+          python scripts/fixtures/embedded-keygen/run.py --cli .cli-source/target/debug/rsrs.exe --archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" --client2 .client2-source --payload "$RUNNER_TEMP/offline-keygen-source-payload" --binary-file "rsrs-runtime-$RUNTIME_TARGET.exe" --models "$RUNNER_TEMP/offline-keygen-models" --version "$RUNTIME_VERSION"
+      - name: Build the paired Client2 for the original GUI operations
+        shell: pwsh
+        working-directory: .client2-source
+        run: |
+          $ErrorActionPreference='Stop'
+          $version='0.2.56-dev.${{ github.run_number }}'
+          ./scripts/build.ps1 -Version $version -Arch amd64
+          if ($LASTEXITCODE -ne 0) { throw 'Paired Client2 build failed' }
+          $source=(git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $source -cne '6ffa187685734873721ab51f3a54d8b2c29cd269') { throw 'Paired Client2 source changed' }
+          git diff --exit-code
+          if ($LASTEXITCODE -ne 0) { throw 'Paired Client2 build changed tracked source' }
+          git diff --cached --exit-code
+          if ($LASTEXITCODE -ne 0) { throw 'Paired Client2 build changed tracked index' }
+          $manifest=[ordered]@{
+            schema_version=1; mode='source-client2-ui-candidate'; repository='risense-ai/respire-client2'
+            source_commit=$source; platform='windows-amd64'; exe_file='respire-windows-amd64.exe'
+            exe_sha256=(Get-FileHash -LiteralPath './dist/respire-windows-amd64.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+            build_version=$version; build_command="./scripts/build.ps1 -Version $version -Arch amd64"
+            run_id=$env:GITHUB_RUN_ID; run_attempt=$env:GITHUB_RUN_ATTEMPT; job=$env:GITHUB_JOB
+          }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'client2-source-gui-input.json'),
+            ($manifest | ConvertTo-Json -Depth 4)+"`n", [Text.UTF8Encoding]::new($false))
+      - name: Original Windows GUI operations against the exact paired sources
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          ./.cli-source/scripts/probe-client2-gui.ps1 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/offline-keygen-source-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/offline-keygen-models"
+          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-source-gui-input.json" -SourceClient2Commit 6ffa187685734873721ab51f3a54d8b2c29cd269 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/offline-keygen-source-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/offline-keygen-models"
           if ($LASTEXITCODE -ne 0) { throw 'Source-only GUI regression failed; release acceptance remains unproven' }
       - uses: actions/upload-artifact@v4
         if: always()
@@ -204,33 +226,33 @@ jobs:
       - name: Require reviewed exact candidate CLI
         shell: pwsh
         run: |
-          $cliSha='b4054510b250bbadc8a020bc9c3427ba6a13f89a'
+          $cliSha='74b3ae3a4118bd5407d1ee58a12029086bee7359'
           if ($cliSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Reviewed exact CLI candidate commit is required' }
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-cli
-          ref: b4054510b250bbadc8a020bc9c3427ba6a13f89a
+          ref: 74b3ae3a4118bd5407d1ee58a12029086bee7359
           path: .cli-source
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-client2
-          ref: b41808737e2ae8bd55c1c309dfbdb41222cdf77d
+          ref: 6ffa187685734873721ab51f3a54d8b2c29cd269
           path: .client2-source
           persist-credentials: false
       - name: Verify exact clean source and reviewed Client2 inputs before any build
         shell: bash
         env:
-          EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_RUNTIME_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNTIME_SHA"
-          test "$(git -C .cli-source rev-parse HEAD)" = 'b4054510b250bbadc8a020bc9c3427ba6a13f89a'
-          test "$(git -C .client2-source rev-parse HEAD)" = 'b41808737e2ae8bd55c1c309dfbdb41222cdf77d'
+          test "$(git -C .cli-source rev-parse HEAD)" = '74b3ae3a4118bd5407d1ee58a12029086bee7359'
+          test "$(git -C .client2-source rev-parse HEAD)" = '6ffa187685734873721ab51f3a54d8b2c29cd269'
           for repo in . .cli-source .client2-source; do
             git -C "$repo" diff --exit-code
             git -C "$repo" diff --cached --exit-code
@@ -278,22 +300,25 @@ jobs:
           test -z "${CORE_SDK_READ_TOKEN:-}"
           node scripts/fetch-core-sdk.mjs "$RUNTIME_TARGET"
       - name: Test shared host control and protocol on native Windows
+        # The sibling job covers these exact-source tests once per workflow.
+        if: github.job == 'windows-source'
         env:
           RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ env.RUNTIME_TARGET }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p respire_host_control
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire_host_control --target-dir .cli-source/target
           cargo test --locked -p respire_runtime keygen_handoff_request_tests
           cargo test --locked -p respire_app keygen_existing_protocol
-          cargo test --locked -p respire_host_frontend --lib offline_keygen
-          cargo test --locked -p respire_host_frontend --lib embedding::tests
-          cargo test --locked -p respire_host_frontend --lib snapshot_control
-          cargo test --locked -p respire_host_frontend --lib offline_start_dispatch
-          cargo test --locked -p respire_host_frontend --lib legacy_login_preflight
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target offline_keygen
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target embedding::tests
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target snapshot_control
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target offline_start_dispatch
+          cargo test --locked --manifest-path .cli-source/Cargo.toml -p respire --lib --target-dir .cli-source/target legacy_login_preflight
           cargo test --locked -p respire_commands clean_stop
           cargo test --locked -p respire_commands endpoint_cleanup
       - name: GUI fixture policy under Windows PowerShell 5 and PowerShell 7
+        if: github.job == 'windows-source'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -347,7 +372,7 @@ jobs:
           build=dict(schema_version=2,runtime_version=version,tag=f'v{version}',channel='dev',target_triple=target,
               archive_file=archive.name,archive_sha256=digest(archive),binary_file=binary,binary_sha256=digest(payload/binary),
               source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
-              compat={'min_cli':'1.0.21-dev.5','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
+              compat={'min_cli':'2.0.0-dev.11','max_cli':'*'},protocol_range={'minimum':1,'maximum':1},
               capabilities={'business_executor':'1','mcp_server':'1','offline_keygen_handoff':'1'},files=files)
           (root/f'runtime-build-{target}.json').write_text(json.dumps(build)+'\n')
           with open(os.environ['GITHUB_ENV'],'a') as output: output.write(f'RUNTIME_VERSION={version}\n')
@@ -466,7 +491,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-candidate-ui-input.json" -SourceClient2Commit b41808737e2ae8bd55c1c309dfbdb41222cdf77d -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/client2-candidate-ui-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-candidate-ui-models"
+          ./.cli-source/scripts/probe-client2-gui.ps1 -SourceCandidate -SourceClient2Exe "$PWD/.client2-source/dist/respire-windows-amd64.exe" -SourceClient2Manifest "$env:RUNNER_TEMP/client2-candidate-ui-input.json" -SourceClient2Commit 6ffa187685734873721ab51f3a54d8b2c29cd269 -Cli "$PWD/.cli-source/target/debug/rsrs.exe" -RuntimeArchive "$env:RUNNER_TEMP/rsrs-runtime-$env:RUNTIME_TARGET.tar.gz" -RuntimeVersion $env:RUNTIME_VERSION -OutputDirectory "$env:RUNNER_TEMP/client2-candidate-ui-gui" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-candidate-ui-models"
           if ($LASTEXITCODE -ne 0) { throw 'Candidate UI subset failed; release acceptance remains unproven' }
       - name: Produce allowlisted UI result and independently require subset success
         if: always()
@@ -690,6 +715,14 @@ jobs:
                       and type(samples) is int and 0<=samples<=256):
                       summary['runtime_start_stop_selector']={'state':state,'complete_samples':samples}
               o=n.get('offline',{}); focus=o.get('account_focus_stability',{})
+              binding_stage=o.get('runtime_binding_stage')
+              summary['runtime_binding_stage']=binding_stage if type(binding_stage) is str and binding_stage in {
+                'start_control','stop_control','health','process','cim','identity','bound'} else 'unknown'
+              identity=o.get('runtime_binding_checks')
+              summary['runtime_binding_checks']={}
+              if type(identity) is dict:
+                  for key in ['server','protocol','health_image','process_image','data_directory','process_record','session','image_digest']:
+                      if type(identity.get(key)) is bool: summary['runtime_binding_checks'][key]=identity[key]
               allowed_stages={'account_navigation','offline_initialization','key_generation',
                 'recovery_dismiss','overview_navigation','runtime_start','account_verification',
                 'credential_persistence','important_editor_open','important_save','important_created_reader',

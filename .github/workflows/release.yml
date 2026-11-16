@@ -1,7 +1,7 @@
 name: Runtime release
 
-# Builds rsrs-runtime for all eight platform targets, runs the native
-# regression matrix and publishes the release assets:
+# Builds and publishes rsrs-runtime for all eight platform targets, then runs
+# native regression against the public release assets:
 #   rsrs-runtime-<triple>(.exe)      raw binary
 #   rsrs-runtime-<triple>.tar.gz     binary + core-runtime.json + native Core
 #                                    runtime libraries and notices
@@ -17,7 +17,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish only after every synchronous gate succeeds
+        description: Publish after source and build checks; native acceptance runs on the public assets afterward
         default: false
         type: boolean
       dev_version:
@@ -37,7 +37,7 @@ concurrency:
 env:
   # CLI compatibility window embedded into every runtime-build-<triple>.json.
   # Source of truth for the contract: docs/version-contract.md.
-  RUNTIME_MIN_CLI: '1.0.21-dev.5'
+  RUNTIME_MIN_CLI: '2.0.0-dev.11'
   RUNTIME_MAX_CLI: '*'
 
 jobs:
@@ -91,7 +91,7 @@ jobs:
             if (process.env.RELEASE_PUBLISH === 'true') cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
           }
           if (cargo !== version) throw new Error('Release version must match runtime/Cargo.toml; update the manifest and Cargo.lock before building');
-          if (channel === 'latest') throw new Error('Stable publication is disabled until complete G1 evidence is verified and promotion is authorized');
+          if (channel === 'latest') throw new Error('Stable publication requires separate promotion authorization; this workflow currently publishes DEV releases');
           const sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);
           console.log(`Planned runtime release ${version} (${channel}) from ${sha}, publish=${process.env.RELEASE_PUBLISH}`);
@@ -175,6 +175,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
           target="${{ matrix.target }}"
           echo "target=$target" >> "$GITHUB_OUTPUT"
           echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
@@ -407,12 +408,10 @@ jobs:
           if-no-files-found: error
 
   native-regression:
-    # Full native regression ownership moved here from respire-cli (seven-platform
-    # matrix with real-hardware gates). P2 extends this job with the migrated
-    # inference, migration and startup-supervision regression suites; the serve/
-    # health smoke below already exercises the real binary end to end.
-    name: Native regression (${{ matrix.target }})
-    needs: [plan, build]
+    # Publication is complete before this matrix starts. A failed leg remains
+    # failed and must be rerun; source/build success is not native acceptance.
+    name: Post-release native regression (${{ matrix.target }})
+    needs: [plan, publish]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     permissions:
@@ -460,35 +459,31 @@ jobs:
         if: matrix.os == 'macos-15-intel'
         shell: bash
         run: node scripts/smoke-runtime-release.mjs --check-native-intel
-      - name: Wait for this platform's build artifacts
-        timeout-minutes: 16
+      - name: Download this platform's actual public release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RUNTIME_TARGET: ${{ matrix.target }}
+          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
         run: |
+          set -euo pipefail
           node - <<'NODE'
-          const cp = require('child_process');
-          const repo = process.env.GITHUB_REPOSITORY, run = process.env.GITHUB_RUN_ID, target = process.env.RUNTIME_TARGET;
-          const names = [`runtime-release-${target}`, `runtime-release-binary-${target}`];
-          const deadline = Date.now() + 15 * 60 * 1000;
-          const read = path => JSON.parse(cp.execFileSync('gh', ['api', `repos/${repo}/actions/runs/${run}/${path}`], {encoding: 'utf8', timeout: 30000}));
-          async function wait() {
-            while (Date.now() < deadline) {
-              const found = read('artifacts?per_page=100').artifacts.filter(a => names.includes(a.name) && !a.expired);
-              if (found.length === names.length) { console.log(`Build artifacts ready: ${names.join(', ')}`); return; }
-              console.log(`Waiting for ${names.join(', ')}`);
-              await new Promise(resolve => setTimeout(resolve, 30000));
-            }
-            throw new Error(`Build artifacts ${names.join(', ')} unavailable within 15 minutes`);
+          const assert = require('node:assert/strict'), cp = require('node:child_process');
+          const repo = process.env.GITHUB_REPOSITORY, tag = process.env.RUNTIME_TAG, target = process.env.RUNTIME_TARGET;
+          const release = JSON.parse(cp.execFileSync('gh', ['api', `repos/${repo}/releases/tags/${tag}`], {encoding: 'utf8'}));
+          assert.equal(release.tag_name, tag);
+          assert.equal(release.draft, false, 'Native acceptance requires a public release');
+          assert.ok(release.published_at, 'Release has not been published');
+          assert.equal(release.assets.length, 24, 'Incomplete public release inventory');
+          const names = [`rsrs-runtime-${target}.tar.gz`, `runtime-build-${target}.json`,
+            `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`];
+          for (const name of names) {
+            assert.equal(release.assets.filter(asset => asset.name === name && asset.state === 'uploaded' && asset.size > 0).length,
+              1, `Missing or duplicate public release asset: ${name}`);
           }
-          wait().catch(error => { console.error(error.message); process.exit(1); });
+          cp.execFileSync('gh', ['release', 'download', tag, '--repo', repo, '--dir', 'release-assets',
+            ...names.flatMap(name => ['--pattern', name])], {stdio: 'inherit'});
           NODE
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-release*-${{ matrix.target }}
-          path: release-assets
-          merge-multiple: true
       - name: Verify archive and binary digests against the build report
         shell: bash
         env:
@@ -532,17 +527,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          retention-days: 1
+          retention-days: 7
           name: runtime-smoke-${{ matrix.target }}
           path: smoke-report/*.json
           if-no-files-found: warn
 
   publish:
-    needs: [plan, build, native-regression]
+    needs: [plan, build]
     if: >-
       ${{
         !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' &&
-        needs.native-regression.result == 'success' && needs.plan.outputs.publish == 'true'
+        needs.plan.outputs.publish == 'true'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -565,6 +560,8 @@ jobs:
         env:
           RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
           RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
+          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
+          RUNTIME_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: |
           node - <<'NODE'
           const fs = require('fs'), cp = require('child_process');
@@ -582,6 +579,8 @@ jobs:
             const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
             if (report.schema_version !== 2 || report.runtime_version !== process.env.RUNTIME_VERSION ||
                 report.tag !== process.env.RUNTIME_TAG || report.target_triple !== target ||
+                report.source_commit !== process.env.RUNTIME_SHA || report.channel !== process.env.RUNTIME_CHANNEL ||
+                report.binary_file !== `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}` ||
                 report.archive_file !== `rsrs-runtime-${target}.tar.gz` ||
                 !/^[0-9a-f]{64}$/.test(report.archive_sha256 || '')) {
               throw new Error(`runtime-build-${target}.json identity mismatch`);
@@ -660,7 +659,7 @@ jobs:
             assert.equal(run.event, 'push', 'CI is not a push run');
             assert.equal(run.path, '.github/workflows/ci.yml', 'CI workflow differs');
             assert.equal(run.status, 'completed', 'CI is not terminal');
-            assert.ok(['success', 'failure'].includes(run.conclusion), 'CI must finish without cancellation');
+            assert.equal(run.conclusion, 'success', 'Source CI must succeed');
             assert.ok(Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0, 'Invalid CI attempt');
           }
           const selected = latestPush();
@@ -675,13 +674,10 @@ jobs:
             assert.equal(job.run_attempt, run.run_attempt, 'CI job belongs to another attempt');
             assert.equal(job.head_sha, sha, 'CI job source SHA differs');
             assert.equal(job.status, 'completed', 'CI job is not terminal');
-            // DEV source acceptance does not grant full G1; only these two gates may fail.
-            assert.ok(['success', 'skipped', 'neutral'].includes(job.conclusion) ||
-              (['required-tests', 'ci-complete'].includes(job.name) &&
-               ['failure', 'cancelled', 'timed_out'].includes(job.conclusion)),
+            assert.ok(['success', 'skipped', 'neutral'].includes(job.conclusion),
               `Unexpected CI job failure: ${job.name} (${job.conclusion})`);
           }
-          for (const name of ['detect', 'workspace-tests', 'control-contract']) {
+          for (const name of ['detect', 'workspace-tests', 'control-contract', 'ci-complete']) {
             const matching = jobs.filter(job => job.name === name);
             assert.equal(matching.length, 1, `Missing or duplicate required CI job: ${name}`);
             assert.equal(matching[0].status, 'completed', `CI job is not terminal: ${name}`);
@@ -705,3 +701,4 @@ jobs:
           test "$count" -eq 24 || { echo "::error::Draft release holds $count assets, expected 24"; exit 1; }
           gh release edit "$RUNTIME_TAG" --draft=false
           echo "Published $RUNTIME_TAG with 24 assets"
+          echo "Published $RUNTIME_TAG. Post-release native acceptance is pending; publication is not full G1 evidence." >> "$GITHUB_STEP_SUMMARY"

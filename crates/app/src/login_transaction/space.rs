@@ -207,18 +207,18 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParam
     journal.active = Some(Recovery { directory: target.clone().unwrap_or_else(|| ownership.profile.clone()),
         original: if target.is_some() { None } else { original.clone() }, config: None, alias: alias.clone(),
         backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(), directory_existed: target.is_none(),
-        operation_id: Some(id.to_owned()), owns_config: false });
+        operation_id: Some(id.to_owned()), owns_config: false, ..Recovery::default() });
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint: fingerprint(&ownership.root,&ownership.profile,&params.source_identity,&params.operation)?,
         root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted,
+        candidate: None, candidate_backup: None, candidate_sha256: None, restored: None, alias, backend: None, phase: AuthPhase::Admitted,
         account: None, identity: None, key_operation: None,
         profile_remove: None,
         space_operation: Some(SpaceOperation { intent: params.operation.clone(), source_identity: params.source_identity.clone(),
             members_original, members_candidate: None, kick, session_id: None, code_backend: None,
             code_sha256: None, issued_at: None, target, credential_ready: false }) });
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     Ok((journal,index))
 }
 
@@ -235,12 +235,12 @@ fn reject_unadmitted(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
     journal.operations.push(AuthRecord { operation_id:id.to_owned(),idempotency_key:key.to_owned(),
         fingerprint:fingerprint(&ownership.root,&ownership.profile,&params.source_identity,&params.operation)?,
         root:ownership.root.clone(),profile:ownership.profile.clone(),original_sha256:original.as_deref().map(digest),
-        candidate:None,candidate_sha256:None,alias:format!("login-{}",uuid::Uuid::new_v4().simple()),backend:None,
+        candidate:None,candidate_backup: None, candidate_sha256:None,restored:None,alias:format!("login-{}",uuid::Uuid::new_v4().simple()),backend:None,
         phase:AuthPhase::RolledBack,account:None,identity:None,key_operation:None,profile_remove:None,
         space_operation:Some(SpaceOperation { intent:params.operation.clone(),source_identity:params.source_identity.clone(),
             members_original:None,members_candidate:None,kick:Vec::new(),session_id:None,code_backend:None,code_sha256:None,
             issued_at:None,target:None,credential_ready:false }) });
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     Ok((journal,index))
 }
 
@@ -660,7 +660,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     op_mut(&mut journal,index)?.kick[0].state = HostSpaceKickState::Revoked;
     op_mut(&mut journal,index)?.kick[1].state = HostSpaceKickState::RemotePending;
     journal.operations[index].phase = AuthPhase::RemotePending;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     // Recovery must not route a space write through keygen/login rollback.
     ownership.recover(&params.identity)?;
     drop(ownership);

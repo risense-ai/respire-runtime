@@ -15,6 +15,12 @@ case "${RELEASE_CACHE_ACTION:-build}" in
   key|pack)
     node scripts/rust-ci-cache.mjs "$RELEASE_CACHE_ACTION" release "$TARGET"
     ;;
+  candidate)
+    # Unpublished source fixtures use dev artifacts; release/cache actions stay separate.
+    node scripts/fetch-core-sdk.mjs "$TARGET"
+    cargo build --locked -p respire_runtime --bin rsrs-runtime --target "$TARGET" --target-dir target/ci
+    node scripts/stage-core-runtime.mjs "target/ci/$TARGET/debug"
+    ;;
   build)
     node scripts/fetch-core-sdk.mjs "$TARGET"
     if [ "${RELEASE_DEPENDENCY_CACHE:-}" = 1 ]; then node scripts/rust-ci-cache.mjs restore release "$TARGET"; fi

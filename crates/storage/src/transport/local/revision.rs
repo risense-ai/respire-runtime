@@ -87,6 +87,138 @@ mod tests {
                 "updated".into()
             )
         );
+        // Simulate a released database retaining either or both legacy columns.
+        for legacy_columns in [
+            &[][..],
+            &["when_to_use"][..],
+            &["superseded_by"][..],
+            &["when_to_use", "superseded_by"][..],
+        ] {
+            let legacy = Connection::open_in_memory()?;
+            migrate(&legacy)?;
+            legacy.execute(
+                "INSERT INTO memories(id,ciphertext,nonce) VALUES('old','sealed','nonce')",
+                [],
+            )?;
+            for column in legacy_columns {
+                legacy.execute_batch(&format!("ALTER TABLE memories ADD COLUMN {column} TEXT"))?;
+                let before = read_revision(&legacy)?;
+                legacy.execute(
+                    &format!("UPDATE memories SET {column}='before-upgrade' WHERE id='old'"),
+                    [],
+                )?;
+                assert_eq!(read_revision(&legacy)?, before);
+            }
+            let trigger_sql: String = legacy.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_revision_update'",
+                [],
+                |row| row.get(0),
+            )?;
+            if legacy_columns.len() == 2 {
+                for (failure, expected_error) in [
+                    (
+                        "CREATE TRIGGER reject_migration BEFORE UPDATE OF value ON meta
+                         WHEN NEW.key='memory_revision_v1'
+                         BEGIN SELECT RAISE(ABORT,'synthetic install failure'); END;",
+                        "synthetic install failure",
+                    ),
+                    (
+                        "CREATE TRIGGER reject_migration BEFORE INSERT ON meta
+                         WHEN NEW.key='witness_library_id_v1'
+                         BEGIN SELECT RAISE(ABORT,'synthetic install failure'); END;",
+                        "synthetic install failure",
+                    ),
+                    (
+                        "CREATE TRIGGER reject_migration BEFORE UPDATE OF value ON meta
+                         WHEN NEW.key='memory_revision_v1'
+                         BEGIN SELECT RAISE(IGNORE); END;",
+                        "memory revision unavailable while installing legacy triggers",
+                    ),
+                ] {
+                    legacy.execute_batch(failure)?;
+                    let before = read_revision(&legacy)?;
+                    let error = match migrate(&legacy) {
+                        Ok(()) => panic!("migration ignored a synthetic failure"),
+                        Err(error) => error,
+                    };
+                    assert!(error.to_string().contains(expected_error));
+                    assert_eq!(read_revision(&legacy)?, before);
+                    let count: i64 = legacy.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN
+                         ('memory_revision_when_to_use_update','memory_revision_superseded_by_update')",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(count, 0);
+                    legacy.execute_batch("DROP TRIGGER reject_migration")?;
+                }
+            }
+            let before = read_revision(&legacy)?;
+            let changes = legacy.total_changes();
+            migrate(&legacy)?;
+            if legacy_columns.is_empty() {
+                assert_eq!(read_revision(&legacy)?, before);
+            } else {
+                assert_ne!(read_revision(&legacy)?, before);
+            }
+            assert_eq!(
+                legacy.total_changes() - changes,
+                if legacy_columns.is_empty() { 0 } else { 1 }
+            );
+            let actual_sql: String = legacy.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_revision_update'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(actual_sql, trigger_sql);
+            let count: i64 = legacy.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN
+                 ('memory_revision_when_to_use_update','memory_revision_superseded_by_update')",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(count, legacy_columns.len() as i64);
+            for column in legacy_columns {
+                let before = read_revision(&legacy)?;
+                legacy.execute(
+                    &format!("UPDATE memories SET {column}='after-upgrade' WHERE id='old'"),
+                    [],
+                )?;
+                assert_ne!(read_revision(&legacy)?, before, "missing {column}");
+                let before = read_revision(&legacy)?;
+                legacy.execute(
+                    &format!("UPDATE memories SET {column}={column} WHERE id='old'"),
+                    [],
+                )?;
+                assert_eq!(read_revision(&legacy)?, before);
+                legacy.execute(
+                    &format!("UPDATE memories SET {column}=NULL WHERE id='old'"),
+                    [],
+                )?;
+                assert_ne!(read_revision(&legacy)?, before);
+            }
+            if legacy_columns.len() == 2 {
+                legacy.execute_batch("DROP TRIGGER memory_revision_superseded_by_update")?;
+                let before = read_revision(&legacy)?;
+                let changes = legacy.total_changes();
+                migrate(&legacy)?;
+                assert_ne!(read_revision(&legacy)?, before);
+                assert_eq!(legacy.total_changes() - changes, 1);
+            }
+            let before = read_revision(&legacy)?;
+            legacy.execute("UPDATE memories SET dirty=0 WHERE id='old'", [])?;
+            assert_eq!(read_revision(&legacy)?, before);
+            let kept: (String, String) = legacy.query_row(
+                "SELECT ciphertext,nonce FROM memories WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(kept, ("sealed".into(), "nonce".into()));
+            let changes = legacy.total_changes();
+            migrate(&legacy)?;
+            assert_eq!(read_revision(&legacy)?, before);
+            assert_eq!(legacy.total_changes(), changes);
+        }
         // Unsupported legacy data must not gain a misleading initialized token.
         let unsupported = Connection::open_in_memory()?;
         unsupported.execute_batch("CREATE TABLE memories (id INTEGER PRIMARY KEY);")?;

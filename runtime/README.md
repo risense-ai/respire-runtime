@@ -18,15 +18,14 @@ are cut from the dedicated runtime repository, not this workspace).
 
 ```sh
 rsrs-runtime serve [--host 127.0.0.1] [--port 15169] [--data-dir DIR] [--supervised]
-rsrs-runtime --json runtime start     # same as serve, prints a start envelope
-rsrs-runtime [--json] runtime stop    # or --stop: drain + stop the resident runtime
-rsrs-runtime --status                 # health probe
 rsrs-runtime --version
 ```
 
-Unknown arguments exit with code 2. `runtime start|stop|status` (with or
-without a leading `--json`) is the client2 lifecycle contract; do not change
-those shapes without updating the coordinator.
+The CLI or Client2 starts this foreground service and owns sign-in startup,
+background execution, supervision and restart. Use the host's `rsrs runtime`
+commands for lifecycle operations. Runtime does not detach or launch itself.
+It accepts host-provided credentials in memory; an encrypted library remains
+locked until the host delivers its key material.
 
 ## Identity and health
 
@@ -37,14 +36,13 @@ The `/api/health` body carries the extension under the `runtime` key plus a
 flattened `runtime_version`, so older CLI builds keep working additively.
 
 `RSRS_RUNTIME_BOOT_TOKEN` is consumed with `respire_spawn` semantics: read
-once, then removed from the environment. Managed-boot verification (the
-host-side registration/maintenance fence) remains host-managed through
-`host_hooks` until the supervisor moves into this crate (P2).
+once, then removed from the environment. Runtime verifies each host launch grant against its profile and process identity.
+The CLI owns the registration, maintenance fence and supervisor.
 
 ## Status
 
 `assets.status` RPC inspects the required model files with their pinned sizes
 and SHA-256 digests. Each asset reports `missing`, `incomplete`, `corrupt`,
 `incompatible`, or `complete`; the aggregate `complete` field is true only when
-every required asset is complete. Boot-token/registration verification and the
-supervisor remain P2 work.
+every required asset is complete. Missing assets are installed by the CLI or
+Client2; Runtime only reports and uses their verified installed bytes.

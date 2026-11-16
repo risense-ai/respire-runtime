@@ -1,15 +1,11 @@
-//! Shared clap definitions for the rsrs command surface.
-//!
-//! The CLI binary and the standalone runtime must parse the exact same
-//! commands; the definitions live here so the two cannot drift. The bodies
-//! are extracted verbatim from the CLI binary (runtime split, 2026-11-03);
-//! only visibility was widened to `pub`.
+//! Business command definitions for Runtime RPC. Host installers, startup
+//! registration, injection and component management are parsed by the CLI.
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::{autostart, classify, metadata, review};
+use crate::{classify, metadata, review};
 
 #[derive(Parser)]
 #[command(
@@ -53,25 +49,11 @@ pub enum ModelAction {
     Progress,
     /// Resume the library's last pending immutable profile snapshot.
     Resume,
-    /// Download or verify BGE-M3 without rebuilding the index.
-    #[command(name = "install", visible_alias = "install-m3")]
-    InstallM3 {
-        #[arg(long)]
-        mirror: Option<String>,
-        /// Also fetch this onnx variant (quantized, fp16, int8, uint8, q4, q4f16).
-        #[arg(long)]
-        model: Option<String>,
-        /// Predownload dependencies for this engine without changing the active selection.
-        #[arg(long, value_parser = ["npu", "gpu", "cpu"])]
-        for_engine: Option<String>,
-    },
     /// Build a resumable index generation and activate it after complete validation.
     Activate {
         #[arg(value_parser = ["m3"])]
         model: String,
     },
-    /// Force CPU and terminate the runtime, even when inference or RPC is stuck.
-    ResetCpu,
     /// Show or select inference engine. Failures do not switch engines; default CPU.
     Engine {
         #[arg(value_parser = ["npu", "gpu", "cpu"])]
@@ -90,8 +72,6 @@ pub enum ModelAction {
         #[arg(long)]
         model: String,
     },
-    /// Install compatible NPU execution providers through Windows ML.
-    InstallEngines,
     /// Run real inference with the active embedding profile and report its backend.
     Probe {
         #[arg(long)]
@@ -103,9 +83,6 @@ pub enum ModelAction {
         )]
         text: String,
     },
-    /// Delete the user-installed BGE-M3 files.
-    #[command(name = "uninstall", visible_alias = "uninstall-m3")]
-    UninstallM3,
 }
 
 #[derive(Subcommand)]
@@ -114,17 +91,6 @@ pub enum Command {
     Review {
         #[command(flatten)]
         args: review::ReviewArgs,
-    },
-    /// Host-owned foreground runtime and opt-in current-user sign-in startup.
-    Runtime {
-        #[command(subcommand)]
-        command: autostart::RuntimeCommand,
-    },
-    /// Restart the resident runtime; kill the verified process if graceful shutdown times out.
-    Restart {
-        /// Seconds to wait for graceful shutdown before force termination.
-        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=300))]
-        timeout: u64,
     },
     /// Read the full memory workflow before storing or maintaining memories.
     Prompt,
@@ -505,28 +471,6 @@ pub enum Command {
         #[arg(long, default_value_t = 0.55)]
         min: f32,
     },
-    /// Distribute the inject source: --targets lists 14 hosts; --id <target> injects; --remove --id <target> uninstalls; no args in a TTY opens the picker
-    Inject {
-        #[arg(long)]
-        targets: bool,
-        /// Force the interactive TUI picker (errors if there is no TTY)
-        #[arg(long, conflicts_with_all = ["targets", "id", "preview", "expected"])]
-        tui: bool,
-        /// Inject every detected target (skip the TUI; same as no-args when there is no TTY)
-        #[arg(long, conflicts_with_all = ["id", "preview", "expected"])]
-        all: bool,
-        /// Target id (dsh/opencode/codex/claude/codebuddy/workbuddy/kylinbot/pi/zigcode/deepseek/qwen/doubao/generic)
-        #[arg(long)]
-        id: Option<String>,
-        #[arg(long)]
-        remove: bool,
-        /// Preview a Codex inject or uninstall without writing (requires --id codex)
-        #[arg(long, conflicts_with = "targets")]
-        preview: bool,
-        /// Apply only if the config still matches this preview revision (requires --id codex)
-        #[arg(long, conflicts_with_all = ["targets", "preview"])]
-        expected: Option<String>,
-    },
     /// Tree hygiene: root-size bill + lone-leaf attach suggestions (read-only; --id --parent actually attaches)
     TreeCure {
         #[arg(long, default_value_t = 15)]
@@ -552,17 +496,11 @@ pub enum Command {
         #[arg(long, default_value_t = 3)]
         min: i64,
     },
-    /// Self-check: model/store/lock/remote/inject/scope in one pass (first stop for install issues)
+    /// Inspect the local model, store and lock, with an optional remote health check
     Doctor {
         /// Also probe remote server reachability (GET /health, ~1–3s)
         #[arg(long)]
         remote: bool,
-        /// Also check npm for a newer CLI (~1–5s; default reads the 24h cache, no network)
-        #[arg(long)]
-        check_update: bool,
-        /// Install a missing or unusable embedder; default only reports diagnostics
-        #[arg(long)]
-        fix: bool,
     },
     /// Whole-store health audit: orphans / illegal importance / duplicate titles / truncated titles / deep chains; structured report for an AI audit
     Audit {
@@ -574,12 +512,6 @@ pub enum Command {
     Witness {
         #[arg(long)]
         verify: bool,
-    },
-    /// Open the hosted user dashboard without starting the local runtime
-    Web {
-        /// Report https://dash.rsrs.rs without opening a browser
-        #[arg(long)]
-        no_open: bool,
     },
     /// Inspect or configure classification without running a model
     ClassifyConfig {
@@ -629,22 +561,6 @@ pub enum Command {
         id: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
-    },
-    /// Plugin hooks (plugins.json): list shows config; test <EVENT> fires an event
-    Plugin {
-        #[command(subcommand)]
-        command: PluginCommand,
-    },
-    /// MCP server over stdio JSON-RPC. The internal runtime serves HTTP/SSE at `/mcp` and `/sse`.
-    Mcp,
-    /// Check npm for a newer CLI (24h throttle; --force skips it; --clear drops the cache)
-    UpdateCheck {
-        /// Skip the throttle and query the network
-        #[arg(long)]
-        force: bool,
-        /// Clear the cache (the next check hits the network)
-        #[arg(long)]
-        clear: bool,
     },
     /// Backfill: reseal ciphertext so payload.parent_id matches the plaintext column (fixes dual-source drift; idempotent)
     Repack,
@@ -1078,19 +994,6 @@ pub enum SessionCommand {
 }
 
 /// plugin subcommand: inspect hook config and fire events by hand.
-#[derive(Subcommand)]
-pub enum PluginCommand {
-    /// List hooks configured in plugins.json (event -> command/timeout/failure policy)
-    List,
-    /// Fire one event to verify a plugin (--payload is business JSON; a test hook need not actually write the store)
-    Test {
-        /// Event name: pre-remember | post-remember | post-recall | post-forget | post-sync
-        event: String,
-        /// Business payload JSON (default {}); combined with event name/timestamp into the full event on plugin stdin
-        #[arg(long, default_value = "{}")]
-        payload: String,
-    },
-}
 
 pub fn changes_profile(command: Option<&Command>) -> bool {
     match command {

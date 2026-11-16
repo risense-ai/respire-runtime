@@ -41,6 +41,7 @@ pub use metadata::{
     RequestScope, Scope, SourceRef, Verification,
 };
 
+pub mod credentials;
 pub mod runtime;
 pub use runtime::{
     BackendLoadBackend, BackendLoadCpuNodeFallback, BackendLoadEngine, BackendLoadEvidence,

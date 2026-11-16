@@ -1,23 +1,9 @@
 //! Standalone `rsrs-runtime` binary: the loopback RPC host split out of the
 //! CLI binary (runtime split WP-3, milestone M1 "two runnable binaries").
 //!
-//! Argv contract (HANDOFF 2026-11-03 item 9; client2's `stopManaged`/
-//! `startManaged` depends on these exact shapes):
-//!
-//! | argv                                   | behaviour                                  |
-//! |----------------------------------------|--------------------------------------------|
-//! | `serve [--host H] [--port P] [--data-dir D] [--supervised]` | serve until stopped |
-//! | `--json runtime start` / `runtime start` | detached same-image startup with checked readiness |
-//! | `--json runtime stop` / `runtime stop` / `--stop` | ask the resident runtime to stop |
-//! | `--status`                              | probe the resident runtime health          |
-//! | `--version`                             | print the binary version                   |
-//!
-//! Unknown arguments print an error and exit with code 2. The boot token is
-//! consumed with `respire_spawn` semantics: `RSRS_RUNTIME_BOOT_TOKEN` is read
-//! and then removed from this process's environment.
+//! The CLI or Client2 owns startup, supervision and shutdown through RPC.
+//! This executable serves in the foreground and never launches another Runtime.
 
-mod background_start;
-mod host_account;
 mod startup_identity;
 mod host_control;
 mod maintenance_control;
@@ -46,10 +32,13 @@ use respire_protocol::{RuntimeCompat, RuntimeIdentity};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// CLI compatibility window for this runtime train (runtime-pin.json aligns).
-const MIN_CLI: &str = "1.0.21-dev.5";
+const MIN_CLI: &str = "2.0.0-dev.11";
 const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
+    for name in ["RSRS_SUPER", "RSRS_PASS", "RESPIRE_SUPER", "RESPIRE_PASS", "ONEMEMORY_SUPER", "ONEMEMORY_PASS"] {
+        std::env::remove_var(name);
+    }
     // Remove the inherited secret before any worker or business code can spawn.
     match consume_boot_token().and_then(run) {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
@@ -88,10 +77,6 @@ fn consume_boot_token() -> Result<Option<String>> {
 struct Flags {
     json: bool,
     serve: bool,
-    start: bool,
-    background_child: bool,
-    stop: bool,
-    status: bool,
     version: bool,
     host: String,
     port: Option<u16>,
@@ -104,10 +89,6 @@ impl Default for Flags {
         Self {
             json: false,
             serve: false,
-            start: false,
-            background_child: false,
-            stop: false,
-            status: false,
             version: false,
             host: "127.0.0.1".to_owned(),
             port: None,
@@ -118,20 +99,10 @@ impl Default for Flags {
 }
 
 fn usage() -> &'static str {
-    "Usage: rsrs-runtime serve [--host 127.0.0.1] [--port 15169] [--data-dir DIR] [--supervised]\n       rsrs-runtime [--json] runtime start|stop|status\n       rsrs-runtime --stop | --status | --version\n"
+    "Usage: rsrs-runtime serve [--host 127.0.0.1] [--port 15169] [--data-dir DIR] [--supervised]\n       rsrs-runtime --version\n"
 }
 
 fn run(boot_token: Option<String>) -> Result<i32> {
-    #[cfg(target_os = "macos")]
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--runtime-exit-observer-internal") {
-        anyhow::ensure!(boot_token.is_none(), "exit observer cannot consume boot authorization");
-        return background_start::observe_exit();
-    }
-    if std::env::args_os().skip(1).any(|arg| arg == "--host-rpc-stdio") {
-        anyhow::ensure!(boot_token.is_none(), "host RPC cannot consume runtime boot authorization");
-        host_account::install_frontend()?;
-        return Ok(respire_frontend::run_frontend());
-    }
     if std::env::args().nth(1).as_deref() == Some("--host-control-internal") {
         anyhow::ensure!(
             boot_token.is_none() && std::env::args_os().count() == 2,
@@ -143,7 +114,7 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         anyhow::ensure!(boot_token.is_none() && std::env::args_os().count() == 2,
             "private backend probe accepts no boot token or public runtime arguments");
         // Dispatch before flags, authorization, hooks, keyring, store or listener initialization.
-        respire_commands::model_install::run_backend_probe_helper()?;
+        respire_commands::model_assets::run_backend_probe_helper()?;
         return Ok(0);
     }
     if std::env::args()
@@ -162,77 +133,16 @@ fn run(boot_token: Option<String>) -> Result<i32> {
             }
         };
     }
-    if uses_host_frontend(std::env::args_os().skip(1)) {
-        anyhow::ensure!(boot_token.is_none(), "host commands cannot consume runtime boot authorization");
-        host_account::install_frontend()?;
-        return Ok(respire_frontend::run_frontend());
-    }
-    let mut flags = Flags::default();
-    let mut args = std::env::args().skip(1).peekable();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--json" => flags.json = true,
-            "serve" | "--runtime-internal" => flags.serve = true,
-            "--runtime-background-internal" => {
-                flags.serve = true;
-                flags.background_child = true;
-                flags.json = true;
-            }
-            "--stop" => flags.stop = true,
-            "--status" => flags.status = true,
-            "--version" => flags.version = true,
-            "--supervised" => flags.supervised = true,
-            "--host" => {
-                let value = args.next().context("--host requires a value")?;
-                anyhow::ensure!(!value.is_empty(), "--host requires a loopback address");
-                flags.host = value;
-            }
-            "--port" => {
-                let value = args.next().context("--port requires a value")?;
-                let port: u16 = value.parse().map_err(|_| {
-                    anyhow::anyhow!("--port requires a numeric port between 1 and 65535")
-                })?;
-                anyhow::ensure!(
-                    port > 0,
-                    "--port requires a numeric port between 1 and 65535"
-                );
-                flags.port = Some(port);
-            }
-            "--data-dir" => {
-                let value = args.next().context("--data-dir requires a value")?;
-                flags.data_dir = Some(std::path::PathBuf::from(value));
-            }
-            "runtime" => {
-                let verb = args.next().unwrap_or_default();
-                match verb.as_str() {
-                    "start" => flags.start = true,
-                    "stop" => flags.stop = true,
-                    "status" => flags.status = true,
-                    "version" => flags.version = true,
-                    other => {
-                        eprintln!("unknown runtime verb: {other}\n{}", usage());
-                        return Ok(2);
-                    }
-                }
-            }
-            other => {
-                eprintln!("unknown argument: {other}\n{}", usage());
-                return Ok(2);
-            }
+    let flags = match parse_flags(std::env::args().skip(1)) {
+        Ok(flags) => flags,
+        Err(error) => {
+            eprintln!("{error:#}\n{}", usage());
+            return Ok(2);
         }
-    }
-    let requested = [flags.serve, flags.start, flags.stop, flags.status, flags.version]
-        .into_iter()
-        .filter(|requested| *requested)
-        .count();
-    anyhow::ensure!(
-        requested <= 1,
-        "combine at most one of start/serve, stop, status, version\n{}",
-        usage()
-    );
+    };
 
     anyhow::ensure!(
-        !(flags.status || flags.stop || flags.version || flags.start || flags.background_child)
+        !flags.version
             || (!flags.supervised && boot_token.is_none()),
         "boot authorization and --supervised are only valid when serving"
     );
@@ -244,8 +154,6 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         }
         return Ok(0);
     }
-    anyhow::ensure!(!flags.background_child || flags.serve,
-        "background readiness is only valid for a serving process");
     apply_data_dir(&flags);
     if let Some(port) = flags.port {
         std::env::set_var("RSRS_RPC_PORT", port.to_string());
@@ -257,87 +165,74 @@ fn run(boot_token: Option<String>) -> Result<i32> {
         }
         return Err(error).context("Runtime client configuration is invalid");
     }
-    if flags.start {
-        // Preserve the ordinary background endpoint contract before either route.
-        require_explicit_start_endpoint(&flags)?;
-        if respire_frontend::has_pending_offline_keygen()? {
-            anyhow::ensure!(boot_token.is_none(), "offline host startup cannot consume a runtime boot token");
-            host_account::install_frontend()?;
-            respire_frontend::start_pending_offline_keygen(flags.json)?;
-            print_envelope("start", true, 0, None, Some("started"));
-            return Ok(0);
-        }
-        return background_start::start(&flags);
-    }
-    if flags.status {
-        return status_command(flags.json);
-    }
-    if flags.stop {
-        return stop_command(flags.json);
-    }
-    // Bare invocation defaults to serving, mirroring `--runtime-internal`.
+    // Bare invocation serves in the foreground.
     serve_command(&flags, boot_token.as_deref())
 }
 
-// Both lifecycle routes consume the already-applied data-dir/port, without
-// reparsing arguments through the companion CLI's different grammar.
-fn require_explicit_start_endpoint(flags: &Flags) -> Result<()> {
-    anyhow::ensure!(flags.host == "127.0.0.1",
-        "background startup currently requires the existing 127.0.0.1 client endpoint");
-    Ok(())
-}
-
-// Only lifecycle/process modes stay in this binary's small startup parser.
-// The existing CLI parser owns all host command syntax and behavior unchanged.
-fn uses_host_frontend(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
-    let mut args = args.filter(|argument| argument != "--json");
-    let Some(first) = args.next() else { return false; };
-    if first == "runtime" {
-        return !matches!(args.next().as_deref().and_then(std::ffi::OsStr::to_str),
-            Some("start" | "stop" | "status" | "version"));
+fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags> {
+    let mut flags = Flags::default();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" => flags.json = true,
+            "serve" | "--runtime-internal" => flags.serve = true,
+            "--version" => flags.version = true,
+            "--supervised" => flags.supervised = true,
+            "--host" => {
+                let value = args.next().context("--host requires a value")?;
+                anyhow::ensure!(!value.is_empty(), "--host requires a loopback address");
+                flags.host = value;
+            }
+            "--port" => {
+                let value = args.next().context("--port requires a value")?;
+                let port: u16 = value.parse().context("--port requires a numeric port between 1 and 65535")?;
+                anyhow::ensure!(port > 0, "--port requires a numeric port between 1 and 65535");
+                flags.port = Some(port);
+            }
+            "--data-dir" => {
+                flags.data_dir = Some(args.next().context("--data-dir requires a value")?.into());
+            }
+            other => anyhow::bail!("unsupported Runtime argument: {other}; use the CLI or Client2 for host operations"),
+        }
     }
-    !matches!(first.to_str(),
-        Some("serve" | "--runtime-internal" | "--runtime-background-internal"
-            | "--stop" | "--status" | "--version" | "--supervised" | "--host" | "--port" | "--data-dir"))
+    let requested = [flags.serve, flags.version]
+        .into_iter().filter(|requested| *requested).count();
+    anyhow::ensure!(requested <= 1, "combine at most one of serve and version");
+    Ok(flags)
 }
 
 #[cfg(test)]
 mod frontend_route_tests {
-    use super::uses_host_frontend;
-    fn route(args: &[&str]) -> bool { uses_host_frontend(args.iter().map(std::ffi::OsString::from)) }
-    #[test]
-    fn pending_start_preserves_parsed_endpoint_and_root_parameters() -> anyhow::Result<()> {
-        let mut flags = super::Flags::default();
-        flags.start = true;
-        flags.port = Some(15321);
-        flags.data_dir = Some(std::path::PathBuf::from("synthetic-root"));
-        super::require_explicit_start_endpoint(&flags)?;
-        assert_eq!(flags.port, Some(15321));
-        assert_eq!(flags.data_dir, Some(std::path::PathBuf::from("synthetic-root")));
-        flags.host = "0.0.0.0".into();
-        assert!(super::require_explicit_start_endpoint(&flags).is_err());
-        Ok(())
+    use super::parse_flags;
+    fn parse(args: &[&str]) -> anyhow::Result<super::Flags> {
+        parse_flags(args.iter().map(|arg| (*arg).to_owned()))
     }
-
     #[test]
-    fn original_client2_host_commands_use_the_shared_frontend() {
+    fn original_client2_host_commands_require_an_external_host() {
         for command in ["config", "logout", "grant", "account", "space", "migrate", "login",
             "keygen", "keys-export", "inject", "inject-status", "inject-remove", "classify-config", "model"] {
-            assert!(route(&["--json", command]), "{command}");
+            assert!(parse(&["--json", command]).is_err(), "{command}");
         }
-        assert!(route(&["--json", "config", "--data-dir", "test-profile"]));
-        assert!(route(&["--json", "model", "install-engines"]));
-        assert!(route(&["--json", "runtime", "account-result", "original-operation"]));
-        assert!(route(&["--json", "runtime", "account-rollback", "original-operation"]));
+        for args in [vec!["--host-rpc-stdio"], vec!["runtime", "install"],
+            vec!["runtime", "enable"], vec!["runtime", "account-result", "original-operation"],
+            vec!["model", "install-engines"]] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
     }
     #[test]
-    fn runtime_lifecycle_and_private_modes_keep_their_dispatcher() {
-        assert!(!route(&[]));
-        for args in [vec!["--json", "runtime", "start"], vec!["--runtime-internal"],
-            vec!["serve", "--port", "15169"], vec!["--status"], vec!["--version"],
-            vec!["--runtime-internal", "--runtime-background-internal", "--port", "15169"]] {
-            assert!(!route(&args), "{args:?}");
+    fn runtime_only_serves_in_the_foreground() -> anyhow::Result<()> {
+        assert!(!parse(&[])?.version);
+        assert!(parse(&["serve"])?.serve);
+        assert!(parse(&["--runtime-internal"])?.serve);
+        assert_eq!(parse(&["serve", "--port", "15169"])?.port, Some(15169));
+        assert!(parse(&["--version"])?.version);
+        for args in [vec!["runtime", "start"], vec!["runtime", "stop"],
+            vec!["runtime", "status"], vec!["--stop"], vec!["--status"],
+            vec!["--runtime-background-internal"], vec!["--runtime-exit-observer-internal"],
+            vec!["serve", "--port", "0"]] {
+            assert!(parse(&args).is_err(), "{args:?}");
         }
+        Ok(())
     }
 }
 
@@ -364,25 +259,18 @@ fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
         .join("runtime.log");
     let _ = respire_logging::init(respire_logging::LoggingConfig::new(log_path));
     install_panic_hook();
-    if flags.background_child {
-        anyhow::ensure!(flags.host == "127.0.0.1",
-            "legacy host mode only accepts the existing loopback endpoint");
-        startup_identity::enable_background_readiness()?;
-    }
-    respire_commands::model_install::enable_backend_probe_host(
-        respire_commands::model_install::BackendProbeHost::Serving);
+    respire_commands::model_assets::enable_backend_probe_host(
+        respire_commands::model_assets::BackendProbeHost::Serving);
     startup_identity::authorize(
         flags.supervised,
         boot_token,
         flags.port.unwrap_or_else(net_rpc::rpc_port),
     )?;
-    startup_identity::install_legacy_host()?;
     let installed = host_hooks::install(HostHooks {
         capture_run: Some(respire_commands::runtime_executor::capture_run),
         mcp_http_response: Some(respire_commands::runtime_mcp::http_response),
         managed_id: Some(startup_identity::managed_id),
         verify_managed_boot: Some(startup_identity::verify_managed_boot),
-        runtime_listener_ready: Some(startup_identity::publish_legacy_ready),
         ..HostHooks::default()
     });
     anyhow::ensure!(installed, "Runtime executor hooks were installed twice");
@@ -415,100 +303,6 @@ fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
         }
         error
     })?;
-    Ok(0)
-}
-
-fn status_command(json: bool) -> Result<i32> {
-    match net_rpc::health() {
-        Ok(health) => {
-            if json {
-                let body = serde_json::json!({
-                    "v": respire_commands::rpc_worker::PROTOCOL_V,
-                    "status": "ok",
-                    "summary": { "running": true },
-                    "id": "status",
-                    "ok": true,
-                    "exit": 0,
-                    "bin": VERSION,
-                    "pid": health.pid,
-                    "url": health.url,
-                    "data_dir": health.data_dir,
-                    "runtime_version": health.runtime_version,
-                });
-                println!("{body}");
-            } else {
-                println!(
-                    "runtime=up pid={} url={} data_dir={}",
-                    health.pid, health.url, health.data_dir,
-                );
-            }
-            Ok(0)
-        }
-        Err(error) if background_start::is_unavailable(&error) => {
-            if json {
-                print_envelope("status", true, 0, None, Some("not_running"));
-            } else {
-                println!("runtime=not_running");
-            }
-            Ok(0)
-        }
-        Err(error) => {
-            if json {
-                print_envelope("status", false, 2, Some(&format!("{error:#}")), None);
-            } else {
-                eprintln!("runtime=down: {error:#}");
-            }
-            Ok(2)
-        }
-    }
-}
-
-fn stop_command(json: bool) -> Result<i32> {
-    let runtime = match net_rpc::health() {
-        Ok(runtime) => runtime,
-        Err(error)
-            if matches!(
-                error.downcast_ref::<respire_commands::runtime_error::RuntimeError>(),
-                Some(respire_commands::runtime_error::RuntimeError::Unavailable)
-            ) =>
-        {
-            if json {
-                print_envelope("stop", true, 0, None, Some("not_running"));
-            } else {
-                println!("runtime=not_running");
-            }
-            return Ok(0);
-        }
-        Err(error) => return Err(error).context("cannot establish runtime stop identity"),
-    };
-    let root = respire_app::service::main_data_dir().canonicalize()?;
-    let library = respire_app::service::data_dir().canonicalize()?;
-    anyhow::ensure!(
-        !runtime.installation_root.is_empty()
-            && std::fs::canonicalize(&runtime.installation_root)? == root
-            && !runtime.data_dir.is_empty()
-            && std::fs::canonicalize(&runtime.data_dir)? == library,
-        "runtime stop target differs from the selected installation or library"
-    );
-    anyhow::ensure!(
-        net_rpc::instance_is_running(&runtime)?,
-        "runtime instance changed before the stop request"
-    );
-    let accepted = net_rpc::request_stop_for(&runtime, std::time::Duration::from_secs(10))
-        .context("runtime stop request failed")?;
-    net_rpc::wait_for_instance_exit(&runtime, std::time::Duration::from_secs(120))
-        .context("runtime instance exit is not proven; no drained result is available")?;
-    net_rpc::final_stop_receipt(&runtime, Some(&accepted.operation_id))
-        .context("runtime normal drain is not proven")?;
-    // The receipt proves shutdown intent; taking the existing guard proves release.
-    let released = respire_app::lock::LibraryLock::acquire(&library, std::time::Duration::ZERO)
-        .context("runtime library lock was not released after its final drain receipt")?;
-    drop(released);
-    if json {
-        print_envelope("stop", true, 0, None, Some("drained"));
-    } else {
-        println!("runtime=stopped result=drained");
-    }
     Ok(0)
 }
 

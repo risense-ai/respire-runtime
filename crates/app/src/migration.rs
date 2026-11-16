@@ -692,10 +692,12 @@ fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Prof
         private_file(&database)?;
     }
     let mut keyring_backend = None;
+    let mut keyring_account = None;
+    let mut credential_references = Vec::new();
     if let Some(bytes) = original_session.as_ref() {
         let mut session: Value = serde_json::from_slice(bytes)
             .context("legacy session is invalid; source was preserved")?;
-        let recovered = migrate_credentials(profile, &database, &mut session)?;
+        let recovered = migrate_credentials(profile, stage, &database, &mut session, &mut credential_references)?;
         if current_namespace {
             if let Some(keys) = recovered.as_ref() {
                 migrate_namespace_database(&database, keys)?;
@@ -704,15 +706,12 @@ fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Prof
                 session["kdf_salt"] = json!(salt);
                 session["wrapped_urk"] = json!(wrapped);
                 session["urk_nonce"] = json!(nonce);
-                let version = session["vault_version"].as_i64().unwrap_or(1);
-                if let Some(fields) = session.as_object_mut() {
-                    for field in ["super", "pass"] { fields.remove(field); }
-                    if version >= 4 { fields.remove("secret_key"); fields.remove("secret"); }
-                }
             }
             session["crypto_namespace"] = json!(crate::memory::crypto::RSRS_PREFIX);
+            if recovered.is_some() { verify_local_session(&session)?; }
         }
         keyring_backend = session.get("keyring_backend").cloned();
+        keyring_account = session.get("keyring_account").cloned();
         rewrite_address(&mut session);
         write_json(&stage.join("session.json"), &session)?;
     } else if encrypted_count(&database)? > 0 {
@@ -768,7 +767,8 @@ fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Prof
         &json!({"schema":2,"complete":true,"source_identity":profile.identity,
         "source":profile.source,"destination":profile.destination,
             "api_default":crate::service::DEFAULT_SERVER_ADDR,"original_preserved":true,
-            "keyring_backend":keyring_backend,
+            "keyring_backend":keyring_backend,"keyring_account":keyring_account,
+            "credential_references":credential_references,
         "snapshot_at":chrono::Utc::now().to_rfc3339(),"legacy_runtime_active":legacy_active,
         "snapshot_only":true,"namespace_migrated":current_namespace}),
     )?;
@@ -781,7 +781,8 @@ fn copy_tree(source: &Path, destination: &Path, root: bool) -> Result<()> {
         let entry = entry?;
         let name = entry.file_name();
         let text = name.to_string_lossy();
-        if excluded(&text) || text == RECEIPT || root && text == "accounts" {
+        // Session factors stay in memory until the host has checkpointed their slots.
+        if excluded(&text) || text == RECEIPT || root && matches!(text.as_ref(), "accounts" | "session.json") {
             continue;
         }
         let kind = entry.file_type()?;
@@ -964,60 +965,97 @@ fn candidate_values(
     values
 }
 
-fn migrate_credentials(profile: &Profile, database: &Path, session: &mut Value) -> Result<Option<crate::memory::SessionKeys>> {
-    if session["wrapped_urk"].as_str().filter(|value| !value.is_empty()).is_none() {
-        if encrypted_count(database)? > 0 {
-            bail!("legacy session has no wrapped key; recover the original keys before migration");
-        }
-        validate_live_memories(database, None)?;
-        return Ok(None);
-    }
+// Keep attempted backend references even if a host write or later transform fails.
+fn import_migration_credential(profile: &Profile, stage: &Path, references: &mut Vec<Value>,
+    alias: &str, slot: &str, value: &str) -> Result<&'static str> {
+    let mut checkpoint = |backend: &str| -> Result<()> {
+        anyhow::ensure!(backend != "kernel", "migration requires a persistent host credential backend");
+        let reference = json!({"slot":slot,"backend":backend});
+        if !references.contains(&reference) { references.push(reference); }
+        write_json(&stage.join(RECEIPT), &json!({"schema":2,"complete":false,
+            "source_identity":profile.identity,"source":profile.source,"destination":profile.destination,
+            "original_preserved":true,"keyring_account":alias,"credential_references":references}))
+    };
+    let backend = crate::keystore::import_credential_checkpoint(alias, slot, value, &mut checkpoint)?;
+    // An already matching host credential does not invoke the pre-write callback.
+    checkpoint(backend)?;
+    Ok(backend)
+}
+
+fn migrate_credentials(profile: &Profile, stage: &Path, database: &Path, session: &mut Value,
+    references: &mut Vec<Value>) -> Result<Option<crate::memory::SessionKeys>> {
     let user = session["user"].as_str().unwrap_or("").to_owned();
-    let passes = candidate_values(profile, &user, "pass", &["pass"], session);
-    let supers = candidate_values(
-        profile,
-        &user,
-        "super",
-        if session["vault_version"].as_i64().unwrap_or(1) >= 4 {
-            &["secret_key", "super"]
-        } else {
-            &["super"]
-        },
-        session,
-    );
     let version = session["vault_version"].as_i64().unwrap_or(1);
-    let mut unlocked = None;
-    if version >= 2 {
-        for super_pass in &supers {
-            if let Ok(keys) = crate::auth::unlock_session_keys(session, "", Some(super_pass), &user)
-            {
-                unlocked = Some((keys, Some(super_pass.clone()), None));
-                break;
-            }
+    anyhow::ensure!((1..=4).contains(&version), "unsupported vault version; original credentials were preserved");
+    let passes = candidate_values(profile, &user, "pass", &["pass"], session);
+    let supers = candidate_values(profile, &user, "super",
+        if version >= 4 { &["secret_key", "super"] } else { &["super"] }, session);
+    let legacy_secret = if matches!(version, 1 | 3) {
+        if let Some(backend) = session.get("legacy_secret_backend") {
+            let backend = backend.as_str().context("invalid legacy secret backend")?;
+            anyhow::ensure!(backend != "kernel", "legacy factor requires a persistent host backend");
+            let alias = session["keyring_account"].as_str().unwrap_or(&user);
+            Some(crate::keystore::read_imported(alias, "legacy-secret", backend)?)
+        } else {
+            session[if version == 1 { "secret" } else { "secret_key" }]
+                .as_str().filter(|value| !value.is_empty()).map(str::to_owned)
         }
+    } else { None };
+    let (keys, super_pass, legacy_pass) = if session["wrapped_urk"].as_str().filter(|value| !value.is_empty()).is_none() {
+        anyhow::ensure!(encrypted_count(database)? == 0,
+            "legacy session has no wrapped key; recover the original keys before migration");
+        validate_live_memories(database, None)?;
+        (None, supers.first().cloned(), passes.first().cloned())
     } else {
-        for pass in &passes {
-            if let Ok(keys) = crate::auth::unlock_session_keys(session, pass, None, &user) {
-                unlocked = Some((keys, None, Some(pass.clone())));
-                break;
+        let mut unlocked = None;
+        if version >= 2 {
+            for super_pass in &supers {
+                if let Ok(keys) = crate::auth::unlock_session_keys(session, "", Some(super_pass), &user) {
+                    unlocked = Some((Some(keys), Some(super_pass.clone()), None));
+                    break;
+                }
+            }
+        } else {
+            for pass in &passes {
+                if let Ok(keys) = crate::auth::unlock_session_keys(session, pass, None, &user) {
+                    unlocked = Some((Some(keys), None, Some(pass.clone())));
+                    break;
+                }
             }
         }
-    }
-    let (keys, super_pass, legacy_pass) = unlocked.ok_or_else(|| anyhow!("legacy vault could not be unlocked; supply its original recovery key/password; no new vault was created"))?;
-    validate_live_memories(database, Some(&keys))?;
+        let recovered = unlocked.ok_or_else(|| anyhow!("legacy vault could not be unlocked; supply its original recovery key/password; no new vault was created"))?;
+        validate_live_memories(database, recovered.0.as_ref())?;
+        recovered
+    };
     let alias = format!("legacy-{}", &profile.identity[..16]);
     if let Some(value) = super_pass {
-        let backend = crate::keystore::import_credential(&alias, "super", &value)?;
+        let backend = import_migration_credential(profile, stage, references, &alias, "super", &value)?;
         session["keyring_backend"] = json!(backend);
     }
     if let Some(value) = legacy_pass.as_ref().or_else(|| passes.first()) {
-        let backend = crate::keystore::import_credential(&alias, "pass", value)?;
-        if legacy_pass.is_some() {
-            session["keyring_backend"] = json!(backend);
-        }
+        let backend = import_migration_credential(profile, stage, references, &alias, "pass", value)?;
+        if version == 1 { session["keyring_backend"] = json!(backend); }
+    }
+    session.as_object_mut().context("legacy session must be an object")?.remove("legacy_secret_backend");
+    if let Some(value) = legacy_secret {
+        let backend = import_migration_credential(profile, stage, references, &alias, "legacy-secret", &value)?;
+        session["legacy_secret_backend"] = json!(backend);
     }
     session["keyring_account"] = json!(alias);
-    Ok(Some(keys))
+    session["vault_version"] = json!(version);
+    for field in ["super", "pass", "secret", "secret_key"] {
+        session.as_object_mut().context("legacy session must be an object")?.remove(field);
+    }
+    if let Some(keys) = keys.as_ref() {
+        let backend = session["keyring_backend"].as_str().context("migrated credential backend is missing")?;
+        let primary = if version == 1 { crate::keystore::read_imported_v1_password(&alias, backend)? }
+            else { crate::keystore::read_imported(&alias, "super", backend)? };
+        let restored = crate::auth::unlock_session_keys(session,
+            if version == 1 { &primary } else { "" },
+            if version == 1 { None } else { Some(primary.as_str()) }, &alias)?;
+        anyhow::ensure!(restored.urk == keys.urk, "migration host credentials changed the original data key");
+    }
+    Ok(keys)
 }
 
 /// Recalculate internal keys while retaining every original user factor. Older
@@ -1026,17 +1064,19 @@ fn rewrap_namespace(session: &Value, alias: &str, keys: &crate::memory::SessionK
     use crate::memory::crypto;
     let version = session["vault_version"].as_i64().unwrap_or(1);
     let salt = crypto::random_hex(16);
-    let credential = |slot: &str| -> Result<String> {
-        crate::keystore::read_credentials("rsrs", &format!("{slot}:{alias}"))
-            .into_iter().next().ok_or_else(|| anyhow!("the original migration credential is missing; no replacement Key was generated"))
+    let backend = session["keyring_backend"].as_str().context("migrated credential backend is missing")?;
+    let primary = if version == 1 { crate::keystore::read_imported_v1_password(alias, backend)? }
+        else { crate::keystore::read_imported(alias, "super", backend)? };
+    let legacy = || -> Result<String> {
+        let backend = session["legacy_secret_backend"].as_str().context("original legacy factor backend is missing")?;
+        anyhow::ensure!(backend != "kernel", "legacy factor requires a persistent host backend");
+        crate::keystore::read_imported(alias, "legacy-secret", backend)
     };
     let kek = match version {
-        1 => crypto::derive_rsrs_password_kek(&credential("pass")?,
-            session["secret"].as_str().context("original Account Secret is missing")?, &salt)?,
-        2 => crypto::derive_super_kek(&credential("super")?, &salt)?,
-        3 => crypto::derive_rsrs_vault_kek(&credential("super")?,
-            session["secret_key"].as_str().context("original Secret Key is missing")?, &salt)?,
-        4 => crypto::derive_rsrs_kek(&credential("super")?, &salt)?,
+        1 => crypto::derive_rsrs_password_kek(&primary, &legacy()?, &salt)?,
+        2 => crypto::derive_super_kek(&primary, &salt)?,
+        3 => crypto::derive_rsrs_vault_kek(&primary, &legacy()?, &salt)?,
+        4 => crypto::derive_rsrs_kek(&primary, &salt)?,
         _ => bail!("unsupported vault version; original credentials were preserved"),
     };
     let (nonce, wrapped) = crypto::wrap_key(&keys.urk, &kek)?;
@@ -1373,8 +1413,97 @@ mod tests {
         let session: Value = serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
         assert_eq!(session["addr"], crate::service::DEFAULT_SERVER_ADDR);
         assert_eq!(session["token"], "fixture-token");
+        verify_local_session(&session)?;
+        for field in ["pass", "super", "secret", "secret_key"] { assert!(session.get(field).is_none()); }
         migrate_home(home.path())?;
         assert!(!target.join("accounts/legacy-onememory").exists());
+
+        // Every historical vault keeps its URK through host-slot migration and namespace conversion.
+        for version in 1..=4 {
+            let case = tempfile::tempdir()?;
+            let source = case.path().join(".onememory");
+            plaintext_profile(&source, "wal-owner")?;
+            let primary = crate::memory::crypto::generate_secret_key();
+            let legacy = crate::memory::crypto::generate_account_secret();
+            let salt = crate::memory::crypto::random_hex(16);
+            let kek = match version {
+                1 => crate::memory::crypto::derive_kek(&primary, &legacy, &salt)?,
+                2 => crate::memory::crypto::derive_super_kek(&primary, &salt)?,
+                3 => crate::memory::crypto::derive_vault_kek(&primary, &legacy, &salt)?,
+                4 => crate::memory::crypto::derive_kek_v4(&primary, &salt)?,
+                _ => bail!("unsupported migration fixture version"),
+            };
+            let (nonce, wrapped) = crate::memory::crypto::wrap_key(&urk, &kek)?;
+            let original = serde_json::to_vec(&json!({"user":"wal-owner","vault_version":version,
+                "pass":primary,"super":primary,"secret":legacy,
+                "secret_key":if version == 4 { &primary } else { &legacy },
+                "kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}))?;
+            // Only this historical source fixture may contain inline factors.
+            std::fs::write(source.join("session.json"), &original)?;
+            let db = Connection::open(source.join("onememory.db"))?;
+            db.execute_batch("CREATE TABLE memories (id TEXT PRIMARY KEY,user TEXT,ciphertext TEXT,nonce TEXT,created_at TEXT,updated_at TEXT,deleted INTEGER NOT NULL DEFAULT 0)")?;
+            let (nonce, ciphertext) = crate::memory::crypto::encrypt_item(&data_key, &payload.to_string())?;
+            db.execute("INSERT INTO memories VALUES ('committed','wal-owner',?1,?2,'created','updated',0)",
+                rusqlite::params![ciphertext, nonce])?;
+            let profiles = legacy_profiles(case.path())?;
+            let profile = profiles.first().context("historical migration fixture is missing")?;
+            let interrupted = case.path().join("interrupted");
+            assert!(snapshot_profile_checkpoint(profile, &interrupted, &profiles, true,
+                || Err(anyhow!("synthetic durable checkpoint failure"))).is_err());
+            assert!(!interrupted.join("session.json").exists());
+            assert_eq!(std::fs::read(source.join("session.json"))?, original);
+
+            // A later config failure retains slot ownership without copying original factors.
+            std::fs::write(source.join("client.json"), br#"{"data_dir":"../outside"}"#)?;
+            let failed = case.path().join("failed");
+            assert!(snapshot_profile_checkpoint(profile, &failed, &profiles, true, || Ok(())).is_err());
+            let pending: Value = serde_json::from_slice(&std::fs::read(failed.join(RECEIPT))?)?;
+            assert_eq!(pending["complete"], false);
+            let references = pending["credential_references"].as_array().context("migration credential references missing")?;
+            if version != 1 { assert!(references.iter().any(|reference| reference["slot"] == "super")); }
+            assert!(references.iter().any(|reference| reference["slot"] == "pass"));
+            if matches!(version, 1 | 3) {
+                assert!(references.iter().any(|reference| reference["slot"] == "legacy-secret"));
+            }
+            for name in ["session.json", RECEIPT] {
+                let text = std::fs::read_to_string(failed.join(name))?;
+                assert!(!text.contains(&primary));
+                assert!(!text.contains(&legacy));
+            }
+            assert_eq!(std::fs::read(source.join("session.json"))?, original);
+            std::fs::remove_file(source.join("client.json"))?;
+
+            let stage = case.path().join("complete");
+            snapshot_profile_checkpoint(profile, &stage, &profiles, true, || Ok(()))?;
+            let migrated: Value = serde_json::from_slice(&std::fs::read(stage.join("session.json"))?)?;
+            for field in ["pass", "super", "secret", "secret_key"] { assert!(migrated.get(field).is_none()); }
+            assert_eq!(migrated["vault_version"], version);
+            verify_local_session(&migrated)?;
+            let alias = migrated["keyring_account"].as_str().context("migrated alias missing")?;
+            let restored = crate::auth::unlock_session_keys(&migrated,
+                if version == 1 { &primary } else { "" }, Some(&primary), alias)?;
+            assert_eq!(restored.urk, urk);
+            validate_live_memories(&stage.join("rsrs.db"), Some(&restored))?;
+            if matches!(version, 1 | 3) {
+                let backend = migrated["legacy_secret_backend"].as_str().context("legacy backend missing")?;
+                assert_ne!(backend, "kernel");
+                assert_eq!(crate::keystore::read_imported(alias, "legacy-secret", backend)?, legacy);
+                crate::keystore::remove_imported(alias, "legacy-secret", backend)?;
+                assert!(verify_local_session(&migrated).is_err());
+                let wrong_backend = crate::keystore::import_credential(alias, "legacy-secret", "wrong-migration-factor")?;
+                let mut wrong = migrated.clone();
+                wrong["legacy_secret_backend"] = json!(wrong_backend);
+                assert!(verify_local_session(&wrong).is_err());
+                crate::keystore::remove_imported(alias, "legacy-secret", wrong_backend)?;
+                assert_eq!(crate::keystore::import_credential(alias, "legacy-secret", &legacy)?, backend);
+                verify_local_session(&migrated)?;
+            }
+            let receipt: Value = serde_json::from_slice(&std::fs::read(stage.join(RECEIPT))?)?;
+            assert_eq!(receipt["complete"], true);
+            assert_eq!(receipt["keyring_account"], migrated["keyring_account"]);
+            assert_eq!(receipt["credential_references"], pending["credential_references"]);
+            assert_eq!(std::fs::read(source.join("session.json"))?, original);
+        }
         Ok(())
     }
 

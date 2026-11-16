@@ -267,7 +267,7 @@ pub fn recall_metadata<E: respire_app::memory::search::Embedder>(
         .map(|layout| brief_request(layout, source, &evaluations))
         .transpose()?;
     let provider = if mode == "quality" {
-        super::configured_provider()
+        super::configured_provider()?
     } else {
         None
     };

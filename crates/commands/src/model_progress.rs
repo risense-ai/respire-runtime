@@ -86,11 +86,6 @@ impl Operation {
     pub fn enter_thread(&self) {
         TRACKED.set(true);
     }
-    /// Download duration depends on bandwidth. Keep progressing downloads alive.
-    pub fn begin_download() -> Result<Self> {
-        Self::try_begin_with_idle_timeout("verify", true)?
-            .ok_or_else(|| anyhow!("another model operation is running"))
-    }
     /// Loading crosses a native replacement boundary and commits inside the
     /// isolated SDK worker. Do not acknowledge a cancellation it cannot honor.
     pub fn begin_load() -> Result<Self> {

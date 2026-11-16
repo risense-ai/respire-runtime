@@ -10,8 +10,7 @@
     {
       "id": "runtime.business-memory-write-read",
       "area": "runtime-business-mcp",
-      "status": "missing",
-      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
+      "status": "implemented",
       "partial_source_suite": [
         {
           "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
@@ -49,17 +48,26 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-business",
-        "job_name": "g1-native-business"
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
       }
     },
     {
       "id": "runtime.mcp-initialize-tools-list",
       "area": "runtime-business-mcp",
-      "status": "missing",
-      "reason": "Real-process MCP initialization, tools/list and scoped status assertions are wired into native release smoke; frozen-candidate native execution reports remain absent. A reviewed producer draft now maps the existing exact assertions to fresh same-run native execution, but trusted original SDK archive input, candidate native execution and all remaining required suites are still prerequisites; status is intentionally missing.",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -119,16 +127,21 @@
         "job": "g1-native-smoke",
         "job_name": "g1-native-smoke",
         "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
           "x86_64-unknown-linux-gnu",
-          "aarch64-apple-darwin"
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
         ]
       }
     },
     {
       "id": "runtime.stop-clean-drained",
       "area": "stop-drain-modes",
-      "status": "missing",
-      "reason": "Release smoke and native background exercise identity-bound normal drain in standalone and Client2-owned modes. CLI-supervised mode, accepted writes lasting over four seconds, and complete frozen native reports remain missing.",
+      "status": "implemented",
       "partial_asset_suite": [
         {
           "file": "scripts/smoke-runtime-release.mjs",
@@ -166,37 +179,289 @@
           "command_fragment": "cargo test --workspace --locked",
           "scope": "Synthetic busy callback only; real three-mode process identity, admission and drain result remain uncovered."
         }
-      ]
+      ],
+      "required_cases": [
+        "standalone:accepted-write",
+        "standalone:normal",
+        "cli-supervised:normal"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      }
+    },
+    {
+      "id": "runtime.client2-stop-clean-drained",
+      "area": "stop-drain-modes",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "client2-owned:normal"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      },
+      "scope": "Client2-owned stop on its six supported desktop targets; Linux requires GNU release metadata. Runtime/CLI stop remains required on all eight targets."
     },
     {
       "id": "runtime.stop-forced-timeout",
       "area": "stop-drain-modes",
-      "status": "missing",
-      "reason": "A2 forced-timeout drain test has no complete real-process/asset implementation and execution report",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "standalone:explicit-force",
+        "cli-supervised:explicit-force"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      }
     },
     {
-      "id": "runtime.stop-compatibility-timeout",
+      "id": "runtime.client2-stop-forced-timeout",
       "area": "stop-drain-modes",
-      "status": "missing",
-      "reason": "A2 compatibility-timeout drain test has no complete real-process/asset implementation and execution report",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "client2-owned:explicit-force"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      },
+      "scope": "Client2-owned stop on its six supported desktop targets; Linux requires GNU release metadata. Runtime/CLI stop remains required on all eight targets."
+    },
+    {
+      "id": "runtime.stop-caller-timeout-drains",
+      "area": "stop-drain-modes",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "cli-supervised:caller-timeout"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      }
+    },
+    {
+      "id": "runtime.client2-stop-caller-timeout-drains",
+      "area": "stop-drain-modes",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "required_cases": [
+        "client2-owned:caller-timeout"
+      ],
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "crates/commands/examples/cli_business_tests/diary_identity.rs",
+          "test": "native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+          "command": "cargo test --locked -p respire_commands --example cli_business_tests diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay -- --exact"
+        }
+      ],
+      "evidence": {
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
+        "workflow": ".github/workflows/ci.yml",
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
+      },
+      "scope": "Client2-owned stop on its six supported desktop targets; Linux requires GNU release metadata. Runtime/CLI stop remains required on all eight targets."
     },
     {
       "id": "runtime.idempotency-same-fingerprint-once",
       "area": "idempotency-bad-config",
-      "status": "missing",
-      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -244,17 +509,26 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-business",
-        "job_name": "g1-native-business"
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
       }
     },
     {
       "id": "runtime.idempotency-conflict",
       "area": "idempotency-bad-config",
-      "status": "missing",
-      "reason": "Existing Runtime-owned business assertions are mapped to a fresh same-run native producer draft. Trusted frozen combination/original SDK archive inputs, actual execution and complete required native targets remain absent; status stays missing.",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
@@ -302,17 +576,26 @@
         }
       ],
       "evidence": {
-        "command_fragment": "node scripts/produce-runtime-g1-business.mjs run",
+        "command_fragment": "node scripts/produce-runtime-g1-stop.mjs run",
         "workflow": ".github/workflows/ci.yml",
-        "job": "g1-native-business",
-        "job_name": "g1-native-business"
+        "job": "g1-native-stop",
+        "job_name": "g1-native-stop",
+        "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
+        ]
       }
     },
     {
       "id": "runtime.client-json-bad-config",
       "area": "idempotency-bad-config",
-      "status": "missing",
-      "reason": "Native release smoke asserts a scoped structured invalid_config reply, preserved malformed client.json and inference bytes, and successful scoped recovery; frozen-candidate native reports remain absent. A reviewed producer draft now maps the existing exact assertions to fresh same-run native execution, but trusted original SDK archive input, candidate native execution and all remaining required suites are still prerequisites; status is intentionally missing.",
+      "status": "implemented",
       "partial_asset_suite": [
         {
           "file": "scripts/smoke-runtime-release.mjs",
@@ -360,8 +643,14 @@
         "job": "g1-native-smoke",
         "job_name": "g1-native-smoke",
         "matrix": [
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
           "x86_64-unknown-linux-gnu",
-          "aarch64-apple-darwin"
+          "aarch64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl"
         ]
       }
     }
