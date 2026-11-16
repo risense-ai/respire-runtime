@@ -145,7 +145,11 @@ fn factor_keys(session: &Value, input: &HostKeyInput) -> Result<crate::memory::S
     let salt = field("kdf_salt")?;
     let wrapped = field("wrapped_urk")?;
     let nonce = field("urk_nonce")?;
-    let keys = match session["vault_version"].as_i64().unwrap_or(1) {
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_i64().context("invalid key vault version")?,
+    };
+    let keys = match version {
         1 => crate::memory::SessionKeys::unlock(input.password.as_deref().context("explicit key password required")?,
             input.account_secret.as_deref().context("explicit Account Secret required")?, salt, wrapped, nonce),
         2 => crate::memory::SessionKeys::unlock_super(input.super_password.as_deref().context("explicit Super Key required")?, salt, wrapped, nonce),
