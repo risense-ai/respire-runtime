@@ -16,7 +16,6 @@ mod config_control;
 mod key_control;
 mod migration_control;
 mod metadata_control;
-mod model_maintenance;
 mod auth_control;
 
 use std::io::Write;

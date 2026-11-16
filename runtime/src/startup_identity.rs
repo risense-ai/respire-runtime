@@ -1194,6 +1194,8 @@ mod tests {
         request.operation_id = None;
         request.method = "control.arbitrary".into();
         assert!(crate::host_control::validate_request(&request).is_err());
+        request.method = respire_protocol::model_maintenance::MODEL_MAINTENANCE_METHOD.into();
+        assert!(crate::host_control::validate_request(&request).is_err());
         request.method = respire_protocol::HostControlOperation::MemoryRevision.method().into();
         request.args = vec![serde_json::to_string(&params)?];
         request.scope = Some(respire_protocol::RuntimeRequestScope {

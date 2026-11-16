@@ -132,7 +132,7 @@ pub(crate) fn execute(
 
 fn verify_context(params: &ConfigValidateParams) -> Result<()> {
     crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)?;
-    respire_app::login_transaction::verify_auth_identity(
+    respire_app::login_transaction::verify_locked_auth_identity(
         &params.binding.installation_root,
         &params.source_profile,
         &params.source_identity,

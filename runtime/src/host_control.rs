@@ -314,17 +314,6 @@ fn receive_and_execute(
                 .map_err(|_| ("key_outcome_unknown", "private key receipt encoding failed"))?, Vec::new()));
         return Ok(());
     }
-    if request.method == respire_protocol::model_maintenance::MODEL_MAINTENANCE_METHOD {
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "model maintenance deadline unavailable"))?;
-        let result = crate::model_maintenance::execute(grant, &request)
-            .map_err(|_| ("model_maintenance_failed", "private model maintenance failed"))?;
-        response.envelope = Some(result);
-        response.ok = true;
-        response.exit = 0;
-        *control_ready = true;
-        return Ok(());
-    }
     use respire_protocol::space_control::{HostSpaceOutcome, HOST_SPACE_INVITE_METHOD,
         HOST_SPACE_JOIN_METHOD, HOST_SPACE_KICK_METHOD, HOST_SPACE_RESULT_METHOD};
     if [HOST_SPACE_INVITE_METHOD, HOST_SPACE_JOIN_METHOD, HOST_SPACE_KICK_METHOD, HOST_SPACE_RESULT_METHOD]
