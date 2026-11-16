@@ -294,32 +294,17 @@ mod tests {
             let historical_candidate = serde_json::to_vec(&json!({"vault_version":3,
                 "secret_key":"historical-candidate-factor","wrapped_urk":"unchanged-wrap"}))?;
             let historical_sha256 = digest(&historical_candidate);
-            save_journal(&mut Journal { schema_version: 2, active: None, operations: vec![AuthRecord {
+            let before_rejected_snapshot = std::fs::read(recovery_path())?;
+            let rejected = save_journal(&mut Journal { schema_version: 2, active: None, operations: vec![AuthRecord {
                 operation_id: uuid::Uuid::new_v4().to_string(), idempotency_key: "retained".into(),
                 fingerprint: keygen_fingerprint(&canonical_root, &canonical_root, false)?,
                 root: canonical_root.clone(), profile: canonical_root, original_sha256: None,
                 candidate: Some(historical_candidate.clone()), candidate_backup: None,
-                candidate_sha256: Some(historical_sha256.clone()), restored: None, alias: "login-retained".into(), backend: None,
+                candidate_sha256: Some(historical_sha256), restored: None, alias: "login-retained".into(), backend: None,
                 phase: AuthPhase::RolledBack, account: None, identity: None, key_operation: None, space_operation: None, profile_remove: None,
-            }] })?;
-            let persisted = std::fs::read(recovery_path())?;
-            assert!(!String::from_utf8(persisted.clone())?.contains("historical-candidate-factor"));
-            let persisted: Value = serde_json::from_slice(&persisted)?;
-            assert!(persisted["operations"][0]["candidate"].is_null());
-            assert_eq!(persisted["operations"][0]["candidate_sha256"], historical_sha256);
-            let metadata = load_journal_metadata()?;
-            let backup = metadata.operations[0].candidate_backup.as_ref().context("candidate backup missing")?;
-            assert!(metadata.operations[0].candidate.is_none());
-            let encoded = crate::keystore::read_imported("login-retained", &backup.slot, &backup.backend)?;
-            crate::keystore::remove_imported("login-retained", &backup.slot, &backup.backend)?;
-            assert!(!recovery_pending());
-            assert!(matches!(recovery_state()?, respire_protocol::host_control::HostLoginRecoveryState::Clear));
-            assert!(!auth_recovery_pending()?);
-            assert!(load_journal().is_err());
-            crate::keystore::import_credential("login-retained", &backup.slot, &encoded)?;
-            let hydrated = load_journal()?;
-            assert_eq!(hydrated.operations[0].candidate.as_deref(), Some(historical_candidate.as_slice()));
-            assert_eq!(hydrated.operations[0].candidate_sha256.as_deref(), Some(historical_sha256.as_str()));
+            }] });
+            assert!(rejected.is_err_and(|error| error.to_string().contains("host_preparation_required")));
+            assert_eq!(std::fs::read(recovery_path())?, before_rejected_snapshot);
             let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":"completed-account","token":"new-token"}), code.clone(), vault, None)?;
             prepared.commit()?;
             prepared.complete()?;
