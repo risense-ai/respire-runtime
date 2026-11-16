@@ -32,6 +32,10 @@ const DEFAULT_ENV: &str = "RSRS_DEFAULT_DATA_DIR";
 #[path = "migration_intent.rs"]
 mod intent;
 
+#[path = "migration_material.rs"]
+mod host_material;
+use respire_protocol::migration_control::HostMigrationMaterial;
+
 
 /// Receipt fields bind the migration context; the persistent credential and
 /// authenticated unwrap prove that the selected vault is still usable.
@@ -208,11 +212,12 @@ pub fn pending_legacy_profiles() -> Result<Vec<Value>> {
 
 /// Copy only the selected profile into a new account, keeping current selection intact.
 pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
-    migrate_profile_inner(source_id, account, None)
+    migrate_profile_inner(source_id, account, None, None)
 }
 
 fn migrate_profile_inner(source_id: &str, account: &str,
-    control: Option<&respire_protocol::migration_control::HostMigrationOperation>) -> Result<Value> {
+    control: Option<&respire_protocol::migration_control::HostMigrationOperation>,
+    material: Option<&HostMigrationMaterial>) -> Result<Value> {
     crate::service::require_profile_change_host()?;
     anyhow::ensure!(!account.is_empty() && account != "main" && safe_name(account) == account,
         "migration needs a new account name containing letters, digits, '-' or '_'");
@@ -220,12 +225,13 @@ fn migrate_profile_inner(source_id: &str, account: &str,
     let lock_root = home.join(".rsrs-migration-lock");
     private_directory(&lock_root)?;
     let _lock = crate::lock::LibraryLock::acquire(&lock_root, Duration::from_secs(30))?;
-    migrate_profile_locked(&home, source_id, account, control)
+    migrate_profile_locked(&home, source_id, account, control, material)
 }
 
 // The caller holds the migration lock for both admission and recovery.
 fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
-    control: Option<&respire_protocol::migration_control::HostMigrationOperation>) -> Result<Value> {
+    control: Option<&respire_protocol::migration_control::HostMigrationOperation>,
+    material: Option<&HostMigrationMaterial>) -> Result<Value> {
     if let Some(original) = control {
         if intent::load(home, original)?.is_some_and(|record| record.phase == intent::Phase::RejectedSchema) {
             return Err(SchemaRejected.into());
@@ -261,8 +267,11 @@ fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
     };
     let stage = match admitted.as_mut() {
         Some(record) => {
-            anyhow::ensure!(record.phase == intent::Phase::Copying,
+            anyhow::ensure!(matches!(record.phase, intent::Phase::Copying | intent::Phase::AwaitingCredentials),
                 "migration has passed its replay-safe boundary; retain the original operation and staging data");
+            if record.phase == intent::Phase::AwaitingCredentials {
+                intent::verify_snapshot(record)?;
+            }
             if record.phase == intent::Phase::Copying {
                 // Never adopt or overwrite a partial snapshot. Retain it for inspection.
                 record.stage = staging_root.join(uuid::Uuid::new_v4().to_string());
@@ -272,13 +281,25 @@ fn migrate_profile_locked(home: &Path, source_id: &str, account: &str,
         }
         None => staging_root.join(uuid::Uuid::new_v4().to_string()),
     };
-    if admitted.as_ref().is_none_or(|record| record.phase == intent::Phase::Copying) {
-        let snapshot = snapshot_profile_checkpoint(&profiles[selected], &stage, &profiles, true, || {
+    let resume = admitted.as_ref().is_some_and(|record| record.phase == intent::Phase::AwaitingCredentials);
+    if admitted.as_ref().is_none_or(|record| matches!(record.phase, intent::Phase::Copying | intent::Phase::AwaitingCredentials)) {
+        let snapshot = snapshot_profile_with_material(&profiles[selected], &stage, &profiles, true,
+            control.is_some(), material, resume, |needs_custody| {
             if let Some(record) = admitted.as_mut() {
                 intent::verify_source(record, &profiles[selected])?;
-                // This durable boundary precedes all credential and database transformations.
-                record.phase = intent::Phase::Transforming;
-                intent::save(home, record)?;
+                if record.phase == intent::Phase::AwaitingCredentials {
+                    intent::verify_snapshot(record)?;
+                }
+                if needs_custody {
+                    if record.phase == intent::Phase::Copying {
+                        record.snapshot_sha256 = intent::snapshot_digest(&record.stage)?;
+                        record.phase = intent::Phase::AwaitingCredentials;
+                        intent::save(home, record)?;
+                    }
+                } else {
+                    record.phase = intent::Phase::Transforming;
+                    intent::save(home, record)?;
+                }
             }
             Ok(())
         });
@@ -334,6 +355,7 @@ pub fn control_migrate_profile(
     _ownership: &crate::login_transaction::AuthOwnership,
     original: &respire_protocol::migration_control::HostMigrationOperation,
     query_only: bool,
+    material: Option<&HostMigrationMaterial>,
 ) -> Result<respire_protocol::migration_control::HostMigrationResult> {
     use respire_protocol::migration_control::{HostMigrationOutcome as Outcome,
         HostMigrationResult, HOST_MIGRATION_SCHEMA_V};
@@ -358,11 +380,11 @@ pub fn control_migrate_profile(
         match migration_control_result(original)? {
             Some(details) => (Outcome::Completed, details),
             None => match intent::load(&home, original)? {
-                Some(record) if record.phase == intent::Phase::Copying => {
+                Some(record) if matches!(record.phase, intent::Phase::Copying | intent::Phase::AwaitingCredentials) => {
                     crate::service::require_profile_change_host()?;
                     crate::service::ensure_writable()?;
                     anyhow::ensure!(!crate::service::off_mode(), "migration recovery is unavailable while memory is off");
-                    migrate_profile_locked(&home, &original.source_id, &original.account, Some(original))?;
+                    migrate_profile_locked(&home, &original.source_id, &original.account, Some(original), material)?;
                     let details = migration_control_result(original)?
                         .context("migration recovery did not publish the original operation")?;
                     (Outcome::Completed, details)
@@ -374,12 +396,18 @@ pub fn control_migrate_profile(
     } else {
         crate::service::ensure_writable()?;
         anyhow::ensure!(!crate::service::off_mode(), "migration is unavailable while memory is off");
-        let details = migrate_profile_inner(&original.source_id, &original.account, Some(original))?;
+        let details = migrate_profile_inner(&original.source_id, &original.account, Some(original), material)?;
         let outcome = if details["state"] == "already_migrated" { Outcome::AlreadyMigrated } else { Outcome::Completed };
         (outcome, details)
     }) })();
     crate::login_transaction::verify_auth_identity(&original.installation_root, &original.profile, &original.identity)?;
-    let (outcome, details) = result?;
+    let (outcome, details) = match result {
+        Ok(result) => result,
+        Err(error) => match error.downcast_ref::<host_material::CredentialsRequired>() {
+            Some(required) => (Outcome::CredentialsRequired, required.0.clone()),
+            None => return Err(error),
+        },
+    };
     Ok(HostMigrationResult { operation_id: original.operation_id.clone(), fingerprint: original.fingerprint.clone(),
         identity: original.identity.clone(), outcome, details })
 }
@@ -657,6 +685,13 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile], curre
 
 fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Profile], current_namespace: bool,
     before_transform: impl FnOnce() -> Result<()>) -> Result<()> {
+    snapshot_profile_with_material(profile, stage, profiles, current_namespace, false, None, false,
+        |_| before_transform())
+}
+
+fn snapshot_profile_with_material(profile: &Profile, stage: &Path, profiles: &[Profile], current_namespace: bool,
+    host_control: bool, material: Option<&HostMigrationMaterial>, resume: bool,
+    before_transform: impl FnOnce(bool) -> Result<()>) -> Result<()> {
     // Reading a held SQLite library lock detects an active original writer without
     // stopping it or modifying its lock file.
     let old_lock = profile.source.join("lock.db");
@@ -684,10 +719,30 @@ fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Prof
     } else {
         None
     };
-    copy_tree(&profile.source, stage, true)?;
+    if !resume { copy_tree(&profile.source, stage, true)?; }
     let database = crate::service::database_path(stage)?;
     validate_schema(&database)?;
-    before_transform()?;
+    let mut prepared = if host_control {
+        match original_session.as_ref() {
+            Some(bytes) => Some(host_material::prepare(profile, bytes, &database, material)?),
+            None => {
+                anyhow::ensure!(material.is_none_or(|value| value.candidates.is_empty() && value.custody.is_none()),
+                    "host material has no matching source session");
+                anyhow::ensure!(encrypted_count(&database)? == 0,
+                    "legacy library has ciphertext but no session; original data was preserved");
+                validate_live_memories(&database, None)?;
+                None
+            }
+        }
+    } else { None };
+    let needs_custody = prepared.as_ref().and_then(|plan| plan.selected).is_some();
+    before_transform(needs_custody)?;
+    if let Some(index) = prepared.as_ref().and_then(|plan| plan.selected) {
+        let candidate = material.and_then(|value| value.candidates.get(index))
+            .context("selected host migration material disappeared")?;
+        return Err(host_material::CredentialsRequired(json!({"state":"credentials_required",
+            "session_sha256":candidate.session_sha256,"candidate_index":index})).into());
+    }
     if database.is_file() {
         private_file(&database)?;
     }
@@ -697,18 +752,36 @@ fn snapshot_profile_checkpoint(profile: &Profile, stage: &Path, profiles: &[Prof
     if let Some(bytes) = original_session.as_ref() {
         let mut session: Value = serde_json::from_slice(bytes)
             .context("legacy session is invalid; source was preserved")?;
-        let recovered = migrate_credentials(profile, stage, &database, &mut session, &mut credential_references)?;
+        let recovered = if host_control {
+            let plan = prepared.take().context("verified host migration plan missing")?;
+            session = plan.session;
+            credential_references = plan.references;
+            plan.keys
+        } else {
+            migrate_credentials(profile, stage, &database, &mut session, &mut credential_references)?
+        };
         if current_namespace {
             if let Some(keys) = recovered.as_ref() {
                 migrate_namespace_database(&database, keys)?;
                 let alias = session["keyring_account"].as_str().context("migrated credential alias is missing")?;
-                let (salt, wrapped, nonce) = rewrap_namespace(&session, alias, keys)?;
+                let (salt, wrapped, nonce) = if host_control {
+                    let candidate = material.and_then(|value| value.candidates.first())
+                        .context("final host migration factors missing")?;
+                    host_material::rewrap(candidate, keys)?
+                } else { rewrap_namespace(&session, alias, keys)? };
                 session["kdf_salt"] = json!(salt);
                 session["wrapped_urk"] = json!(wrapped);
                 session["urk_nonce"] = json!(nonce);
             }
             session["crypto_namespace"] = json!(crate::memory::crypto::RSRS_PREFIX);
-            if recovered.is_some() { verify_local_session(&session)?; }
+            if let Some(keys) = recovered.as_ref() {
+                if host_control {
+                    let candidate = material.and_then(|value| value.candidates.first())
+                        .context("final host migration factors missing")?;
+                    let restored = host_material::unlock(&session, candidate)?;
+                    anyhow::ensure!(restored.urk == keys.urk, "migration changed the original data key");
+                } else { verify_local_session(&session)?; }
+            }
         }
         keyring_backend = session.get("keyring_backend").cloned();
         keyring_account = session.get("keyring_account").cloned();
