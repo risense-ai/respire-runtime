@@ -82,7 +82,7 @@ pub fn control_profile_remove(
         && original.fingerprint == digest(&original.fingerprint_bytes()?)
         && original.installation_root == ownership.root && original.profile == ownership.profile,
         "profile removal original binding changed");
-    verify_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
+    verify_locked_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
     let mut journal = load_journal()?;
     if let Some(record) = journal.operations.iter().find(|record|
         record.operation_id == original.operation_id || record.idempotency_key == original.key)
@@ -106,7 +106,7 @@ pub fn control_profile_remove(
     check_target(&ownership.root, &directory)?;
     let target_lock = crate::lock::LibraryLock::acquire(&directory, std::time::Duration::ZERO)?;
     check_target(&ownership.root, &directory)?;
-    verify_auth_identity(&ownership.root, &directory, &original.target_identity)?;
+    verify_locked_auth_identity(&ownership.root, &directory, &original.target_identity)?;
     check_tree(&directory)?;
     ensure!(target_lock.protects(&directory)?, "profile removal target lock changed");
     let index = journal.operations.len();
@@ -130,17 +130,17 @@ pub fn control_profile_remove(
     ensure!(crate::service::main_data_dir().canonicalize()? == ownership.root
         && crate::service::data_dir().canonicalize()? == ownership.profile,
         "profile removal selection changed before deletion");
-    verify_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
+    verify_locked_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
     ensure!(target(&ownership.root, &original.name)? == directory, "profile removal target changed");
     check_target(&ownership.root, &directory)?;
-    verify_auth_identity(&ownership.root, &directory, &original.target_identity)?;
+    verify_locked_auth_identity(&ownership.root, &directory, &original.target_identity)?;
     check_tree(&directory)?;
     // Preflight is not an OS nofollow/open-by-handle guarantee: external renames
     // between this final check and remove_dir_all remain a TOCTOU limitation.
     std::fs::remove_dir_all(&directory)?;
     respire_spawn::durable::sync_directory(
         directory.parent().context("profile removal account parent missing")?)?;
-    verify_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
+    verify_locked_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
     journal.operations[index].phase = AuthPhase::Committed;
     journal.active = None;
     save_journal(&mut journal)?;

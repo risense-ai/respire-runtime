@@ -54,7 +54,7 @@ impl IdentityRequest {
             && binding.profile == respire_app::service::data_dir().canonicalize()?,
             "identity read selection mismatch");
         ensure!(!login_transaction::auth_recovery_pending()?, "finish auth recovery before listing sessions");
-        login_transaction::verify_auth_identity(&binding.installation_root, &binding.profile, self.identity())
+        login_transaction::verify_locked_auth_identity(&binding.installation_root, &binding.profile, self.identity())
     }
 }
 

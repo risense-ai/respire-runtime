@@ -30,7 +30,7 @@ fn selection(ownership: &AuthOwnership, id: &str, key: &str, params: &HostIdenti
         && params.binding.installation_root == ownership.root && params.binding.profile == ownership.profile
         && ownership.root == crate::service::main_data_dir().canonicalize()?
         && ownership.profile == crate::service::data_dir().canonicalize()?, "identity write selection changed");
-    verify_auth_identity(&ownership.root, &ownership.profile, &params.identity)
+    verify_locked_auth_identity(&ownership.root, &ownership.profile, &params.identity)
 }
 
 fn owned_index(journal: &Journal, ownership: &AuthOwnership, id: &str, key: &str,
@@ -84,7 +84,7 @@ fn result(journal: &Journal, index: usize) -> Result<HostIdentityWriteResult> {
             HostAuthIdentity::Unbound { operation_id: operation_id.clone(), session_sha256: session_sha256.clone() },
         _ => anyhow::bail!("identity write created an unowned session"),
     };
-    verify_auth_identity(&record.root, &record.profile, &identity)?;
+    verify_locked_auth_identity(&record.root, &record.profile, &identity)?;
     Ok(HostIdentityWriteResult {
         operation_id: record.operation_id.clone(), fingerprint: record.fingerprint.clone(),
         operation: operation.operation.clone(), outcome: match record.phase {
