@@ -45,7 +45,8 @@ impl MigrationRequest {
         anyhow::ensure!(!respire_app::login_transaction::auth_recovery_pending()?,
             "finish authentication recovery before migrating a legacy profile");
         // Do not recover or modify another account operation's journal.
-        respire_app::migration::control_migrate_profile(ownership, &self.params.original, self.query_only)
+        respire_app::migration::control_migrate_profile(ownership, &self.params.original, self.query_only,
+            self.params.material.as_ref())
             .context("query the original migration operation before retrying")
     }
 }
