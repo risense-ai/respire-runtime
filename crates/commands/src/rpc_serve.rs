@@ -707,6 +707,23 @@ struct HostPluginState {
 
 static HOST_PLUGIN_CHANNEL: OnceLock<Arc<HostPluginChannel>> = OnceLock::new();
 
+#[derive(Debug)]
+pub(crate) struct HostPluginFailure(pub(crate) anyhow::Error);
+
+impl std::fmt::Display for HostPluginFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for HostPluginFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
+}
+
+pub(crate) fn background_sync_retryable(error: &anyhow::Error) -> bool {
+    !error.is::<HostPluginFailure>() && crate::sync_flow::is_retriable_sync_error(error)
+}
+
 impl HostPluginChannel {
     pub(crate) fn exchange(&self, send: impl FnOnce(&[u8]) -> Result<()>, pulled: u64, pushed: u64) -> Result<Vec<String>> {
         use respire_protocol::host_plugin::*;
@@ -804,19 +821,22 @@ fn start_host_plugin_reader() -> Result<()> {
 }
 
 pub(crate) fn deliver_post_sync(pulled: usize, pushed: usize) -> Result<()> {
-    let channel = HOST_PLUGIN_CHANNEL.get().context("background post-sync requires a connected CLI host")?;
-    // Release stdout before waiting: it is shared with other Runtime diagnostics.
-    let warnings = channel.exchange(|bytes| {
-        let mut output = std::io::stdout().lock();
-        output.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
-        output.write_all(bytes)?;
-        output.flush()?;
+    let result = (|| -> Result<()> {
+        let channel = HOST_PLUGIN_CHANNEL.get().context("background post-sync requires a connected CLI host")?;
+        // Release stdout before waiting: it is shared with other Runtime diagnostics.
+        let warnings = channel.exchange(|bytes| {
+            let mut output = std::io::stdout().lock();
+            output.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+            output.write_all(bytes)?;
+            output.flush()?;
+            Ok(())
+        }, u64::try_from(pulled)?, u64::try_from(pushed)?)?;
+        for warning in warnings {
+            eprintln!("command=sync status=warn mode=auto hook={warning}");
+        }
         Ok(())
-    }, u64::try_from(pulled)?, u64::try_from(pushed)?)?;
-    for warning in warnings {
-        eprintln!("command=sync status=warn mode=auto hook={warning}");
-    }
-    Ok(())
+    })();
+    result.map_err(|error| HostPluginFailure(error).into())
 }
 
 fn ensure_sync_worker() {
@@ -1014,7 +1034,7 @@ fn flight_loop() {
                     eprintln!("command=sync status=warn mode=auto error={error}");
                 }
                 Err(error) => {
-                    let transport = crate::sync_flow::is_retriable_sync_error(&error);
+                    let transport = background_sync_retryable(&error);
                     let delay = if transport {
                         30_u64.saturating_mul(1 << state.backoff.min(4)).min(300)
                     } else {

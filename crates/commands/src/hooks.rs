@@ -85,6 +85,9 @@ mod tests {
     fn payload_builders_and_event_names() -> anyhow::Result<()> {
         use respire_protocol::host_plugin::*;
         use crate::rpc_serve::HostPluginChannel;
+        let plugin_timeout: anyhow::Error = crate::rpc_serve::HostPluginFailure(anyhow::anyhow!("configured hook timeout")).into();
+        assert!(!crate::rpc_serve::background_sync_retryable(&plugin_timeout));
+        assert!(crate::rpc_serve::background_sync_retryable(&anyhow::anyhow!("network timeout")));
         let channel = HostPluginChannel::default();
         for result in [
             HostPluginEventResult::Completed { warnings: Vec::new() },
