@@ -16,6 +16,17 @@ pub enum HostSpaceOperation {
     Kick { session_id: Option<String>, all: bool },
 }
 
+/// Factors and custody metadata supplied by the host on the private request channel.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSpaceMaterial {
+    pub super_password: String,
+    pub keyring_account: String,
+    pub keyring_backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_secret: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSpaceParams {
@@ -26,6 +37,8 @@ pub struct HostSpaceParams {
     pub operation: HostSpaceOperation,
     /// Supplemental secret; never persist this field in host recovery metadata.
     pub invite_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<HostSpaceMaterial>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

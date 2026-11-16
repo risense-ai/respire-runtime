@@ -122,14 +122,37 @@ fn source_session(record: &AuthRecord) -> Result<Value> {
     Ok(session)
 }
 
-fn source_super(session: &Value) -> Result<String> {
-    let alias = session["keyring_account"].as_str().unwrap_or(field(session,"user")?);
-    let secret = if let Some(backend) = session["keyring_backend"].as_str() {
-        require_persistent_auth_backend(backend)?;
-        crate::keystore::read_imported(alias,"super",backend)?
-    } else { crate::keystore::load_super(alias).context("space super password unavailable")? };
-    crate::auth::unlock_session_keys(session,"",Some(&secret),alias)?;
-    Ok(secret)
+fn host_material(params: &HostSpaceParams) -> Result<&HostSpaceMaterial> {
+    let material = params.material.as_ref().context("space host material missing")?;
+    ensure!(material.keyring_account.starts_with("login-") && material.keyring_account.len() <= 128
+        && material.keyring_account.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !material.super_password.is_empty(), "invalid space host credential binding");
+    require_persistent_auth_backend(&material.keyring_backend)?;
+    ensure!(matches!(material.keyring_backend.as_str(),"native" | "secret_service"), "invalid space credential backend");
+    Ok(material)
+}
+
+fn source_super(session: &Value, params: &HostSpaceParams) -> Result<String> {
+    let material = host_material(params)?;
+    host_keys(session,params)?;
+    Ok(material.super_password.clone())
+}
+
+fn host_keys(session: &Value, params: &HostSpaceParams) -> Result<crate::memory::SessionKeys> {
+    let material = host_material(params)?;
+    let salt = field(session,"kdf_salt")?;
+    let wrapped = field(session,"wrapped_urk")?;
+    let nonce = field(session,"urk_nonce")?;
+    let keys = match session["vault_version"].as_i64() {
+        Some(2) => crate::memory::SessionKeys::unlock_super(&material.super_password,salt,wrapped,nonce),
+        Some(3) => crate::memory::SessionKeys::unlock_vault(&material.super_password,
+            material.legacy_secret.as_deref().context("space host legacy factor missing")?,salt,wrapped,nonce),
+        Some(4) => crate::memory::SessionKeys::unlock_v4(&material.super_password,salt,wrapped,nonce),
+        _ => anyhow::bail!("space requires a supported super-password vault"),
+    }?;
+    if session["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX) {
+        crate::memory::SessionKeys::from_urk(keys.urk)
+    } else { Ok(keys) }
 }
 
 fn selection(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParams) -> Result<()> {
@@ -140,7 +163,8 @@ fn selection(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceP
     ensure!(params.schema_version == HOST_SPACE_SCHEMA_V && params.binding.installation_root == ownership.root
         && params.binding.profile == ownership.profile && ownership.root == crate::service::main_data_dir().canonicalize()?
         && ownership.profile == crate::service::data_dir().canonicalize()?, "space selection changed");
-    verify_auth_identity(&ownership.root,&ownership.profile,&params.identity)
+    if !matches!(params.operation,HostSpaceOperation::Kick { .. }) { host_material(params)?; }
+    verify_locked_auth_identity(&ownership.root,&ownership.profile,&params.identity)
 }
 
 fn owned_index(journal: &Journal, ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParams) -> Result<Option<usize>> {
@@ -201,9 +225,11 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParam
         ensure!(matches!(params.identity,HostAuthIdentity::Bound { .. }), "space owner must have a bound identity");
         let session: Value = serde_json::from_slice(original.as_deref().context("space owner session missing")?)?;
         for field_name in ["addr","user","token"] { field(&session,field_name)?; }
-        if matches!(params.operation,HostSpaceOperation::Invite { .. }) { source_super(&session)?; }
+        if matches!(params.operation,HostSpaceOperation::Invite { .. }) { source_super(&session,params)?; }
     }
-    let alias = format!("login-{}",uuid::Uuid::new_v4().simple());
+    let material = if matches!(params.operation,HostSpaceOperation::Kick { .. }) { None } else { Some(host_material(params)?) };
+    let alias = material.map(|value| value.keyring_account.clone())
+        .unwrap_or_else(|| format!("login-{}",uuid::Uuid::new_v4().simple()));
     journal.active = Some(Recovery { directory: target.clone().unwrap_or_else(|| ownership.profile.clone()),
         original: if target.is_some() { None } else { original.clone() }, config: None, alias: alias.clone(),
         backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(), directory_existed: target.is_none(),
@@ -212,7 +238,8 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParam
     journal.operations.push(AuthRecord { operation_id: id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint: fingerprint(&ownership.root,&ownership.profile,&params.source_identity,&params.operation)?,
         root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_backup: None, candidate_sha256: None, restored: None, alias, backend: None, phase: AuthPhase::Admitted,
+        candidate: None, candidate_backup: None, candidate_sha256: None, restored: None, alias,
+        backend: material.map(|value| value.keyring_backend.clone()), phase: AuthPhase::Admitted,
         account: None, identity: None, key_operation: None,
         profile_remove: None,
         space_operation: Some(SpaceOperation { intent: params.operation.clone(), source_identity: params.source_identity.clone(),
@@ -260,22 +287,7 @@ fn remote(addr: &str, token: &str, path: &str, body: Option<Value>) -> Result<Va
     serde_json::from_slice(&bytes).map_err(|_| anyhow!("invalid space response"))
 }
 
-fn checkpoint_secret(journal: &mut Journal, index: usize, slot: &str, secret: &str) -> Result<String> {
-    let alias = journal.operations[index].alias.clone();
-    let backend = crate::keystore::import_credential_checkpoint(&alias,slot,secret,|backend| {
-        require_persistent_auth_backend(backend)?;
-        let active = journal.active.as_mut().context("space recovery missing")?;
-        let slots = if slot == "pass" { &mut active.pass_backends } else { &mut active.backends };
-        if !slots.iter().any(|value| value == backend) { slots.push(backend.to_owned()); }
-        if slot == "pass" { op_mut(journal,index)?.code_backend = Some(backend.to_owned()); }
-        else { journal.operations[index].backend = Some(backend.to_owned()); }
-        save_journal(journal)
-    })?;
-    ensure!(crate::keystore::read_imported(&alias,slot,backend)? == secret, "space credential readback mismatch");
-    Ok(backend.to_owned())
-}
-
-fn invite(journal: &mut Journal, index: usize) -> Result<()> {
+fn invite(journal: &mut Journal, index: usize, params: &HostSpaceParams) -> Result<Option<String>> {
     let HostSpaceOperation::Invite { note, readonly } = op(journal,index)?.intent.clone() else { anyhow::bail!("not invite"); };
     let session = source_session(&journal.operations[index])?;
     let record = &journal.operations[index];
@@ -290,8 +302,7 @@ fn invite(journal: &mut Journal, index: usize) -> Result<()> {
         record.profile.file_name().and_then(|name| name.to_str())
             .context("space profile name is not UTF-8")?.to_owned()
     };
-    let secret = source_super(&session)?;
-    checkpoint_secret(journal,index,"super",&secret)?;
+    let secret = source_super(&session,params)?;
     let device = format!("member-{}",note.as_deref().unwrap_or("invited").trim());
     op_mut(journal,index)?.issued_at = Some(chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs,true));
     journal.operations[index].phase = AuthPhase::RemotePending;
@@ -302,36 +313,44 @@ fn invite(journal: &mut Journal, index: usize) -> Result<()> {
         Err(error) if error.is::<RemoteRejected>() => {
             journal.operations[index].phase = AuthPhase::RollingBack;
             save_journal(journal)?;
-            return reject_invite(journal,index);
+            reject_invite(journal,index)?;
+            return Ok(None);
         }
-        Err(_) => { journal.operations[index].phase = AuthPhase::RemoteUnknown; return save_journal(journal); }
+        Err(_) => { journal.operations[index].phase = AuthPhase::RemoteUnknown; save_journal(journal)?; return Ok(None); }
     };
     let sid = field(&reply,"session_id")?.to_owned();
     ensure!(uuid::Uuid::parse_str(&sid)?.to_string() == sid, "invalid member session identity");
     let code = format!("{PREFIX}{}",hex::encode(serde_json::to_vec(&json!({"space":name,"addr":field(&session,"addr")?,
         "user":field(&session,"user")?,"token":field(&reply,"token")?,"session_id":sid,"super":secret,
-        "secret_key":session["secret_key"],"readonly":readonly,"control_operation_id":journal.operations[index].operation_id,
+        "secret_key":host_material(params)?.legacy_secret,"readonly":readonly,"control_operation_id":journal.operations[index].operation_id,
         "control_fingerprint":journal.operations[index].fingerprint}))?));
     ensure!(code.len() <= 32 * 1024, "invite result exceeds private control limit");
-    checkpoint_secret(journal,index,"pass",&code)?;
-    stage_invite_code(journal,index,&code)
+    // The host must persist this private response before it can authorize local commit.
+    op_mut(journal,index)?.code_sha256 = Some(digest(code.as_bytes()));
+    op_mut(journal,index)?.session_id = Some(sid);
+    journal.operations[index].phase = AuthPhase::Authorized;
+    save_journal(journal)?;
+    Ok(Some(code))
 }
 
-fn stage_invite_code(journal: &mut Journal, index: usize, code: &str) -> Result<()> {
+fn stage_invite_code(journal: &mut Journal, index: usize, code: &str, params: &HostSpaceParams) -> Result<()> {
     let value = parse_code(code)?;
     let record = &journal.operations[index];
     let operation = op(journal,index)?;
     let HostSpaceOperation::Invite { note,readonly } = &operation.intent else { anyhow::bail!("not invite"); };
     let source = source_session(record)?;
-    let backend = record.backend.as_deref().context("invite source credential checkpoint missing")?;
-    require_persistent_auth_backend(backend)?;
+    let material = host_material(params)?;
+    ensure!(record.alias == material.keyring_account && record.backend.as_deref() == Some(material.keyring_backend.as_str())
+        && operation.code_sha256.as_deref() == Some(digest(code.as_bytes()).as_str()), "invite host checkpoint changed");
+    source_super(&source,params)?;
     ensure!(value["control_operation_id"].as_str() == Some(record.operation_id.as_str())
         && value["control_fingerprint"].as_str() == Some(record.fingerprint.as_str())
         && field(&value,"user")? == field(&source,"user")? && field(&value,"addr")? == field(&source,"addr")?
         && value["readonly"].as_bool() == Some(*readonly)
-        && field(&value,"super")? == crate::keystore::read_imported(&record.alias,"super",backend)?, "invite checkpoint owner mismatch");
+        && field(&value,"super")? == material.super_password, "invite checkpoint owner mismatch");
     let sid = field(&value,"session_id")?.to_owned();
-    ensure!(uuid::Uuid::parse_str(&sid)?.to_string() == sid, "invalid invite checkpoint session");
+    ensure!(uuid::Uuid::parse_str(&sid)?.to_string() == sid && operation.session_id.as_deref() == Some(sid.as_str()),
+        "invalid invite checkpoint session");
     let mut rows = members(operation.members_original.as_deref())?;
     rows.push(Member { session_id:sid.clone(),device_name:format!("member-{}",note.as_deref().unwrap_or("invited").trim()),
         readonly:*readonly,issued_at:operation.issued_at.clone().context("invite admission time missing")? });
@@ -346,11 +365,8 @@ fn stage_invite_code(journal: &mut Journal, index: usize, code: &str) -> Result<
 fn reject_invite(journal: &mut Journal, index: usize) -> Result<()> {
     ensure!(matches!(op(journal,index)?.intent,HostSpaceOperation::Invite { .. })
         && journal.operations[index].phase == AuthPhase::RollingBack, "space rejection is not an owned invite");
-    let active = journal.active.as_ref().context("invite recovery missing")?;
-    // Only discard this admission's credential copies. It never owned session/config.
-    for (slot,backends) in [("super",&active.backends),("pass",&active.pass_backends)] {
-        for backend in backends { crate::keystore::remove_imported(&active.alias,slot,backend)?; }
-    }
+    journal.active.as_ref().context("invite recovery missing")?;
+    // Credential retirement belongs to the host that owns the checkpoint.
     journal.operations[index].phase = AuthPhase::RolledBack;
     retire_active(journal)
 }
@@ -368,17 +384,20 @@ fn join(journal: &mut Journal, index: usize, params: &HostSpaceParams) -> Result
     let mut vault = remote(&addr,token,"/api/self/vault",None)?;
     if vault.get("version").is_none() { vault["version"] = json!(4); }
     let secret = field(&value,"super")?;
-    let authorized = json!({"user":user,"token":token,"session_id":value["session_id"],"secret_key":value["secret_key"]});
-    let prepared = PreparedLogin::prepare_candidate(&addr,&authorized,secret.to_owned(),vault,None,false,false,Some(&target))?;
-    ensure!(prepared.original.is_none() && prepared.directory == target, "join candidate changed target");
-    let mut session = prepared.session.clone();
-    session["keyring_account"] = json!(journal.operations[index].alias);
-    // Publish the candidate and its credential backend before either owned file.
-    checkpoint_account_candidate(journal,index,&session)?;
-    journal.operations[index].phase = AuthPhase::Authorized;
-    save_journal(journal)?;
-    let backend = checkpoint_secret(journal,index,"super",secret)?;
-    session["keyring_backend"] = json!(backend);
+    let material = host_material(params)?;
+    ensure!(material.super_password == secret && journal.operations[index].alias == material.keyring_account
+        && journal.operations[index].backend.as_deref() == Some(material.keyring_backend.as_str()), "join host credential binding changed");
+    let version = vault["version"].as_i64().context("join vault version missing")?;
+    ensure!(version != 3 || value["secret_key"].as_str() == material.legacy_secret.as_deref(),
+        "join legacy factor differs from the original invite");
+    let mut session = json!({"user":user,"addr":addr,"token":token,"session_id":value["session_id"],
+        "vault_version":version,"kdf_salt":vault["kdf_salt"],"wrapped_urk":vault["wrapped_urk"],
+        "urk_nonce":vault["urk_nonce"],"keyring_account":material.keyring_account,
+        "keyring_backend":material.keyring_backend});
+    if version == 3 { session["legacy_secret_backend"] = json!(material.keyring_backend); }
+    host_keys(&session,params)?;
+    // No target existed at admission; verify that it has not acquired an unowned library.
+    ensure!(!crate::service::database_path(&target)?.try_exists()?, "join target acquired an unowned library");
     checkpoint_account_candidate(journal,index,&session)?;
     op_mut(journal,index)?.credential_ready = true;
     journal.operations[index].phase = AuthPhase::Prepared;
@@ -421,7 +440,7 @@ fn prepare_kick(journal: &mut Journal, index: usize) -> Result<()> {
     save_journal(journal)
 }
 
-fn verify_join_candidate(journal: &Journal, index: usize) -> Result<()> {
+fn verify_join_candidate(journal: &Journal, index: usize, params: &HostSpaceParams) -> Result<()> {
     let record = &journal.operations[index];
     let operation = op(journal,index)?;
     let HostSpaceOperation::Join { addr,user, .. } = &operation.intent else { anyhow::bail!("not join"); };
@@ -435,15 +454,16 @@ fn verify_join_candidate(journal: &Journal, index: usize) -> Result<()> {
         && session["keyring_backend"].as_str() == record.backend.as_deref(), "join candidate identity changed");
     let backend = record.backend.as_deref().context("join backend missing")?;
     require_persistent_auth_backend(backend)?;
-    let secret = crate::keystore::read_imported(&record.alias,"super",backend)?;
-    crate::auth::unlock_session_keys(&session,"",Some(&secret),&record.alias)?;
+    let material = host_material(params)?;
+    ensure!(material.keyring_account == record.alias && material.keyring_backend == backend, "join host credential reference changed");
+    host_keys(&session,params)?;
     // Admission required an absent profile. Never adopt a library created later.
     ensure!(!crate::service::database_path(target)?.try_exists()?, "join target acquired an unowned library");
     Ok(())
 }
 
-fn verify_join(journal: &Journal, index: usize) -> Result<()> {
-    verify_join_candidate(journal,index)?;
+fn verify_join(journal: &Journal, index: usize, params: &HostSpaceParams) -> Result<()> {
+    verify_join_candidate(journal,index,params)?;
     let record = &journal.operations[index];
     let operation = op(journal,index)?;
     let target = operation.target.as_ref().context("join target missing")?;
@@ -455,7 +475,7 @@ fn verify_join(journal: &Journal, index: usize) -> Result<()> {
     Ok(())
 }
 
-fn commit(journal: &mut Journal, index: usize) -> Result<()> {
+fn commit(journal: &mut Journal, index: usize, params: &HostSpaceParams) -> Result<()> {
     crate::service::ensure_writable()?;
     let record = &journal.operations[index];
     ensure!(read_original(&record.profile)?.as_deref().map(digest) == record.original_sha256, "space source changed before commit");
@@ -463,7 +483,7 @@ fn commit(journal: &mut Journal, index: usize) -> Result<()> {
     if let Some(target) = &operation.target {
         safe_path(target)?;
         let _lock = crate::lock::LibraryLock::acquire(target,std::time::Duration::from_secs(1))?;
-        verify_join_candidate(journal,index)?;
+        verify_join_candidate(journal,index,params)?;
         let current = read_original(target)?;
         ensure!(current.is_none() || current == record.candidate, "join destination no longer owned");
         let agent_path = target.join("agent.json");
@@ -474,7 +494,7 @@ fn commit(journal: &mut Journal, index: usize) -> Result<()> {
         // Set the durable team gate before publishing the selectable session.
         if readonly { private_write(&agent_path,expected)?; }
         private_write(&target.join("session.json"),record.candidate.as_deref().context("join candidate missing")?)?;
-        verify_join(journal,index)?;
+        verify_join(journal,index,params)?;
     } else {
         let path = record.profile.join(MEMBERS);
         let current = read_optional(&path)?;
@@ -490,17 +510,15 @@ fn commit(journal: &mut Journal, index: usize) -> Result<()> {
     }
 }
 
-fn result(journal: &Journal, index: usize) -> Result<HostSpaceResult> {
+fn result(journal: &Journal, index: usize, params: &HostSpaceParams) -> Result<HostSpaceResult> {
     let record = &journal.operations[index];
     let operation = op(journal,index)?;
     let committed = record.phase == AuthPhase::Committed;
-    if committed && operation.target.is_some() { verify_join(journal,index)?; }
+    if committed && operation.target.is_some() { verify_join(journal,index,params)?; }
     let invite_code = if matches!(operation.intent,HostSpaceOperation::Invite { .. }) && committed {
-        let backend = operation.code_backend.as_deref().context("invite credential checkpoint missing")?;
-        require_persistent_auth_backend(backend)?;
-        let code = crate::keystore::read_imported(&record.alias,"pass",backend)?;
+        let code = params.invite_code.as_deref().context("host invite checkpoint required")?;
         ensure!(operation.code_sha256.as_deref() == Some(digest(code.as_bytes()).as_str()), "invite credential digest changed");
-        Some(code)
+        Some(code.to_owned())
     } else { None };
     Ok(HostSpaceResult { operation_id: record.operation_id.clone(), fingerprint: record.fingerprint.clone(),
         profile: record.profile.clone(), identity: operation.source_identity.clone(), operation: operation.intent.clone(),
@@ -537,20 +555,17 @@ pub fn control_space(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
     };
     if journal.operations[index].phase == AuthPhase::RollingBack { reject_invite(&mut journal,index)?; }
     if matches!(params.operation,HostSpaceOperation::Invite { .. })
-        && matches!(journal.operations[index].phase,AuthPhase::RemotePending | AuthPhase::RemoteUnknown) {
-        if let Some(backend) = op(&journal,index)?.code_backend.as_deref() {
-            require_persistent_auth_backend(backend)?;
-            // This slot is written only after the remote reply. Never resend a POST.
-            if let Ok(code) = crate::keystore::read_imported(&journal.operations[index].alias,"pass",backend) {
-                stage_invite_code(&mut journal,index,&code)?;
-            }
+        && journal.operations[index].phase == AuthPhase::Authorized {
+        if let Some(code) = params.invite_code.as_deref() {
+            stage_invite_code(&mut journal,index,code,params)?;
         }
     }
+    let mut private_code = None;
     let resume_join = matches!(params.operation,HostSpaceOperation::Join { .. }) && params.invite_code.is_some()
         && matches!(journal.operations[index].phase,AuthPhase::Admitted | AuthPhase::Authorized);
     if !query_only && journal.operations[index].phase == AuthPhase::Admitted || resume_join {
         match params.operation {
-            HostSpaceOperation::Invite { .. } => invite(&mut journal,index)?,
+            HostSpaceOperation::Invite { .. } => private_code = invite(&mut journal,index,params)?,
             HostSpaceOperation::Join { .. } => {
                 if let Err(error) = join(&mut journal,index,params) {
                     if !error.is::<RemoteRejected>() { return Err(error); }
@@ -561,7 +576,7 @@ pub fn control_space(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
                     let target = operation.target.as_ref().context("rejected join target missing")?;
                     safe_path(target)?;
                     ensure!(record.phase == AuthPhase::Admitted && record.candidate.is_none()
-                        && record.candidate_sha256.is_none() && record.backend.is_none()
+                        && record.candidate_sha256.is_none()
                         && !operation.credential_ready && operation.code_backend.is_none()
                         && operation.code_sha256.is_none() && operation.session_id.is_none()
                         && operation.members_candidate.is_none() && operation.kick.is_empty()
@@ -580,8 +595,16 @@ pub fn control_space(ownership: &AuthOwnership, id: &str, key: &str, params: &Ho
     if matches!(params.operation,HostSpaceOperation::Kick { .. }) && matches!(journal.operations[index].phase,AuthPhase::RemotePending | AuthPhase::RemoteUnknown) {
         prepare_kick(&mut journal,index)?;
     }
-    if journal.operations[index].phase == AuthPhase::Prepared { commit(&mut journal,index)?; }
-    result(&journal,index)
+    if journal.operations[index].phase == AuthPhase::Prepared { commit(&mut journal,index,params)?; }
+    let mut receipt = result(&journal,index,params)?;
+    if private_code.is_some() { receipt.invite_code = private_code; }
+    else if matches!(params.operation,HostSpaceOperation::Invite { .. })
+        && journal.operations[index].phase == AuthPhase::Authorized {
+        // The remote reply was received, but no host-owned code survived to finish it.
+        receipt.outcome = HostSpaceOutcome::Unknown;
+        receipt.session_id = None;
+    }
+    Ok(receipt)
 }
 
 #[cfg(test)]
@@ -599,7 +622,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     let mut params = HostSpaceParams { schema_version: HOST_SPACE_SCHEMA_V,
         binding: respire_protocol::ControlBinding { installation_root:root.to_owned(),profile:root.to_owned(),
             launch_id:uuid::Uuid::new_v4().to_string(),expected_account_id:Some(digest(b"space-fixture")) },
-        identity:identity.clone(),source_identity:identity,operation:HostSpaceOperation::Kick { session_id:None,all:true },invite_code:None };
+        identity:identity.clone(),source_identity:identity,operation:HostSpaceOperation::Kick { session_id:None,all:true },invite_code:None,material:None };
     let mut unsupported = serde_json::to_value(&params)?;
     unsupported["argv"] = json!(["unsupported"]);
     assert!(serde_json::from_value::<HostSpaceParams>(unsupported).is_err());
@@ -621,6 +644,20 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
         "addr":addr,"user":"rejected-user","token":"revoked-token","super":"synthetic-super"}))?));
     params.operation = HostSpaceOperation::Join { invite_sha256:digest(code.as_bytes()),space:"rejected-join".into(),
         addr,user:"rejected-user".into(),readonly:false };
+    let before_missing_material = std::fs::read(recovery_path())?;
+    let missing_id = uuid::Uuid::new_v4().to_string();
+    for query_only in [false,true] {
+        assert!(control_space(&ownership,&missing_id,&missing_id,&params,query_only).is_err());
+    }
+    params.operation = HostSpaceOperation::Invite { note:None,readonly:false };
+    for query_only in [false,true] {
+        assert!(control_space(&ownership,&missing_id,&missing_id,&params,query_only).is_err());
+    }
+    assert_eq!(std::fs::read(recovery_path())?,before_missing_material);
+    params.operation = HostSpaceOperation::Join { invite_sha256:digest(code.as_bytes()),space:"rejected-join".into(),
+        addr: format!("http://{}",server.server_addr()),user:"rejected-user".into(),readonly:false };
+    params.material = Some(HostSpaceMaterial { super_password:"synthetic-super".into(),
+        keyring_account:format!("login-{}",uuid::Uuid::new_v4().simple()),keyring_backend:"native".into(),legacy_secret:None });
     params.invite_code = Some(code);
     let worker = std::thread::spawn(move || -> std::result::Result<tiny_http::Server,String> {
         let request = server.recv_timeout(std::time::Duration::from_secs(20))
@@ -655,6 +692,31 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     assert_eq!(std::fs::read(root.join("session.json"))?,original);
     assert_eq!(std::fs::read(crate::service::client_config_path())?,config);
     params.invite_code = None;
+    params.operation = HostSpaceOperation::Invite { note:None,readonly:false };
+    let invite_id = uuid::Uuid::new_v4().to_string();
+    let (mut interrupted,invite_index) = reject_unadmitted(&ownership,&invite_id,&invite_id,&params)?;
+    let material = host_material(&params)?;
+    interrupted.operations[invite_index].alias = material.keyring_account.clone();
+    interrupted.operations[invite_index].backend = Some(material.keyring_backend.clone());
+    interrupted.operations[invite_index].phase = AuthPhase::RemotePending;
+    interrupted.active = Some(Recovery { directory:root.to_owned(),original:Some(original.clone()),
+        alias:material.keyring_account.clone(),directory_existed:true,operation_id:Some(invite_id.clone()),
+        owns_config:false,..Recovery::default() });
+    save_journal(&mut interrupted)?;
+    let unknown = std::fs::read(recovery_path())?;
+    for query_only in [true,false] {
+        let receipt = control_space(&ownership,&invite_id,&invite_id,&params,query_only)?;
+        assert!(receipt.outcome == HostSpaceOutcome::Unknown && receipt.invite_code.is_none());
+    }
+    assert_eq!(std::fs::read(recovery_path())?,unknown);
+    assert!(server.recv_timeout(std::time::Duration::from_millis(50))?.is_none(), "unknown invite was sent again");
+    let checkpoint = format!("{PREFIX}{}",hex::encode(serde_json::to_vec(&json!({"space":"space-fixture",
+        "addr":"https://never-contact.invalid","user":"space-fixture","token":"synthetic-token","super":"synthetic-super"}))?));
+    op_mut(&mut interrupted,invite_index)?.code_sha256 = Some(digest(b"different-code"));
+    assert!(stage_invite_code(&mut interrupted,invite_index,&checkpoint,&params).is_err());
+    interrupted.operations[invite_index].phase = AuthPhase::RolledBack;
+    retire_active(&mut interrupted)?;
+    params.material = None;
     params.operation = HostSpaceOperation::Kick { session_id:None,all:true };
     let (mut journal,index) = admit(&ownership,&id,&id,&params)?;
     op_mut(&mut journal,index)?.kick[0].state = HostSpaceKickState::Revoked;
