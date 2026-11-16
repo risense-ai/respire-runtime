@@ -423,6 +423,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            source_safety: true
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
@@ -431,10 +432,12 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
+            source_safety: true
           - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            source_safety: true
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
     steps:
@@ -531,6 +534,66 @@ jobs:
           name: runtime-smoke-${{ matrix.target }}
           path: smoke-report/*.json
           if-no-files-found: warn
+      # Run database migration, snapshot/recovery, crypto and ownership tests
+      # once per OS; libc/architecture asset coverage is supplied by smoke above.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        if: matrix.source_safety == true
+      - name: Resolve source data-safety SDK identity
+        if: matrix.source_safety == true
+        id: safety-sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
+          echo "key=$(node scripts/sdk-ci-cache.mjs key '${{ matrix.target }}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        if: matrix.source_safety == true
+        id: safety-sdk-restore
+        with:
+          path: .sdk/${{ matrix.target }}
+          key: ${{ steps.safety-sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Verify source data-safety SDK bytes
+        if: matrix.source_safety == true
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.safety-sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.safety-sdk-restore.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          node scripts/fetch-core-sdk.mjs '${{ matrix.target }}'
+      - name: Run complete source data-safety suites (not product evidence)
+        if: matrix.source_safety == true
+        shell: bash
+        env:
+          # Existing unit fixtures use HashingEmbedder; public smoke never uses this mode.
+          RSRS_CORE_TEST_MODE: '1'
+          RUST_TEST_THREADS: '1'
+          RUST_MIN_STACK: '16777216'
+          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=-crt-static' || '' }}
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
+          XDG_CONFIG_HOME: ${{ runner.temp }}/runtime-safety-config
+          XDG_DATA_HOME: ${{ runner.temp }}/runtime-safety-data
+          XDG_CACHE_HOME: ${{ runner.temp }}/runtime-safety-cache
+          APPDATA: ${{ runner.temp }}/runtime-safety-appdata
+          LOCALAPPDATA: ${{ runner.temp }}/runtime-safety-local
+          RSRS_DATA_DIR: ${{ runner.temp }}/runtime-safety-state
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$APPDATA" "$LOCALAPPDATA" "$RSRS_DATA_DIR"
+          cargo test --workspace --lib --bins --tests --locked -- --test-threads=1 2>&1 | tee data-safety.log
+          echo 'Public asset smoke and complete source data-safety suites passed; source fixtures are not product execution evidence.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.source_safety == true
+        with:
+          name: runtime-data-safety-${{ matrix.target }}
+          path: data-safety.log
+          retention-days: 7
+          if-no-files-found: error
 
   publish:
     needs: [plan, build]
