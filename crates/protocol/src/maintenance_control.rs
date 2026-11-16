@@ -17,7 +17,7 @@ pub enum MaintenanceAction {
     Release,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceControlParams {
     pub schema_version: u32,
@@ -27,6 +27,19 @@ pub struct MaintenanceControlParams {
     pub sync_generation: usize,
     pub snapshot_id: String,
     pub action: MaintenanceAction,
+    /// Private session-bound factors; the Restore executor requires explicit material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<crate::host_control::HostAuthSessionMaterial>,
+}
+
+impl std::fmt::Debug for MaintenanceControlParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaintenanceControlParams")
+            .field("operation_id", &self.operation_id)
+            .field("action", &self.action)
+            .field("material", &self.material.as_ref().map(|_| "[redacted]"))
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

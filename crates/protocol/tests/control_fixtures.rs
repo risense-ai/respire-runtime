@@ -120,6 +120,23 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     ] {
         let parsed: respire_protocol::host_control::HostAuthVaultFactors = serde_json::from_value(factors.clone())?;
         assert_eq!(serde_json::to_value(parsed)?, factors);
+        let snapshot = json!({
+            "schema_version":1,"binding":params.binding,"operation_id":"fixture-operation",
+            "request_fingerprint":"d".repeat(64),"sync_generation":0,"snapshot_id":"fixture-snapshot",
+            "action":"restore","material":{"session_sha256":"a".repeat(64),"factors":factors},
+        });
+        let parsed: respire_protocol::maintenance_control::MaintenanceControlParams =
+            serde_json::from_value(snapshot.clone())?;
+        assert_eq!(serde_json::to_value(&parsed)?, snapshot);
+        assert!(!format!("{parsed:?}").contains("fixture-super"));
+        assert!(!format!("{parsed:?}").contains("fixture-pass"));
+        assert!(!format!("{parsed:?}").contains("fixture-secret"));
+        let mut unknown_snapshot = snapshot.clone();
+        unknown_snapshot["material"]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlParams>(unknown_snapshot).is_err());
+        let mut missing_snapshot = snapshot;
+        missing_snapshot["material"].as_object_mut().context("snapshot material is an object")?.remove("session_sha256");
+        assert!(serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlParams>(missing_snapshot).is_err());
         let mut unknown = factors.clone();
         unknown["unexpected"] = json!(true);
         assert!(serde_json::from_value::<respire_protocol::host_control::HostAuthVaultFactors>(unknown).is_err());
