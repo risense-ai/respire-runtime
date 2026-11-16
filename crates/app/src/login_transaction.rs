@@ -654,8 +654,13 @@ mod tests {
         let source_salt = crate::memory::crypto::random_hex(16);
         let source_kek = crate::memory::crypto::derive_kek(&source_password, &source_secret, &source_salt)?;
         let (source_nonce, source_wrap) = crate::memory::crypto::wrap_key(&crate::memory::crypto::generate_key(), &source_kek)?;
+        let source_alias = format!("legacy-host-source-{}", uuid::Uuid::new_v4().simple());
+        let source_backend = crate::keystore::import_credential(&source_alias, "pass", &source_password)?;
+        let source_legacy_backend = crate::keystore::import_credential(&source_alias, "legacy-secret", &source_secret)?;
         let source_bytes = serde_json::to_vec(&json!({"user":source_user,"addr":"https://source.invalid",
-            "vault_version":1,"secret":source_secret,"kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
+            "vault_version":1,"keyring_account":source_alias,"keyring_backend":source_backend,
+            "legacy_secret_backend":source_legacy_backend,
+            "kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
         std::fs::write(root.join("session.json"), &source_bytes)?;
         let source_identity = HostAuthIdentity::Bound { account_id: digest(source_user.as_bytes()), session_sha256: digest(&source_bytes) };
         let ownership = AuthOwnership::acquire(&root, &root)?;
