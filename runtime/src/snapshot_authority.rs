@@ -245,6 +245,7 @@ fn validate_marker(
         sync_generation: snapshot.sync_generation,
         snapshot_id: snapshot.snapshot_id.clone(),
         action: Action::Query,
+        material: None,
     };
     anyhow::ensure!(
         uuid::Uuid::parse_str(&snapshot.operation_id)
