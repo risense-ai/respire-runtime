@@ -58,7 +58,7 @@ fn selection(ownership: &AuthOwnership, id: &str, key: &str, params: &HostKeyPar
     ensure!(params.schema_version == HOST_KEY_SCHEMA_V && params.binding.installation_root == ownership.root
         && params.binding.profile == ownership.profile && ownership.root == crate::service::main_data_dir().canonicalize()?
         && ownership.profile == crate::service::data_dir().canonicalize()?, "key operation selection changed");
-    verify_auth_identity(&ownership.root, &ownership.profile, &params.identity)
+    verify_locked_auth_identity(&ownership.root, &ownership.profile, &params.identity)
 }
 
 fn owned_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &str,
@@ -67,6 +67,11 @@ fn owned_index(journal: &Journal, root: &Path, profile: &Path, id: &str, key: &s
         record.operation_id == id || record.idempotency_key == key) else { return Ok(None); };
     let record = &journal.operations[index];
     let op = operation(journal, index)?;
+    if let Some(active) = journal.active.as_ref().filter(|active| active.operation_id.as_deref() == Some(id)) {
+        ensure!(active.backends.is_empty() && active.pass_backends.is_empty()
+            && active.totp_backends.is_empty() && active.legacy_secret_backends.is_empty(),
+            "host_recovery_required: historical key credential cleanup metadata retained");
+    }
     let target_matches = match op.target.as_deref() {
         Some(target) => same_directory(target, profile)?,
         None => false,
@@ -104,7 +109,7 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostKeyParams)
     ensure!(journal.operations.len() < 4096, "auth receipt capacity reached");
     ensure!(params.identity == params.source_identity, "key source identity differs from its initial launch");
     let original = read_original(&ownership.profile)?;
-    let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
+    let alias = format!("login-{}", id.replace('-', ""));
     journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(), config: None,
         alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(),
         directory_existed: true, operation_id: Some(id.to_owned()), owns_config: false, ..Recovery::default() });
@@ -135,10 +140,37 @@ fn candidate_session(record: &AuthRecord) -> Result<Value> {
     Ok(session)
 }
 
-fn candidate_keys(record: &AuthRecord) -> Result<crate::memory::SessionKeys> {
+fn factor_keys(session: &Value, input: &HostKeyInput) -> Result<crate::memory::SessionKeys> {
+    let field = |name: &str| session[name].as_str().with_context(|| format!("key vault is missing {name}"));
+    let salt = field("kdf_salt")?;
+    let wrapped = field("wrapped_urk")?;
+    let nonce = field("urk_nonce")?;
+    let keys = match session["vault_version"].as_i64().unwrap_or(1) {
+        1 => crate::memory::SessionKeys::unlock(input.password.as_deref().context("explicit key password required")?,
+            input.account_secret.as_deref().context("explicit Account Secret required")?, salt, wrapped, nonce),
+        2 => crate::memory::SessionKeys::unlock_super(input.super_password.as_deref().context("explicit Super Key required")?, salt, wrapped, nonce),
+        3 => crate::memory::SessionKeys::unlock_vault(input.super_password.as_deref().context("explicit Super Key required")?,
+            input.account_secret.as_deref().context("explicit Secret Key required")?, salt, wrapped, nonce),
+        4 => crate::memory::SessionKeys::unlock_v4(input.super_password.as_deref().context("explicit Super Key required")?, salt, wrapped, nonce),
+        _ => anyhow::bail!("unsupported key vault version"),
+    }?;
+    if session["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX) {
+        crate::memory::SessionKeys::from_urk(keys.urk)
+    } else { Ok(keys) }
+}
+
+fn candidate_keys(record: &AuthRecord, input: &HostKeyInput) -> Result<crate::memory::SessionKeys> {
     let session = candidate_session(record)?;
-    let backend = record.backend.as_deref().context("key credential backend is missing")?;
-    session_material_keys(&session, &record.alias, backend)
+    let material = input.material.as_ref().context("host key material required")?;
+    ensure!(material.keyring_account == record.alias
+        && Some(material.keyring_backend.as_str()) == record.backend.as_deref(), "host key custody binding changed");
+    if let Some(reset) = material.reset.as_ref() {
+        ensure!(session["kdf_salt"].as_str() == Some(reset.kdf_salt.as_str())
+            && session["wrapped_urk"].as_str() == Some(reset.wrapped_urk.as_str())
+            && session["urk_nonce"].as_str() == Some(reset.urk_nonce.as_str()), "host reset candidate changed");
+        let factors = HostKeyInput { super_password: Some(reset.super_password.clone()), ..HostKeyInput::default() };
+        factor_keys(&session, &factors)
+    } else { factor_keys(&session, input) }
 }
 
 pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, profile: &Path, credentials: bool) -> Result<()> {
@@ -172,7 +204,8 @@ pub(super) fn verify_unbound_candidate(journal: &Journal, record: &AuthRecord, p
         && object.keys().all(|field| matches!(field.as_str(), "user" | "addr" | "vault_version"
             | "kdf_salt" | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "auth_operation_id")
             || (version == 1 && field == "legacy_secret_backend")), "offline recovery contains unexpected identity material");
-    if credentials { candidate_keys(record)?; }
+    // Startup checks the durable binding; private key requests verify explicit factors.
+    let _ = credentials;
     Ok(())
 }
 
@@ -190,37 +223,20 @@ pub(super) fn verify_boot_candidate(record: &AuthRecord, active: &Recovery) -> R
     require_persistent_auth_backend(record.backend.as_deref().context("key backend is missing")?)
 }
 
-fn checkpoint_credentials(journal: &mut Journal, index: usize, session: &mut Value,
-    super_password: &str, password: Option<&str>, legacy_secret: Option<&str>) -> Result<()> {
-    let alias = journal.operations[index].alias.clone();
-    session["keyring_account"] = json!(alias);
-    let version = session["vault_version"].as_i64().context("key candidate version missing")?;
-    let (slot, secret) = if version == 1 { ("pass", password.context("original v1 password is required")?) }
-        else { ("super", super_password) };
-    let backend = crate::keystore::import_credential_checkpoint(&alias, slot, secret, |backend| {
-        require_persistent_auth_backend(backend)?;
-        let active = journal.active.as_mut().context("key recovery is missing")?;
-        let backends = if version == 1 { &mut active.pass_backends } else { &mut active.backends };
-        if !backends.iter().any(|existing| existing == backend) { backends.push(backend.to_owned()); }
-        session["keyring_backend"] = json!(backend);
-        journal.operations[index].backend = Some(backend.to_owned());
-        checkpoint_account_candidate(journal, index, session)?;
-        save_journal(journal)
-    })?;
-    ensure!(journal.operations[index].backend.as_deref() == Some(backend), "key backend checkpoint changed");
-    if version != 1 {
-        if let Some(password) = password.filter(|password| !password.is_empty()) {
-            crate::keystore::import_credential_checkpoint(&alias, "pass", password, |backend| {
-                require_persistent_auth_backend(backend)?;
-                let active = journal.active.as_mut().context("key recovery is missing")?;
-                if !active.pass_backends.iter().any(|existing| existing == backend) { active.pass_backends.push(backend.to_owned()); }
-                save_journal(journal)
-            })?;
-        }
+fn supplied_credentials(journal: &mut Journal, index: usize, session: &mut Value,
+    input: &HostKeyInput) -> Result<()> {
+    let material = input.material.as_ref().context("host key material required")?;
+    ensure!(material.keyring_account == journal.operations[index].alias,
+        "host credential account differs from the key operation");
+    require_persistent_auth_backend(&material.keyring_backend)?;
+    session["keyring_account"] = json!(material.keyring_account);
+    session["keyring_backend"] = json!(material.keyring_backend);
+    if session["vault_version"].as_i64() == Some(1) {
+        session["legacy_secret_backend"] = json!(material.keyring_backend);
     }
-    checkpoint_legacy_secret(journal, session, &alias, legacy_secret)?;
+    journal.operations[index].backend = Some(material.keyring_backend.clone());
     checkpoint_account_candidate(journal, index, session)?;
-    candidate_keys(&journal.operations[index])?;
+    candidate_keys(&journal.operations[index], input)?;
     operation_mut(journal, index)?.credential_ready = true;
     save_journal(journal)
 }
@@ -257,13 +273,13 @@ fn reset_address(intent: &HostKeyOperation, source: &Value) -> Result<String> {
         .or_else(|| source["addr"].as_str()).unwrap_or(crate::service::DEFAULT_SERVER_ADDR).trim_end_matches('/').to_owned())
 }
 
-fn reconcile_reset(journal: &mut Journal, index: usize) -> Result<()> {
+fn reconcile_reset(journal: &mut Journal, index: usize, input: &HostKeyInput) -> Result<()> {
     if !matches!(operation(journal, index)?.operation, HostKeyOperation::SuperReset { .. }) { return Ok(()); }
     let record = &journal.operations[index];
     if !matches!(record.phase, AuthPhase::RemotePending | AuthPhase::RemoteUnknown) { return Ok(()); }
     let op = operation(journal, index)?;
     let candidate = candidate_session(record)?;
-    candidate_keys(record)?;
+    candidate_keys(record, input)?;
     let addr = reset_address(&op.operation, &candidate)?;
     let token = candidate["token"].as_str().filter(|value| !value.is_empty()).context("reset token missing")?;
     if read_cloud_vault(&addr, token).is_ok_and(|current| current == vault(&candidate)) {
@@ -275,23 +291,20 @@ fn reconcile_reset(journal: &mut Journal, index: usize) -> Result<()> {
 fn prepare_reset(journal: &mut Journal, index: usize, input: &HostKeyInput) -> Result<()> {
     if journal.operations[index].candidate.is_some() {
         ensure!(operation(journal, index)?.credential_ready, "candidate credential checkpoint is incomplete; retain the original operation");
-        candidate_keys(&journal.operations[index])?;
+        candidate_keys(&journal.operations[index], input)?;
         return Ok(());
     }
     let original = journal.active.as_ref().context("reset recovery is missing")?.original.as_deref().context("no local session")?;
     let mut session: Value = serde_json::from_slice(original)?;
     let user = session["user"].as_str().filter(|value| !value.is_empty()).context("super-reset needs an account")?.to_owned();
-    let alias = session["keyring_account"].as_str().unwrap_or(&user);
-    let password = input.password.clone().or_else(|| session["pass"].as_str().map(str::to_owned))
-        .or_else(|| crate::keystore::load_login_pass(alias));
+    let password = input.password.clone();
     if session["vault_version"].as_i64().unwrap_or(1) == 1 && password.is_none() {
         return require_inputs(journal, index, &["password"]);
     }
-    let keys = match crate::auth::unlock_session_keys(&session, password.as_deref().unwrap_or(""), input.super_password.as_deref(), alias) {
-        Ok(keys) => keys,
-        Err(error) if error.is::<crate::auth::SessionCredentialRequired>() => { return require_inputs(journal, index, &["super_password"]); }
-        Err(error) => return Err(error),
-    };
+    if session["vault_version"].as_i64().unwrap_or(1) != 1 && input.super_password.is_none() {
+        return require_inputs(journal, index, &["super_password"]);
+    }
+    let keys = factor_keys(&session, input)?;
     let addr = reset_address(&operation(journal, index)?.operation, &session)?;
     let token = session["token"].as_str().filter(|value| !value.is_empty()).context("not logged in; log in before resetting the super password")?;
     let original_vault = read_cloud_vault(&addr, token)?;
@@ -299,24 +312,26 @@ fn prepare_reset(journal: &mut Journal, index: usize, input: &HostKeyInput) -> R
         let mut remote = session.clone();
         remote["vault_version"] = original_vault["version"].clone();
         for field in ["kdf_salt", "wrapped_urk", "urk_nonce"] { remote[field] = original_vault[field].clone(); }
-        let remote_keys = crate::auth::unlock_session_keys(&remote, password.as_deref().unwrap_or(""), input.super_password.as_deref(), alias)?;
+        let remote_keys = factor_keys(&remote, input)?;
         ensure!(remote_keys.urk == keys.urk, "remote vault uses a different data key; reset refused");
     }
-    let secret = crate::memory::crypto::generate_secret_key();
-    let (salt, wrapped, nonce) = if session["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crate::memory::crypto::RSRS_PREFIX))
-        || session["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX) {
-        crate::auth::wrap_with_rsrs(&secret, &keys.urk)?
-    } else { crate::auth::wrap_with_v4(&secret, &keys.urk)? };
-    session["vault_version"] = json!(4); session["kdf_salt"] = json!(salt);
-    session["wrapped_urk"] = json!(wrapped); session["urk_nonce"] = json!(nonce);
-    for field in ["pass", "super", "secret_key", "secret"] { session.as_object_mut().map(|object| object.remove(field)); }
+    let material = input.material.as_ref().context("host key material required")?;
+    let reset = material.reset.as_ref().context("host-generated reset material required")?;
+    ensure!(reset.keyring_account == material.keyring_account && reset.keyring_backend == material.keyring_backend,
+        "reset credential binding changed");
+    session["vault_version"] = json!(4);
+    session["kdf_salt"] = json!(reset.kdf_salt);
+    session["wrapped_urk"] = json!(reset.wrapped_urk);
+    session["urk_nonce"] = json!(reset.urk_nonce);
+    for field in ["pass", "super", "secret_key", "secret", "legacy_secret_backend"] { session.as_object_mut().map(|object| object.remove(field)); }
     let target = journal.operations[index].profile.clone();
     let original_sha256 = journal.operations[index].original_sha256.clone();
     let op = operation_mut(journal, index)?;
     op.target = Some(target); op.target_original_sha256 = original_sha256;
     op.original_vault = Some(original_vault); op.required_inputs.clear();
-    checkpoint_credentials(journal, index, &mut session, &secret, password.as_deref(), None)?;
-    ensure!(candidate_keys(&journal.operations[index])?.urk == keys.urk, "reset candidate changed the data key");
+    ensure!(factor_keys(&session, &HostKeyInput { super_password: Some(reset.super_password.clone()),
+        ..HostKeyInput::default() })?.urk == keys.urk, "reset candidate changed the data key");
+    supplied_credentials(journal, index, &mut session, input)?;
     Ok(())
 }
 
@@ -337,16 +352,16 @@ fn execute_reset(journal: &mut Journal, index: usize, input: &HostKeyInput) -> R
         // Even an HTTP success is verified by GET. Neither failure nor timeout replays POST.
         let _response = request.send_json(vault(&session));
     }
-    reconcile_reset(journal, index)
+    reconcile_reset(journal, index, input)
 }
 
-fn apply_candidate(ownership: &AuthOwnership, journal: &mut Journal, index: usize) -> Result<()> {
+fn apply_candidate(ownership: &AuthOwnership, journal: &mut Journal, index: usize, input: &HostKeyInput) -> Result<()> {
     ensure!(journal.operations[index].phase == AuthPhase::Prepared, "key operation is not prepared");
     crate::service::ensure_writable()?;
     let record = &journal.operations[index];
     let op = operation(journal, index)?;
     ensure!(op.credential_ready, "key candidate credential checkpoint incomplete");
-    candidate_keys(record)?;
+    candidate_keys(record, input)?;
     let target = op.target.as_ref().context("key target missing")?.clone();
     let _target_lock = if same_directory(&target, &ownership.root)? || same_directory(&target, &ownership.profile)? { None }
         else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
@@ -368,7 +383,7 @@ fn apply_candidate(ownership: &AuthOwnership, journal: &mut Journal, index: usiz
     retire_active(journal)
 }
 
-fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
+fn result(journal: &Journal, index: usize, input: &HostKeyInput) -> Result<HostKeyResult> {
     let record = &journal.operations[index];
     let op = operation(journal, index)?;
     let applied = matches!(record.phase, AuthPhase::Committed | AuthPhase::AwaitingVerification);
@@ -384,11 +399,11 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
             } else { op.source_identity.clone() }
         }
     };
-    verify_auth_identity(&record.root, &crate::service::data_dir().canonicalize()?, &identity)?;
+    verify_locked_auth_identity(&record.root, &crate::service::data_dir().canonicalize()?, &identity)?;
     let target_profile = if applied {
         let target = op.target.as_ref().context("key result target missing")?;
         ensure!(read_original(target)? == record.candidate, "key result candidate changed");
-        candidate_keys(record)?;
+        candidate_keys(record, input)?;
         Some(target.canonicalize()?)
     } else { op.target.clone() };
     let session = if applied { Some(candidate_session(record)?) } else { None };
@@ -404,8 +419,10 @@ fn result(journal: &Journal, index: usize) -> Result<HostKeyResult> {
         session_sha256: if applied { record.candidate_sha256.clone() } else { None }, identity,
         required_inputs: op.required_inputs.clone(), verification_required: record.phase == AuthPhase::AwaitingVerification,
         super_password: if applied && matches!(op.operation, HostKeyOperation::SuperReset { .. }) {
-            Some(crate::keystore::read_imported(&record.alias, "super", record.backend.as_deref().context("reset backend missing")?)?)
+            Some(input.material.as_ref().and_then(|material| material.reset.as_ref())
+                .context("host reset material required for private result")?.super_password.clone())
         } else { None },
+        challenge: None,
     })
 }
 
@@ -415,30 +432,36 @@ pub fn control_key(ownership: &AuthOwnership, id: &str, key: &str, params: &Host
     let (mut journal, index) = admit(ownership, id, key, params)?;
     let defaults = HostKeyInput::default();
     let input = params.input.as_ref().unwrap_or(&defaults);
-    match &params.operation {
-        HostKeyOperation::SuperReset { .. } => execute_reset(&mut journal, index, input)?,
+    let challenge = match &params.operation {
+        HostKeyOperation::SuperReset { .. } => { execute_reset(&mut journal, index, input)?; None }
         HostKeyOperation::Fivekeys { .. } => fivekeys::execute(ownership, &mut journal, index, input)?,
-    }
-    if journal.operations[index].phase == AuthPhase::Prepared { apply_candidate(ownership, &mut journal, index)?; }
-    result(&journal, index)
+    };
+    if journal.operations[index].phase == AuthPhase::Prepared { apply_candidate(ownership, &mut journal, index, input)?; }
+    let mut receipt = result(&journal, index, input)?;
+    receipt.challenge = challenge;
+    Ok(receipt)
 }
 
 pub fn control_key_result(ownership: &AuthOwnership, id: &str, key: &str, params: &HostKeyParams) -> Result<HostKeyResult> {
+    let defaults = HostKeyInput::default();
+    let input = params.input.as_ref().unwrap_or(&defaults);
     selection(ownership, id, key, params)?;
     let mut journal = load_journal()?;
     let index = owned_index(&journal, &ownership.root, &ownership.profile, id, key, params)?.context("key admission receipt missing")?;
-    reconcile_reset(&mut journal, index)?;
+    reconcile_reset(&mut journal, index, input)?;
     if matches!(operation(&journal, index)?.operation, HostKeyOperation::Fivekeys { .. }) {
-        fivekeys::resume_candidate(&mut journal, index)?;
+        fivekeys::resume_candidate(&mut journal, index, input)?;
     }
-    if journal.operations[index].phase == AuthPhase::Prepared { apply_candidate(ownership, &mut journal, index)?; }
-    result(&journal, index)
+    if journal.operations[index].phase == AuthPhase::Prepared { apply_candidate(ownership, &mut journal, index, input)?; }
+    result(&journal, index, input)
 }
 
 /// The caller verifies the live target Runtime independently. No library lock is
 /// acquired here because the verified Runtime already owns the selected store.
 pub fn control_key_complete(root: &Path, profile: &Path, id: &str, key: &str, params: &HostKeyParams,
     mut verify_runtime: impl FnMut(&HostKeyResult) -> Result<()>) -> Result<HostKeyResult> {
+    let defaults = HostKeyInput::default();
+    let input = params.input.as_ref().unwrap_or(&defaults);
     crate::service::require_profile_change_host()?;
     canonical_operation_id(id)?;
     ensure!(!key.is_empty() && key.len() <= 128 && key.bytes().all(|byte|
@@ -449,40 +472,49 @@ pub fn control_key_complete(root: &Path, profile: &Path, id: &str, key: &str, pa
         && params.binding.profile == profile && root == crate::service::main_data_dir().canonicalize()?
         && profile == crate::service::data_dir().canonicalize()?, "key completion selection changed");
     let _journal_lock = auth_journal_lock()?;
-    verify_auth_identity(&root, &profile, &params.identity)?;
+    verify_locked_auth_identity(&root, &profile, &params.identity)?;
     let mut journal = load_journal()?;
     let index = owned_index(&journal, &root, &profile, id, key, params)?.context("key completion receipt missing")?;
     ensure!(matches!(operation(&journal, index)?.operation, HostKeyOperation::Fivekeys { .. })
         && same_directory(operation(&journal, index)?.target.as_deref().context("key completion target missing")?, &profile)?, "key completion target mismatch");
-    if journal.operations[index].phase == AuthPhase::Committed { return result(&journal, index); }
+    if journal.operations[index].phase == AuthPhase::Committed { return result(&journal, index, input); }
     ensure!(journal.operations[index].phase == AuthPhase::AwaitingVerification, "key candidate is not awaiting verification");
     let active = journal.active.as_ref().context("key completion recovery missing")?;
     ensure!(active.owns_config && same_directory(&active.directory, &profile)?, "key completion configuration owner changed");
     verify_account_config(active)?;
-    verify_runtime(&result(&journal, index)?)?;
+    verify_runtime(&result(&journal, index, input)?)?;
     journal.operations[index].phase = AuthPhase::Committed;
     retire_active(&mut journal)?;
-    result(&journal, index)
+    result(&journal, index, input)
 }
 
 /// Re-read the durable receipt after releasing execution ownership. A serialized
 /// target alone is never authority to change the consumed launch context.
 pub fn verify_key_receipt(root: &Path, profile: &Path, id: &str, key: &str,
     params: &HostKeyParams, receipt: &HostKeyResult) -> Result<()> {
+    let defaults = HostKeyInput::default();
+    let input = params.input.as_ref().unwrap_or(&defaults);
     let _journal_lock = auth_journal_lock()?;
     let journal = load_journal()?;
     let index = owned_index(&journal, root, profile, id, key, params)?.context("key receipt owner missing")?;
-    ensure!(serde_json::to_value(result(&journal, index)?)? == serde_json::to_value(receipt)?,
+    if let Some(challenge) = receipt.challenge.as_deref() {
+        fivekeys::verify_supplied_challenge(&journal, index, challenge)?;
+    }
+    let mut expected = result(&journal, index, input)?;
+    expected.challenge = receipt.challenge.clone();
+    ensure!(serde_json::to_value(expected)? == serde_json::to_value(receipt)?,
         "key result differs from its durable owner receipt");
     Ok(())
 }
 
 pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, params: &HostKeyParams) -> Result<HostKeyResult> {
+    let defaults = HostKeyInput::default();
+    let input = params.input.as_ref().unwrap_or(&defaults);
     selection(&ownership, id, key, params)?;
     crate::service::ensure_writable()?;
     let mut journal = load_journal()?;
     let index = owned_index(&journal, &ownership.root, &ownership.profile, id, key, params)?.context("key receipt missing")?;
-    if journal.operations[index].phase == AuthPhase::RolledBack { return result(&journal, index); }
+    if journal.operations[index].phase == AuthPhase::RolledBack { return result(&journal, index, input); }
     ensure!(!matches!(journal.operations[index].phase, AuthPhase::Committed | AuthPhase::RemotePending | AuthPhase::RemoteUnknown),
         "committed or unknown remote key effects cannot be compensated");
     ensure!(matches!(journal.operations[index].phase, AuthPhase::Admitted | AuthPhase::RollingBack)
@@ -510,7 +542,7 @@ pub fn control_key_rollback(mut ownership: AuthOwnership, id: &str, key: &str, p
     quarantine_new_profile(journal.active.as_ref().context("key recovery missing")?)?;
     journal.operations[index].phase = AuthPhase::RolledBack;
     retire_active(&mut journal)?;
-    result(&journal, index)
+    result(&journal, index, input)
 }
 
 #[cfg(test)]

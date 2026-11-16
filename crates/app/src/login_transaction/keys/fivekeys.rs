@@ -60,45 +60,26 @@ fn save_authorization(journal: &mut Journal, index: usize, authorization: Value)
 }
 
 fn checkpoint_challenge(journal: &mut Journal, index: usize,
-    challenge: crate::auth::PasswordAuthorizationChallenge) -> Result<()> {
+    challenge: crate::auth::PasswordAuthorizationChallenge) -> Result<String> {
     ensure!(journal.operations[index].phase == AuthPhase::RemotePending, "fivekeys challenge is not owned");
     let payload = login::encode_challenge(&journal.operations[index], challenge)?;
-    let sha256 = digest(payload.as_bytes());
-    let alias = journal.operations[index].alias.clone();
-    let backend = crate::keystore::import_credential_checkpoint(&alias, "totp", &payload, |backend| {
-        require_persistent_auth_backend(backend)?;
-        let active = journal.active.as_mut().context("fivekeys recovery missing")?;
-        ensure!(active.operation_id.as_deref() == Some(journal.operations[index].operation_id.as_str())
-            && active.alias == alias, "fivekeys challenge owner changed");
-        if !active.totp_backends.iter().any(|value| value == backend) { active.totp_backends.push(backend.to_owned()); }
-        let step = operation_mut(journal, index)?.fivekeys.as_mut().context("fivekeys continuation missing")?;
-        step.challenge_backend = Some(backend.to_owned());
-        step.challenge_sha256 = Some(sha256.clone());
-        save_journal(journal)
-    })?;
-    let step = progress(journal, index)?;
-    ensure!(step.challenge_backend.as_deref() == Some(backend) && step.challenge_sha256.as_deref() == Some(sha256.as_str()),
-        "fivekeys challenge checkpoint changed");
+    let step = operation_mut(journal, index)?.fivekeys.as_mut().context("fivekeys continuation missing")?;
+    step.challenge_sha256 = Some(digest(payload.as_bytes()));
     journal.operations[index].phase = AuthPhase::LoginInput;
-    require_inputs(journal, index, &["totp"])
+    require_inputs(journal, index, &["totp"])?;
+    Ok(payload)
 }
 
-fn read_challenge(journal: &Journal, index: usize) -> Result<crate::auth::PasswordAuthorizationChallenge> {
-    let step = progress(journal, index)?;
-    let backend = step.challenge_backend.as_deref().context("fivekeys challenge backend missing")?;
-    require_persistent_auth_backend(backend)?;
-    let active = journal.active.as_ref().context("fivekeys recovery missing")?;
-    ensure!(active.totp_backends.iter().any(|value| value == backend)
-        && active.alias == journal.operations[index].alias, "fivekeys challenge recovery changed");
-    let payload = crate::keystore::read_imported(&active.alias, "totp", backend)?;
-    login::verify_challenge(&journal.operations[index], step.challenge_sha256.as_deref()
-        .context("fivekeys challenge digest missing")?, &payload)
+pub(super) fn verify_supplied_challenge(journal: &Journal, index: usize, payload: &str)
+    -> Result<crate::auth::PasswordAuthorizationChallenge> {
+    login::verify_challenge(&journal.operations[index], progress(journal, index)?.challenge_sha256.as_deref()
+        .context("fivekeys challenge digest missing")?, payload)
 }
 
-fn stage(ownership: &AuthOwnership, journal: &mut Journal, index: usize, mut prepared: PreparedLogin) -> Result<()> {
+fn stage(ownership: &AuthOwnership, journal: &mut Journal, index: usize, mut prepared: PreparedLogin, input: &HostKeyInput) -> Result<()> {
     if journal.operations[index].candidate.is_some() {
         ensure!(operation(journal, index)?.credential_ready, "fivekeys credential checkpoint incomplete; compensate the original operation");
-        candidate_keys(&journal.operations[index])?;
+        candidate_keys(&journal.operations[index], input)?;
         journal.operations[index].phase = AuthPhase::Prepared;
         return save_journal(journal);
     }
@@ -132,28 +113,27 @@ fn stage(ownership: &AuthOwnership, journal: &mut Journal, index: usize, mut pre
     if prepared.user.is_empty() {
         prepared.session["auth_operation_id"] = json!(journal.operations[index].operation_id);
     }
-    checkpoint_credentials(journal, index, &mut prepared.session, &prepared.super_password,
-        prepared.login_password.as_deref(), prepared.legacy_secret.as_deref())?;
+    supplied_credentials(journal, index, &mut prepared.session, input)?;
     journal.operations[index].phase = AuthPhase::Prepared;
     operation_mut(journal, index)?.required_inputs.clear();
     save_journal(journal)
 }
 
-pub(super) fn resume_candidate(journal: &mut Journal, index: usize) -> Result<bool> {
+pub(super) fn resume_candidate(journal: &mut Journal, index: usize, input: &HostKeyInput) -> Result<bool> {
     if journal.operations[index].phase != AuthPhase::Authorized || journal.operations[index].candidate.is_none() {
         return Ok(false);
     }
     if !operation(journal, index)?.credential_ready { return Ok(false); }
-    candidate_keys(&journal.operations[index])?;
+    candidate_keys(&journal.operations[index], input)?;
     journal.operations[index].phase = AuthPhase::Prepared;
     save_journal(journal)?;
     Ok(true)
 }
 
-pub(super) fn execute(ownership: &AuthOwnership, journal: &mut Journal, index: usize, input: &HostKeyInput) -> Result<()> {
-    if resume_candidate(journal, index)? { return Ok(()); }
+pub(super) fn execute(ownership: &AuthOwnership, journal: &mut Journal, index: usize, input: &HostKeyInput) -> Result<Option<String>> {
+    if resume_candidate(journal, index, input)? { return Ok(None); }
     if !matches!(journal.operations[index].phase, AuthPhase::Admitted | AuthPhase::LoginInput | AuthPhase::Authorized) {
-        return Ok(());
+        return Ok(None);
     }
     let intent = operation(journal, index)?.operation.clone();
     let HostKeyOperation::Fivekeys { ref addr, ref user, use_super, .. } = intent
@@ -162,8 +142,7 @@ pub(super) fn execute(ownership: &AuthOwnership, journal: &mut Journal, index: u
     if input.password.is_none() { missing.push("password"); }
     if use_super && input.super_password.as_deref().is_none_or(str::is_empty) { missing.push("super_password"); }
     if !use_super && input.account_secret.as_deref().is_none_or(str::is_empty) { missing.push("account_secret"); }
-    if !missing.is_empty() { return require_inputs(journal, index, &missing); }
-    // Verify kit and destination before any remote POST or user credential write.
+    if !missing.is_empty() { require_inputs(journal, index, &missing)?; return Ok(None); }
     let preflight = prepared(&intent, input, None, operation(journal, index)?.target.as_deref())?;
     if operation(journal, index)?.fivekeys.is_none() {
         operation_mut(journal, index)?.fivekeys = Some(FivekeysProgress {
@@ -180,18 +159,23 @@ pub(super) fn execute(ownership: &AuthOwnership, journal: &mut Journal, index: u
             save_journal(journal)?;
             match crate::auth::begin_password_authorization(addr, user, input.password.as_deref().context("password missing")?) {
                 Ok(crate::auth::PasswordAuthorizationStep::Authorized(authorization)) => save_authorization(journal, index, authorization)?,
-                Ok(crate::auth::PasswordAuthorizationStep::TotpRequired(challenge)) => checkpoint_challenge(journal, index, challenge)?,
+                Ok(crate::auth::PasswordAuthorizationStep::TotpRequired(challenge)) => {
+                    return checkpoint_challenge(journal, index, challenge).map(Some);
+                }
                 Err(_) => {
                     journal.operations[index].phase = AuthPhase::RemoteUnknown;
-                    return save_journal(journal);
+                    save_journal(journal)?;
+                    return Ok(None);
                 }
             }
         }
     }
     if journal.operations[index].phase == AuthPhase::LoginInput {
         let Some(code) = input.totp.as_deref().filter(|code| crate::auth::validate_totp_code(code).is_ok())
-            else { return require_inputs(journal, index, &["totp"]); };
-        let challenge = read_challenge(journal, index)?;
+            else { require_inputs(journal, index, &["totp"])?; return Ok(None); };
+        let payload = input.material.as_ref().and_then(|material| material.challenge.as_deref())
+            .context("host-custodied fivekeys challenge required; retain the original operation")?;
+        let challenge = verify_supplied_challenge(journal, index, payload)?;
         journal.operations[index].phase = AuthPhase::RemotePending;
         operation_mut(journal, index)?.required_inputs.clear();
         save_journal(journal)?;
@@ -199,7 +183,8 @@ pub(super) fn execute(ownership: &AuthOwnership, journal: &mut Journal, index: u
             Ok(authorization) => save_authorization(journal, index, authorization)?,
             Err(_) => {
                 journal.operations[index].phase = AuthPhase::RemoteUnknown;
-                return save_journal(journal);
+                save_journal(journal)?;
+                return Ok(None);
             }
         }
     }
@@ -207,9 +192,9 @@ pub(super) fn execute(ownership: &AuthOwnership, journal: &mut Journal, index: u
         let candidate = if addr.trim().is_empty() { preflight }
             else { prepared(&intent, input, Some(progress(journal, index)?.authorization.as_ref()
                 .context("fivekeys authorization missing")?), operation(journal, index)?.target.as_deref())? };
-        stage(ownership, journal, index, candidate)?;
+        stage(ownership, journal, index, candidate, input)?;
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -327,7 +312,7 @@ mod tests {
         let _keyring = crate::migration::memory_keyring_for_test();
         let root = isolated.path().canonicalize()?;
         for version in [1, 2, 4] {
-            let (intent, input, urk) = offline_kit(version)?;
+            let (intent, mut input, urk) = offline_kit(version)?;
             let config = std::fs::read(crate::service::client_config_path()).ok();
             let candidate = prepared(&intent, &input, None, None)?;
             assert_eq!(candidate.directory.canonicalize()?, root);
@@ -337,6 +322,9 @@ mod tests {
             assert!(!root.join("session.json").exists());
             let ownership = AuthOwnership::acquire(&root, &root)?;
             let id = uuid::Uuid::new_v4().to_string();
+            input.material = Some(HostKeyMaterial { keyring_account: format!("login-{}", id.replace('-', "")),
+                keyring_backend: if cfg!(target_os = "linux") { "secret_service" } else { "native" }.to_owned(),
+                reset: None, challenge: None });
             let mut params = HostKeyParams { schema_version: HOST_KEY_SCHEMA_V,
                 binding: respire_protocol::ControlBinding { installation_root: root.clone(), profile: root.clone(),
                     launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None },
@@ -350,23 +338,14 @@ mod tests {
             let journal = load_journal()?;
             let record = journal.operations.iter().find(|record| record.operation_id == id)
                 .context("offline fixture receipt missing")?;
-            assert_eq!(candidate_keys(record)?.urk, urk);
-            assert!(!auth_recovery_pending()?);
-            let alias = record.alias.clone();
-            let backend = record.backend.as_deref().context("offline fixture backend missing")?;
-            let slot = if version == 1 { "pass" } else { "super" };
-            let secret = if version == 1 { crate::keystore::read_imported_v1_password(&alias, backend)? }
-                else { crate::keystore::read_imported(&alias, slot, backend)? };
-            crate::keystore::remove_imported(&alias, slot, backend)?;
+            let factors = params.input.as_ref().context("fixture factors missing")?;
+            assert_eq!(candidate_keys(record, factors)?.urk, urk);
+            assert!(candidate_keys(record, &HostKeyInput::default()).is_err());
+            let active = journal.active.as_ref().context("fixture recovery missing")?;
+            assert!(active.backends.is_empty() && active.pass_backends.is_empty()
+                && active.totp_backends.is_empty() && active.legacy_secret_backends.is_empty());
             verify_locked_auth_identity(&root, &root, &receipt.identity)?;
-            assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());
-            crate::keystore::import_credential(&alias, slot, "synthetic-wrong-credential")?;
-            assert!(verify_auth_identity(&root, &root, &receipt.identity).is_err());
-            crate::keystore::remove_imported(&alias, slot, backend)?;
-            crate::keystore::import_credential(&alias, slot, &secret)?;
-            verify_auth_identity(&root, &root, &receipt.identity)?;
             params.identity = receipt.identity;
-            params.input = None;
             let pending = control_key_result(&ownership, &id, &id, &params)?;
             assert!(pending.verification_required && pending.outcome == HostKeyOutcome::Pending);
             let checkpoint = std::fs::read(recovery_path())?;
@@ -380,7 +359,7 @@ mod tests {
             assert!(rolled_back.identity == HostAuthIdentity::Absent);
             assert!(!root.join("session.json").exists());
             assert_eq!(std::fs::read(crate::service::client_config_path()).ok(), config);
-            assert!(crate::keystore::read_imported(&alias, slot, backend).is_err());
+            assert!(load_journal()?.active.is_none());
         }
         Ok(())
     }
