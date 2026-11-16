@@ -1079,7 +1079,10 @@ fn rollback_record_inner(journal: &mut Journal, quarantine: bool) -> Result<()> 
     ensure!(!record.retired, "retired recovery cannot restore an old session");
     ensure!(record.alias.starts_with("login-") && record.alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'), "invalid recovery credential alias");
     ensure!(record.directory.exists() || record.original.is_none(), "original account directory is missing; retain the recovery record");
-    let restored = recovery_credentials::rollback_snapshot(journal, &record)?;
+    // Cancelling an untouched source needs neither its missing keys nor a session rewrite.
+    let unchanged = read_original(&record.directory)? == record.original;
+    let restored = if unchanged { record.original.clone() }
+        else { recovery_credentials::rollback_snapshot(journal, &record)? };
     if restored != record.original {
         journal.active.as_mut().context("rollback recovery is missing")?.restored = restored.clone();
         if let Some(operation_id) = record.operation_id.as_deref() {
@@ -1089,7 +1092,7 @@ fn rollback_record_inner(journal: &mut Journal, quarantine: bool) -> Result<()> 
         }
         save_journal(journal)?;
     }
-    if record.directory.exists() {
+    if !unchanged && record.directory.exists() {
         read_original(&record.directory)?;
         restore(&record.directory.join("session.json"), restored.as_deref())?;
     }
