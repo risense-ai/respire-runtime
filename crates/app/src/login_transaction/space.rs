@@ -163,7 +163,8 @@ fn selection(ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceP
     ensure!(params.schema_version == HOST_SPACE_SCHEMA_V && params.binding.installation_root == ownership.root
         && params.binding.profile == ownership.profile && ownership.root == crate::service::main_data_dir().canonicalize()?
         && ownership.profile == crate::service::data_dir().canonicalize()?, "space selection changed");
-    verify_auth_identity(&ownership.root,&ownership.profile,&params.identity)
+    if !matches!(params.operation,HostSpaceOperation::Kick { .. }) { host_material(params)?; }
+    verify_locked_auth_identity(&ownership.root,&ownership.profile,&params.identity)
 }
 
 fn owned_index(journal: &Journal, ownership: &AuthOwnership, id: &str, key: &str, params: &HostSpaceParams) -> Result<Option<usize>> {
