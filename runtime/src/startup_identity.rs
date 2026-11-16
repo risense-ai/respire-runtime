@@ -172,7 +172,7 @@ pub(crate) fn verify_login_recovery_status(
         _ => None,
     };
     validate_control_binding(&params.binding, &context, grant, account)?;
-    respire_app::login_transaction::verify_auth_identity(&context.root, &context.profile, &params.identity)
+    respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, &params.identity)
 }
 
 pub(crate) fn authorize_account_completion(grant: LaunchGrant) -> Result<()> {
@@ -306,7 +306,7 @@ pub(crate) fn verify_auth_control_binding(
     let startup = STARTUP.get().context("runtime control grant is not consumed")?;
     let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
-    respire_app::login_transaction::verify_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
     let account = match identity {
         respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
         _ => None,
@@ -367,7 +367,7 @@ pub(crate) fn verify_key_control_result(
     verify_authority_for_mode(Some(grant), &startup.context, startup.paused_control)?;
     let current = current_context(startup.context.port)?;
     validate_key_result_context(&startup.context, launched_identity, &current, result)?;
-    respire_app::login_transaction::verify_auth_identity(&current.root, &current.profile, &result.identity)
+    respire_app::login_transaction::verify_locked_auth_identity(&current.root, &current.profile, &result.identity)
 }
 
 fn validate_key_result_context(original: &LaunchContext, launched_identity: &respire_protocol::HostAuthIdentity,
@@ -432,7 +432,7 @@ pub(crate) fn verify_identity_write_result(
     validate_control_binding(binding, &startup.context, grant, original_account)?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
     verify_authority_for_mode(Some(grant), &startup.context, true)?;
-    respire_app::login_transaction::verify_auth_identity(
+    respire_app::login_transaction::verify_locked_auth_identity(
         &startup.context.root, &startup.context.profile, &result.identity,
     )?;
     validate_identity_write_context(&startup.context, launched_identity,
