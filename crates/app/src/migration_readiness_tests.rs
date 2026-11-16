@@ -140,7 +140,51 @@ impl Fixture {
         std::env::set_var("USERPROFILE", self.home.path());
         std::env::set_var("RSRS_DATA_DIR", self.home.path().join(".rsrs"));
         std::env::set_var(DEFAULT_ENV, self.home.path().join(".rsrs"));
-        let result = identity(&self.source).and_then(|id| migrate_profile(&id, "namespace-fixture").map(|_| ()));
+        let result = (|| -> Result<()> {
+            use respire_protocol::migration_control::{HostMigrationCustody, HostMigrationOperation};
+            use respire_protocol::host_control::{HostAuthSessionMaterial, HostAuthVaultFactors};
+            let source_id = identity(&self.source)?;
+            let mut original = HostMigrationOperation {
+                schema_version: 1, operation_id: "42000000-0000-4000-8000-000000000001".into(),
+                key: "42000000-0000-4000-8000-000000000001".into(),
+                installation_root: crate::service::main_data_dir(), profile: crate::service::data_dir(),
+                identity: respire_protocol::HostAuthIdentity::Absent,
+                source_id: source_id.clone(), account: "namespace-fixture".into(), fingerprint: String::new(),
+            };
+            original.fingerprint = hex::encode(Sha256::digest(original.fingerprint_bytes()?));
+            let bytes = match std::fs::read(self.source.join("session.json")) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            let session: Value = bytes.as_ref().map(|bytes| serde_json::from_slice(bytes)).transpose()?.unwrap_or(Value::Null);
+            let mut material = HostMigrationMaterial { candidates: Vec::new(), custody: None };
+            if let Some(secret) = session["secret_key"].as_str() {
+                material.candidates.push(HostAuthSessionMaterial {
+                    session_sha256: hex::encode(Sha256::digest(bytes.as_ref().context("missing fixture session")?)),
+                    factors: HostAuthVaultFactors::V4 { super_password: secret.into() },
+                });
+            }
+            let first = migrate_profile_inner(&source_id, "namespace-fixture", Some(&original), Some(&material));
+            match first {
+                Ok(_) => Ok(()),
+                Err(error) if error.downcast_ref::<host_material::CredentialsRequired>().is_some() => {
+                    assert!(!self.target().exists());
+                    let required = error.downcast_ref::<host_material::CredentialsRequired>().context("missing custody request")?;
+                    assert_eq!(required.0["candidate_index"], 0);
+                    assert_eq!(required.0["session_sha256"], material.candidates[0].session_sha256);
+                    let alias = format!("legacy-{}", &source_id[..16]);
+                    // This test acts as the host after the Runtime has verified every DB row.
+                    let backend = crate::keystore::import_credential(&alias, "super",
+                        session["secret_key"].as_str().context("missing fixture factor")?)?;
+                    material.custody = Some(HostMigrationCustody { keyring_account: alias,
+                        keyring_backend: backend.into(), legacy_secret_backend: None, login_password_retained: false });
+                    migrate_profile_inner(&source_id, "namespace-fixture", Some(&original), Some(&material))?;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        })();
         for (name, value) in saved {
             match value {
                 Some(value) => std::env::set_var(name, value),

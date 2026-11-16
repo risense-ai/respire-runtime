@@ -3266,6 +3266,11 @@ pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
     } else { String::new() };
     let keys = crate::auth::unlock_session_keys(&session, &password,
         if version == 1 { None } else { source_secret }, alias)?;
+    local_snapshot_with_keys(&keys)
+}
+
+/// Read the selected committed database with explicitly verified host material.
+pub fn local_snapshot_with_keys(keys: &crate::memory::SessionKeys) -> Result<String> {
     let directory = crate::service::data_dir();
     let path = crate::service::database_path(&directory)?;
     anyhow::ensure!(path.is_file(), "selected source has no local library; nothing was migrated");
