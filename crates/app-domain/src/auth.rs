@@ -199,8 +199,15 @@ fn unlock_local_session_snapshot(data: &serde_json::Value) -> Result<(SessionKey
     let explicit_pass = if data["vault_version"] == 1 {
         crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty())
     } else { None };
-    let pass = explicit_pass.or_else(|| data["pass"].as_str().map(ToOwned::to_owned))
-        .or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default();
+    let supplied_pass = explicit_pass.or_else(|| data["pass"].as_str().map(ToOwned::to_owned));
+    let pass = if data["vault_version"].as_i64().unwrap_or(1) == 1 && supplied_pass.is_none() {
+        match data["keyring_backend"].as_str() {
+            Some(backend) => crate::keystore::read_imported_v1_password(
+                data["keyring_account"].as_str().unwrap_or(&user), backend)?,
+            None => crate::keystore::load_login_pass(&user).ok_or_else(|| anyhow::Error::new(
+                SessionCredentialRequired("original login password is required")))?,
+        }
+    } else { supplied_pass.or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default() };
     let keys = unlock_session_keys(data, &pass, None, &user)?;
     let owner = if user.trim().is_empty() { None } else { Some(user) };
     Ok((keys, owner))
@@ -364,11 +371,8 @@ pub fn unlock_session_keys(
                 .or_else(|| data["super"].as_str())
                 .or(stored_super.as_deref())
                 .ok_or_else(|| anyhow::Error::new(SessionCredentialRequired("super password required")))?;
-            let secret_key = data["secret_key"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("Secret Key required"))?;
-            crate::memory::SessionKeys::unlock_vault(super_pass, secret_key, salt, wrapped, nonce)
+            let secret_key = legacy_session_factor(data, user, "secret_key")?;
+            crate::memory::SessionKeys::unlock_vault(super_pass, &secret_key, salt, wrapped, nonce)
         }
         // v2: super password (passphrase) only
         Some(2) => {
@@ -384,7 +388,7 @@ pub fn unlock_session_keys(
         // v1: original login password + Account Secret, retained during normal login.
         _ => crate::memory::SessionKeys::unlock(
             login_pass,
-            data["secret"].as_str().ok_or_else(|| anyhow!("session missing secret"))?,
+            &legacy_session_factor(data, user, "secret")?,
             salt,
             wrapped,
             nonce,
@@ -395,6 +399,16 @@ pub fn unlock_session_keys(
     } else {
         Ok(keys)
     }
+}
+
+fn legacy_session_factor(data: &serde_json::Value, user: &str, field: &str) -> Result<String> {
+    if let Some(value) = data[field].as_str().filter(|value| !value.is_empty()) {
+        return Ok(value.to_owned());
+    }
+    let backend = data["legacy_secret_backend"].as_str().context("original legacy factor is missing")?;
+    anyhow::ensure!(backend != "kernel", "legacy factor requires a persistent host backend");
+    let alias = data["keyring_account"].as_str().unwrap_or(user);
+    crate::keystore::read_imported(alias, "legacy-secret", backend)
 }
 
 /// Missing material is distinguishable from malformed sessions or failed decryption.

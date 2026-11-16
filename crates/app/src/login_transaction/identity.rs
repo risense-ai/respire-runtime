@@ -131,14 +131,14 @@ fn admit(ownership: &AuthOwnership, id: &str, key: &str, params: &HostIdentityWr
     let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
     journal.active = Some(Recovery { directory: ownership.profile.clone(), original: original.clone(), config: None,
         alias: alias.clone(), backends: Vec::new(), pass_backends: Vec::new(), totp_backends: Vec::new(),
-        directory_existed: true, operation_id: Some(id.to_owned()), owns_config: false });
+        directory_existed: true, operation_id: Some(id.to_owned()), owns_config: false, ..Recovery::default() });
     let index = journal.operations.len();
     journal.operations.push(AuthRecord { operation_id: id.to_owned(), idempotency_key: key.to_owned(),
         fingerprint: fingerprint(&ownership.root, &ownership.profile, &params.source_identity, &params.operation)?,
         root: ownership.root.clone(), profile: ownership.profile.clone(), original_sha256: original.as_deref().map(digest),
-        candidate: None, candidate_sha256: None, alias, backend: None, phase: AuthPhase::Admitted, account: None, key_operation: None, space_operation: None, profile_remove: None,
+        candidate: None, candidate_backup: None, candidate_sha256: None, restored: None, alias, backend: None, phase: AuthPhase::Admitted, account: None, key_operation: None, space_operation: None, profile_remove: None,
         identity: Some(IdentityOperation { operation: params.operation.clone(), source_identity: params.source_identity.clone(), revoke: None }) });
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     Ok((journal, index))
 }
 
@@ -196,12 +196,12 @@ pub fn control_identity_write(ownership: &AuthOwnership, id: &str, key: &str,
             HostIdentityWriteOperation::SessionRevoke { session_id } => {
                 let (addr, token) = revoke_credentials(original.as_deref())?;
                 journal.operations[index].phase = AuthPhase::RemotePending;
-                save_journal(&journal)?;
+                save_journal(&mut journal)?;
                 let reply = match send_revoke(&addr, &token, session_id) {
                     Ok(reply) => reply,
                     Err(_) => {
                         journal.operations[index].phase = AuthPhase::RemoteUnknown;
-                        save_journal(&journal)?;
+                        save_journal(&mut journal)?;
                         return result(&journal, index);
                     }
                 };
@@ -270,7 +270,7 @@ pub(super) fn assert_existing_recovery(root: &Path) -> Result<()> {
     let revoke_id = uuid::Uuid::new_v4().to_string();
     let (mut journal, index) = admit(&ownership, &revoke_id, &revoke_id, &params)?;
     journal.operations[index].phase = AuthPhase::RemotePending;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     let pending = std::fs::read(recovery_path())?;
     assert!(control_identity_write_result(&ownership, &revoke_id, &revoke_id, &params)?.outcome == HostIdentityWriteOutcome::Unknown);
     assert!(control_identity_write(&ownership, &revoke_id, &revoke_id, &params)?.outcome == HostIdentityWriteOutcome::Unknown);

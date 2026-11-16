@@ -113,7 +113,7 @@ pub fn control_profile_remove(
     journal.operations.push(AuthRecord {
         operation_id: original.operation_id.clone(), idempotency_key: original.key.clone(),
         fingerprint: original.fingerprint.clone(), root: ownership.root.clone(), profile: ownership.profile.clone(),
-        original_sha256: None, candidate: None, candidate_sha256: None,
+        original_sha256: None, candidate: None, candidate_backup: None, candidate_sha256: None, restored: None,
         alias: format!("profile-remove-{}", original.operation_id), backend: None, phase: AuthPhase::Prepared,
         account: None, identity: None, key_operation: None, space_operation: None,
         profile_remove: Some(ProfileRemoveOperation { original: original.clone() }),
@@ -122,8 +122,8 @@ pub fn control_profile_remove(
     journal.active = Some(Recovery { directory: directory.clone(), original: None, config: None,
         alias: journal.operations[index].alias.clone(), backends: Vec::new(), pass_backends: Vec::new(),
         totp_backends: Vec::new(), directory_existed: true,
-        operation_id: Some(original.operation_id.clone()), owns_config: false });
-    save_journal(&journal)?;
+        operation_id: Some(original.operation_id.clone()), owns_config: false, ..Recovery::default() });
+    save_journal(&mut journal)?;
     // SQLite may keep lock.db undeletable on Windows. Root/profile ownership and the
     // caller's Paused takeover remain held; dropping this handle is not a stop proof.
     drop(target_lock);
@@ -143,6 +143,6 @@ pub fn control_profile_remove(
     verify_auth_identity(&ownership.root, &ownership.profile, &original.identity)?;
     journal.operations[index].phase = AuthPhase::Committed;
     journal.active = None;
-    save_journal(&journal)?;
+    save_journal(&mut journal)?;
     Ok(result(Some(&journal.operations[index]), original))
 }

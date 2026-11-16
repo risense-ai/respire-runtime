@@ -436,7 +436,8 @@ mod tests {
         let bytes = std::fs::read(profile.source.join("session.json"))?;
         assert!(snapshot_profile_checkpoint(&profile, &stage, &[], true,
             || Err(anyhow!("synthetic durable checkpoint failure"))).is_err());
-        assert_eq!(std::fs::read(stage.join("session.json"))?, bytes);
+        assert!(!stage.join("session.json").exists());
+        assert_eq!(std::fs::read(profile.source.join("session.json"))?, bytes);
         assert!(!stage.join(RECEIPT).exists());
         assert!(!profile.destination.exists());
         Ok(())

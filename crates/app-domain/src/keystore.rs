@@ -206,7 +206,7 @@ fn read_imported_inner(account: &str, slot: &str, backend_name: &str, allow_empt
     let backend = backends().iter().find(|backend| backend.name() == backend_name)
         .ok_or_else(|| anyhow!("credential backend is unavailable during recovery"))?;
     let value = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?
-        .get_password().map_err(|_| anyhow!("recovery credential is unavailable"))?;
+        .get_password().context("recovery credential is unavailable")?;
     anyhow::ensure!(!value.is_empty() || allow_empty_v1 && slot == "pass", "recovery credential is empty");
     Ok(value)
 }
@@ -326,6 +326,30 @@ mod host_tests {
         assert_eq!(host_of("https://api.deepseek.com/v1"), "api.deepseek.com");
         assert_eq!(host_of("api.b.ai/chat"), "api.b.ai");
         assert_eq!(host_of("  https://x.test/a?b=1#c  "), "x.test");
+    }
+
+    #[test]
+    #[cfg(not(feature = "native-credential-fixtures"))]
+    fn imported_read_preserves_missing_credential_type() -> Result<()> {
+        let _guard = crate::test_lock::guard();
+        let account = format!("missing-recovery-{}", uuid::Uuid::new_v4().simple());
+        let backend = backends().first().context("test credential backend is missing")?.name();
+        for result in [read_imported(&account, "super", backend), read_imported_v1_password(&account, backend)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => anyhow::bail!("missing credential unexpectedly succeeded"),
+            };
+            assert_eq!(error.to_string(), "recovery credential is unavailable");
+            assert!(matches!(error.downcast_ref::<respire_protocol::credentials::CredentialError>(),
+                Some(respire_protocol::credentials::CredentialError::NoEntry)));
+        }
+        let error = match read_imported(&account, "super", "unsupported-test-backend") {
+            Err(error) => error,
+            Ok(_) => anyhow::bail!("unsupported credential backend unexpectedly succeeded"),
+        };
+        assert_eq!(error.to_string(), "credential backend is unavailable during recovery");
+        assert!(error.downcast_ref::<respire_protocol::credentials::CredentialError>().is_none());
+        Ok(())
     }
 
     #[test]
