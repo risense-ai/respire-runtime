@@ -941,6 +941,40 @@ mod tests {
     }
 
     #[test]
+    fn registration_requires_host_material_before_remote_or_credential_effects() -> Result<()> {
+        for material in [None, Some(respire_protocol::HostAuthKeygenMaterial {
+            kdf_salt: "invalid".into(), wrapped_urk: "invalid".into(), urk_nonce: "invalid".into(),
+            super_password: "synthetic-host-super".into(),
+            keyring_account: format!("login-{}", uuid::Uuid::new_v4().simple()), keyring_backend: "native".into(),
+        })] {
+            let isolated = crate::test_lock::Isolate::new()?;
+            let _keyring = crate::migration::memory_keyring_for_test();
+            let root = isolated.path().canonicalize()?;
+            let ownership = AuthOwnership::acquire(&root, &root)?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let params = HostAuthRegisterParams {
+                schema_version: 1, binding: respire_protocol::ControlBinding {
+                    installation_root: root.clone(), profile: root.clone(),
+                    launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None,
+                }, identity: HostAuthIdentity::Absent, addr: "https://never-contact.invalid".into(),
+                user: "synthetic-register".into(), password: "synthetic-host-password".into(),
+                super_password: None, material,
+            };
+            assert!(control_register(&ownership, &id, &id, &params).is_err());
+            let journal = load_journal()?;
+            assert!(journal.operations[0].phase == AuthPhase::Admitted);
+            assert!(journal.operations[0].backend.is_none());
+            assert!(journal.active.as_ref().is_some_and(|active|
+                active.backends.is_empty() && active.pass_backends.is_empty()));
+            assert!(!root.join("session.json").exists());
+            let durable = String::from_utf8(std::fs::read(recovery_path())?)?;
+            assert!(!durable.contains("synthetic-host-super") && !durable.contains("synthetic-host-password"));
+            assert_eq!(control_register(&ownership, &id, &id, &params)?.outcome, HostAuthAccountOutcome::Unknown);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn prepared_auth_candidate_requires_its_original_host_material() -> Result<()> {
         let isolated = crate::test_lock::Isolate::new()?;
         let keyring = crate::migration::memory_keyring_for_test();
@@ -1751,37 +1785,38 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
     ensure!(params.schema_version == respire_protocol::HOST_AUTH_SCHEMA_V
         && params.binding.installation_root == ownership.root && params.binding.profile == ownership.profile,
         "registration binding mismatch");
+    let source = read_original(&ownership.profile)?;
+    let local: Value = match source.as_deref() { Some(bytes) => serde_json::from_slice(bytes)?, None => json!({}) };
+    ensure!(["super", "pass", "secret", "secret_key"].iter().all(|field| local.get(field).is_none()),
+        "host must normalize registration source credentials before admission");
     let addr = params.addr.trim().trim_end_matches('/');
     let (mut journal, index, fresh) = admit_account(ownership, &params.identity, operation_id, key, true, addr, &params.user)?;
     if !fresh { return account_result(&journal.operations[index]); }
-    let source = read_original(&ownership.profile)?;
-    let local: Value = match source { Some(bytes) => serde_json::from_slice(&bytes)?, None => json!({}) };
-    let (secret, vault) = if local["wrapped_urk"].as_str().is_some_and(|wrap| !wrap.is_empty())
-        && !local["user"].as_str().is_some_and(|user| !user.is_empty()) {
-        let secret = match &params.identity {
-            HostAuthIdentity::Unbound { operation_id, .. } => {
-                let source = journal.operations.iter().find(|record| record.operation_id == *operation_id)
-                    .context("unbound source receipt is missing")?;
-                verify_candidate(source)?
-            }
-            _ => anyhow::bail!("registration requires a receipt-backed unbound vault"),
-        };
-        if let Some(expected) = &params.super_password { ensure!(*expected == secret, "recovery code does not match the unbound vault"); }
-        (secret, json!({"version":local["vault_version"],"kdf_salt":local["kdf_salt"],
-            "wrapped_urk":local["wrapped_urk"],"urk_nonce":local["urk_nonce"]}))
-    } else {
-        let (secret, _, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
-        (secret, json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce}))
-    };
-    let alias = journal.operations[index].alias.clone();
+    let material = params.material.as_ref().context("registration requires host-prepared vault material")?;
+    let slot = material.keyring_account.strip_prefix("login-").context("invalid host registration credential slot")?;
+    ensure!(slot.len() == 32 && slot.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid host registration credential slot");
+    require_persistent_auth_backend(&material.keyring_backend)?;
+    let keys = crate::memory::SessionKeys::unlock_v4(&material.super_password,
+        &material.kdf_salt, &material.wrapped_urk, &material.urk_nonce)
+        .context("host registration material does not unlock its vault")?;
+    if let Some(expected) = &params.super_password {
+        ensure!(*expected == material.super_password, "recovery code does not match host registration material");
+    }
     let use_source = matches!(&params.identity, HostAuthIdentity::Absent | HostAuthIdentity::Unbound { .. });
-    journal.operations[index].account.as_mut().context("account receipt is missing")?.vault = Some(vault.clone());
-    crate::keystore::import_credential_checkpoint(&alias, "super", &secret, |backend| {
-        require_persistent_auth_backend(backend)?;
-        journal.operations[index].backend = Some(backend.to_owned());
-        journal.active.as_mut().context("account recovery is missing")?.backends.push(backend.to_owned());
-        save_journal(&mut journal)
-    })?;
+    if matches!(&params.identity, HostAuthIdentity::Unbound { .. }) {
+        ensure!(local["vault_version"] == 4 && local["kdf_salt"] == material.kdf_salt
+            && local["wrapped_urk"] == material.wrapped_urk && local["urk_nonce"] == material.urk_nonce
+            && local["keyring_account"] == material.keyring_account && local["keyring_backend"] == material.keyring_backend,
+            "host registration material changed the receipt-backed unbound vault");
+    }
+    let vault = json!({"version":4,"kdf_salt":material.kdf_salt,
+        "wrapped_urk":material.wrapped_urk,"urk_nonce":material.urk_nonce});
+    journal.operations[index].alias = material.keyring_account.clone();
+    journal.operations[index].backend = Some(material.keyring_backend.clone());
+    // Host owns both credential slots and their compensation; Runtime journals only their identity.
+    journal.active.as_mut().context("account recovery is missing")?.alias = material.keyring_account.clone();
+    journal.operations[index].account.as_mut().context("account receipt is missing")?.vault = Some(vault);
     journal.operations[index].phase = AuthPhase::RemotePending;
     save_journal(&mut journal)?;
     let authorized = match crate::auth::registration_authorization(addr, &params.user, &params.password) {
@@ -1795,9 +1830,66 @@ pub fn control_register(ownership: &AuthOwnership, operation_id: &str, key: &str
     journal.operations[index].account.as_mut().context("account receipt is missing")?.authorization = Some(authorized.clone());
     journal.operations[index].phase = AuthPhase::Authorized;
     save_journal(&mut journal)?;
-    let mut prepared = PreparedLogin::prepare_with_vault_inner(addr, &authorized, secret, vault, None, use_source)?;
-    prepared.login_password = Some(params.password.clone());
-    commit_account(ownership, &mut journal, index, &mut prepared)
+    let user = authorized["user"].as_str().filter(|user| !user.is_empty()).context("registration authorization is missing its user")?;
+    let token = authorized["token"].as_str().filter(|token| !token.is_empty()).context("registration authorization is missing its token")?;
+    let directory = if use_source { ownership.profile.clone() } else { login_directory(addr, user)? };
+    let original = read_original(&directory)?;
+    let mut session: Value = match original.as_deref() { Some(bytes) => serde_json::from_slice(bytes)?, None => json!({}) };
+    ensure!(session.is_object() && ["super", "pass", "secret", "secret_key"].iter().all(|field| session.get(field).is_none()),
+        "host must normalize registration target credentials before admission");
+    ensure!(session["user"].as_str().is_none_or(|owner| owner.is_empty() || owner == user),
+        "registration destination belongs to another account");
+    let database = crate::service::database_path(&directory)?;
+    if database.is_file() {
+        let database = rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let has_memories: bool = database.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories')", [], |row| row.get(0))?;
+        if has_memories {
+            let encrypted: i64 = database.query_row("SELECT count(*) FROM memories WHERE ciphertext <> ''", [], |row| row.get(0))?;
+            let same_wrap = session["kdf_salt"] == material.kdf_salt && session["wrapped_urk"] == material.wrapped_urk
+                && session["urk_nonce"] == material.urk_nonce;
+            ensure!(encrypted == 0 || same_wrap || library_accepts_keys(&directory, &keys)?,
+                "host registration vault does not unlock the destination library");
+        }
+    }
+    session["user"] = json!(user);
+    session["addr"] = json!(addr);
+    session["token"] = json!(token);
+    session["session_id"] = authorized["session_id"].clone();
+    session["vault_version"] = json!(4);
+    session["kdf_salt"] = json!(material.kdf_salt);
+    session["wrapped_urk"] = json!(material.wrapped_urk);
+    session["urk_nonce"] = json!(material.urk_nonce);
+    session["keyring_account"] = json!(material.keyring_account);
+    session["keyring_backend"] = json!(material.keyring_backend);
+    ensure!(read_original(&ownership.profile)? == source, "source profile changed before registration commit");
+    let active = journal.active.as_mut().context("account recovery is missing")?;
+    active.directory = directory.clone();
+    active.original = original.clone();
+    active.directory_existed = directory.exists();
+    active.config = match std::fs::read(crate::service::client_config_path()) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    active.owns_config = true;
+    journal.operations[index].account.as_mut().context("account receipt is missing")?.target = Some(directory.clone());
+    checkpoint_account_candidate(&mut journal, index, &session)?;
+    save_journal(&mut journal)?;
+    let target = if directory.exists() { directory.canonicalize()? } else { directory.clone() };
+    let _target_lock = if target == ownership.root || target == ownership.profile { None }
+        else { Some(crate::lock::LibraryLock::acquire(&target, std::time::Duration::from_secs(1))?) };
+    ensure!(read_original(&directory)? == original, "registration target changed while acquiring ownership");
+    journal.operations[index].phase = AuthPhase::Prepared;
+    save_journal(&mut journal)?;
+    if !directory.exists() {
+        std::fs::create_dir_all(directory.parent().context("account directory has no parent")?)?;
+        std::fs::create_dir(&directory)?;
+    }
+    private_write(&directory.join("session.json"), &serde_json::to_vec_pretty(&session)?)?;
+    crate::service::set_data_dir(&directory.to_string_lossy())?;
+    journal.operations[index].phase = AuthPhase::AwaitingVerification;
+    save_journal(&mut journal)?;
+    account_result(&journal.operations[index])
 }
 
 pub fn control_login(ownership: &AuthOwnership, operation_id: &str, key: &str,
