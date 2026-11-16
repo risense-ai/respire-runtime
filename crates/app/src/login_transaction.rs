@@ -1647,7 +1647,11 @@ fn admit_account_with_intent(ownership: &AuthOwnership, identity: &HostAuthIdent
     ensure!(ownership.root == crate::service::main_data_dir().canonicalize()?
         && ownership.profile == crate::service::data_dir().canonicalize()?, "auth ownership changed");
     ensure!(!user.is_empty() && !addr.is_empty(), "account and server are required");
-    verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    if register {
+        verify_locked_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    } else {
+        verify_auth_identity(&ownership.root, &ownership.profile, identity)?;
+    }
     let base = account_fingerprint(ownership, identity, register, addr, user)?;
     let fingerprint = match login_intent {
         Some(intent) => digest(&serde_json::to_vec(&(&base, intent))?),
