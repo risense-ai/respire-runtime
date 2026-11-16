@@ -454,8 +454,12 @@ mod tests {
             private_write(&root.join("session.json"), &candidate)?;
             save_journal(&mut locked_journal)?;
             assert!(!auth_recovery_pending()?, "locked account startup required host credentials");
+            verify_account_candidate(&locked_journal.operations[account_index])?;
+            assert!(account_result(&locked_journal.operations[account_index])?.super_password.is_none());
+            locked_journal.operations[account_index].account.as_mut()
+                .context("locked account receipt missing")?.register = false;
             assert!(verify_account_candidate(&locked_journal.operations[account_index]).is_err(),
-                "credential-free startup must not prove account material");
+                "login candidate verification must still require account material");
             private_write(&root.join("session.json"), br#"{"user":"changed-owner"}"#)?;
             assert!(auth_recovery_pending().is_err(), "startup accepted a changed account candidate");
             std::fs::remove_file(root.join("session.json"))?;
