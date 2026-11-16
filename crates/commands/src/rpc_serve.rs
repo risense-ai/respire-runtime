@@ -3896,7 +3896,8 @@ mod tests {
                 due,
                 backoff: 3,
                 blocked_generation: Some(7),
-                ..SyncSchedule::default()
+                manual: VecDeque::new(),
+                last_success: None,
             };
             schedule.record_success(true);
             assert_eq!(schedule.due, due, "observer failure must not schedule a replay or discard new work");
