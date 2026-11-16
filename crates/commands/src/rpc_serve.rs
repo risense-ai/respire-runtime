@@ -1459,7 +1459,7 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             let mut response = status_response(&request);
             let mut summary = json!({"request_id":request.id,"operation_id":id,"scope":scope,
                 "state":state,"response":result,
-                "retention":"last 64 receipts; up to 4096 admission identities until runtime exit; account-directory and generation scoped; unknown is not proof of non-commit; never replay a write automatically"});
+                "retention":"last 64 receipts; admission identities retained until runtime exit; account-directory and generation scoped; unknown is not proof of non-commit; never replay a write automatically"});
             if let Some(key) = &request.idempotency_key {
                 summary["idempotency_key"] = json!(key);
             }
