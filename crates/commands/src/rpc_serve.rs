@@ -278,6 +278,19 @@ struct SyncSchedule {
     blocked_generation: Option<usize>,
     last_success: Option<u64>,
 }
+
+impl SyncSchedule {
+    fn record_success(&mut self, synchronized: bool) {
+        self.backoff = 0;
+        self.blocked_generation = None;
+        if synchronized {
+            self.last_success = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|value| value.as_secs());
+        }
+    }
+}
 static SYNC_CV: Condvar = Condvar::new();
 pub static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
@@ -1010,15 +1023,11 @@ fn flight_loop() {
             });
             let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
             match result {
-                Ok(synchronized) => {
-                    state.backoff = 0;
-                    state.blocked_generation = None;
-                    if synchronized {
-                        state.last_success = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|v| v.as_secs());
-                    }
+                Ok(synchronized) => state.record_success(synchronized),
+                Err(error) if error.is::<HostPluginFailure>() => {
+                    // Core sync committed before the host observer failed; retain normal scheduling.
+                    state.record_success(true);
+                    eprintln!("command=sync status=warn mode=auto core=completed host_plugin_error={error}");
                 }
                 Err(error)
                     if error
@@ -3877,6 +3886,23 @@ mod tests {
         }
         for method in ["runtime.status", "model.catalog", "model.progress", "assets.status", "cli.progress"] {
             assert!(!requires_scope(method), "{method} must remain queryable during drain");
+        }
+    }
+
+    #[test]
+    fn completed_sync_preserves_pending_work_after_host_observer_failure() {
+        for due in [None, Some(Instant::now())] {
+            let mut schedule = SyncSchedule {
+                due,
+                backoff: 3,
+                blocked_generation: Some(7),
+                ..SyncSchedule::default()
+            };
+            schedule.record_success(true);
+            assert_eq!(schedule.due, due, "observer failure must not schedule a replay or discard new work");
+            assert_eq!(schedule.blocked_generation, None, "core autosync must remain eligible");
+            assert_eq!(schedule.backoff, 0);
+            assert!(schedule.last_success.is_some(), "core sync already committed");
         }
     }
 
