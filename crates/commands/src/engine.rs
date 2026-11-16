@@ -3097,13 +3097,10 @@ pub fn background_sync_once() -> Result<bool> {
     let (session, local, remote) =
         sync_phase(|| Ok((build_session()?, build_local()?, build_remote()?)))?;
     let stats = sync_with_retry(&session, &local, &remote)?;
+    crate::rpc_serve::deliver_post_sync(stats.pulled, stats.pushed)?;
     eprintln!(
         "command=sync status=ok mode=auto pulled={} pushed={}",
         stats.pulled, stats.pushed
-    );
-    crate::hooks::record(
-        crate::hooks::HookEvent::PostSync,
-        crate::hooks::sync_payload(stats.pulled, stats.pushed),
     );
     Ok(true)
 }

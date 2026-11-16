@@ -26,7 +26,7 @@ thread_local! {
     static EVENTS: RefCell<Option<Vec<serde_json::Value>>> = const { RefCell::new(None) };
 }
 
-/// Capture only the current command. Background work has no calling host.
+/// Capture only the current command. Autosync uses the acknowledged private host channel.
 pub struct EventScope;
 
 impl EventScope {
@@ -82,7 +82,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payload_builders_and_event_names() {
+    fn payload_builders_and_event_names() -> anyhow::Result<()> {
+        use respire_protocol::host_plugin::*;
+        use crate::rpc_serve::HostPluginChannel;
+        let channel = HostPluginChannel::default();
+        for result in [
+            HostPluginEventResult::Completed { warnings: Vec::new() },
+            HostPluginEventResult::Completed { warnings: vec!["observer warning".into()] },
+            HostPluginEventResult::Failed { error: "configured plugin exited unsuccessfully".into() },
+        ] {
+            let failed = matches!(&result, HostPluginEventResult::Failed { .. });
+            let observed = channel.exchange(|bytes| {
+                let request: HostPluginEventRequest = serde_json::from_slice(bytes)?;
+                assert_eq!(request.plugin_event, HOST_PLUGIN_SCHEMA_V);
+                assert!(matches!(request.event, HostPluginEvent::PostSync));
+                assert_eq!((request.data.pulled, request.data.pushed), (3, 4));
+                assert!(channel.acknowledge(HostPluginEventAck { plugin_event_ack: HOST_PLUGIN_SCHEMA_V,
+                    id: "another-event".into(), result: HostPluginEventResult::Completed { warnings: Vec::new() } }).is_err());
+                assert!(channel.acknowledge(HostPluginEventAck { plugin_event_ack: HOST_PLUGIN_SCHEMA_V + 1,
+                    id: request.id.clone(), result: HostPluginEventResult::Completed { warnings: Vec::new() } }).is_err());
+                channel.acknowledge(HostPluginEventAck { plugin_event_ack: HOST_PLUGIN_SCHEMA_V, id: request.id, result })
+            }, 3, 4);
+            if failed {
+                assert!(observed.err().ok_or_else(|| anyhow::anyhow!("failed plugin was accepted"))?
+                    .to_string().contains("configured plugin exited unsuccessfully"));
+            } else {
+                let warnings = observed?;
+                assert!(warnings.is_empty() || warnings == ["observer warning"]);
+            }
+        }
+        let disconnected = HostPluginChannel::default();
+        assert!(disconnected.exchange(|_| disconnected.close("parent disconnected".into()), 0, 0)
+            .err().ok_or_else(|| anyhow::anyhow!("disconnect was accepted"))?.to_string().contains("parent disconnected"));
+        assert!(disconnected.exchange(|_| anyhow::bail!("closed channel must not write again"), 0, 0).is_err());
+        let broken_output = HostPluginChannel::default();
+        assert!(broken_output.exchange(|_| anyhow::bail!("broken output pipe"), 0, 0)
+            .err().ok_or_else(|| anyhow::anyhow!("write failure was accepted"))?.to_string().contains("broken output pipe"));
         let scope = EventScope::begin();
         record(HookEvent::PostRemember, remember_done_payload("id", "title", "important"));
         record(HookEvent::PostRecall, recall_payload("query", "project", &[("id".into(), 0.9)]));
@@ -102,5 +137,6 @@ mod tests {
             record(HookEvent::PostForget, forget_payload("discarded"));
         }
         assert!(EventScope::begin().finish().is_empty());
+        Ok(())
     }
 }
