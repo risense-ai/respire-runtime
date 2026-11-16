@@ -168,6 +168,9 @@ pub struct HostAuthRegisterParams {
     pub user: String,
     pub password: String,
     pub super_password: Option<String>,
+    /// Host-prepared material for registration; no generation or credential write is delegated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<HostAuthKeygenMaterial>,
 }
 
 #[derive(Deserialize, Serialize)]
