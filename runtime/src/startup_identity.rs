@@ -1685,6 +1685,7 @@ mod tests {
         let directory = root.join("launch");
         fs::create_dir_all(&directory)?;
         let result = (|| -> Result<()> {
+            let directory = directory.canonicalize()?;
             let nonce = "12345678-1234-4234-8234-123456789abc";
             let (_, grant) = fixture();
             let bytes = serde_json::to_vec(&grant)?;
