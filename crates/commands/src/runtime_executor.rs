@@ -208,11 +208,16 @@ fn finish_execution(run_result: anyhow::Result<()>) -> Captured {
 
 pub fn capture_run(args: Vec<String>) -> Captured {
     // Keep the scheduler's generation and sync boundary on this worker thread.
-    match std::panic::catch_unwind(|| execute(args)) {
+    let events = crate::hooks::EventScope::begin();
+    let mut captured = match std::panic::catch_unwind(|| execute(args)) {
         Ok(Ok(captured)) => captured,
         Ok(Err(error)) => failure("cli", &format!("{error:#}")),
         Err(_) => failure("cli", "executor panicked"),
-    }
+    };
+    // Include committed events even if a later step failed. Hosts must not replay
+    // the command to recover a missing post-hook result.
+    captured.envelope.summary["host_plugin_events"] = serde_json::json!(events.finish());
+    captured
 }
 
 #[cfg(test)]
