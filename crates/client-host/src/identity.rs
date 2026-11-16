@@ -127,7 +127,8 @@ pub fn read_migrated_local_session(
         byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), "invalid migration source identity");
     let destination = receipt["destination"].as_str().context("migration destination is missing")?;
     anyhow::ensure!(Path::new(destination).is_absolute()
-        && crate::config::normalize_control_path(Path::new(destination))? == directory
+        && crate::config::normalize_control_path(Path::new(destination))?.canonicalize()?
+            == directory.canonicalize()?
         && receipt["schema"] == 2 && receipt["complete"] == true
         && receipt["namespace_migrated"].as_bool().is_some() && receipt["original_preserved"] == true
         && receipt["source"].as_str().is_some_and(|source| Path::new(source).is_absolute())
