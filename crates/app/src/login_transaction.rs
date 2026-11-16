@@ -398,7 +398,7 @@ mod tests {
             schema_version: 1, binding: respire_protocol::ControlBinding {
                 installation_root: root.clone(), profile: root.clone(), launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None,
             }, identity: HostAuthIdentity::Absent, addr: "https://never-contact.invalid".into(), user: "receipt-user".into(),
-            password: "must-not-be-durable".into(), super_password: Some("must-not-be-durable-either".into()),
+            password: "must-not-be-durable".into(), super_password: Some("must-not-be-durable-either".into()), material: None,
         };
         // A replay must return before either network access or credential creation.
         assert_eq!(control_register(&ownership, &account_id, &account_id, &params)?.outcome, HostAuthAccountOutcome::Unknown);
