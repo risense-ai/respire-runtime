@@ -89,6 +89,31 @@ pub(super) fn prepare(profile: &Profile, bytes: &[u8], database: &Path,
     }
     let selected = selected.context("legacy vault could not be unlocked with supplied host material; original data was preserved")?;
     validate_live_memories(database, keys.as_ref())?;
+    // Namespace conversion includes tombstones and embeddings as well as live payloads.
+    // Reject unreadable source bytes while Copying is still safe to retry.
+    if database.is_file() {
+        let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let columns = connection.prepare("PRAGMA table_info(memories)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if !columns.is_empty() {
+            let query = if columns.contains("embedding_enc") {
+                "SELECT ciphertext,nonce,embedding_enc FROM memories"
+            } else { "SELECT ciphertext,nonce,'' FROM memories" };
+            let mut statement = connection.prepare(query)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let keys = keys.as_ref().context("legacy ciphertext requires usable session keys")?;
+                let ciphertext: String = row.get(0)?;
+                let nonce: String = row.get(1)?;
+                let embedding: String = row.get(2)?;
+                keys.decrypt_content(&ciphertext, &nonce).map_err(|_| anyhow!(
+                    "a source record cannot be decrypted; original library and keys were preserved"))?;
+                keys.migrate_embedding(&embedding).map_err(|_| anyhow!(
+                    "a source embedding cannot be decrypted; original library and keys were preserved"))?;
+            }
+        }
+    }
     let Some(custody) = material.custody.as_ref() else {
         return Ok(Plan { keys, selected: Some(selected), session, references: Vec::new() });
     };
