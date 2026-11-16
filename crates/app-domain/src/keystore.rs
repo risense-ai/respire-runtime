@@ -199,7 +199,12 @@ pub fn read_imported(account: &str, slot: &str, backend_name: &str) -> Result<St
 
 /// An explicitly supplied v1 password can be empty; missing entries still fail.
 pub fn read_imported_v1_password(account: &str, backend_name: &str) -> Result<String> {
-    read_imported_inner(account, "pass", backend_name, true)
+    read_imported_inner(account, "pass", backend_name, true).map_err(|error| {
+        if matches!(error.downcast_ref::<respire_protocol::credentials::CredentialError>(),
+            Some(respire_protocol::credentials::CredentialError::NoEntry)) {
+            error.context(crate::auth::SessionCredentialRequired("original login password is required"))
+        } else { error }
+    })
 }
 
 fn read_imported_inner(account: &str, slot: &str, backend_name: &str, allow_empty_v1: bool) -> Result<String> {
@@ -334,12 +339,14 @@ mod host_tests {
         let _guard = crate::test_lock::guard();
         let account = format!("missing-recovery-{}", uuid::Uuid::new_v4().simple());
         let backend = backends().first().context("test credential backend is missing")?.name();
-        for result in [read_imported(&account, "super", backend), read_imported_v1_password(&account, backend)] {
+        for (result, password_required) in [(read_imported(&account, "super", backend), false),
+            (read_imported_v1_password(&account, backend), true)] {
             let error = match result {
                 Err(error) => error,
                 Ok(_) => anyhow::bail!("missing credential unexpectedly succeeded"),
             };
-            assert_eq!(error.to_string(), "recovery credential is unavailable");
+            assert_eq!(error.is::<crate::auth::SessionCredentialRequired>(), password_required);
+            assert!(error.chain().any(|cause| cause.to_string() == "recovery credential is unavailable"));
             assert!(matches!(error.downcast_ref::<respire_protocol::credentials::CredentialError>(),
                 Some(respire_protocol::credentials::CredentialError::NoEntry)));
         }

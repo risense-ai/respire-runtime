@@ -342,13 +342,13 @@ fn receive_and_execute(
             .map_err(|_| ("unauthorized", "private space parent watch failed"))?;
         let ownership = crate::startup_identity::acquire_auth_ownership(space.binding(),space.identity())
             .map_err(|_| ("auth_ownership_unavailable", "private space ownership unavailable"))?;
-        crate::startup_identity::verify_auth_control_binding(space.binding(),space.identity())
+        space.verify_binding()
             .map_err(|_| ("scope_mismatch", "private space identity mismatch"))?;
         events.send(ControlEvent::LongControlStarted)
             .map_err(|_| ("control_unavailable", "private space deadline unavailable"))?;
         let result = space.execute(&request,&ownership)
             .map_err(|_| ("space_outcome_unknown", "query the original space operation before retrying"))?;
-        crate::startup_identity::verify_auth_control_binding(space.binding(),space.identity())
+        space.verify_binding()
             .map_err(|_| ("space_outcome_unknown", "space source identity changed"))?;
         *control_ready = true;
         response.ok = matches!(result.outcome,HostSpaceOutcome::Committed | HostSpaceOutcome::Pending);
@@ -650,8 +650,13 @@ fn receive_and_execute(
             Some(crate::startup_identity::acquire_auth_ownership(account.binding(), account.identity())
                 .map_err(|_| ("auth_ownership_unavailable", "account control library ownership unavailable"))?)
         };
-        crate::startup_identity::verify_auth_control_binding(account.binding(), account.identity())
-            .map_err(|_| ("scope_mismatch", "account control identity does not match the consumed grant"))?;
+        let host_registration = account.is_host_registration(&request)
+            .map_err(|_| ("scope_mismatch", "account control receipt family could not be verified"))?;
+        if host_registration {
+            crate::startup_identity::verify_registration_control_binding(account.binding(), account.identity())
+        } else {
+            crate::startup_identity::verify_auth_control_binding(account.binding(), account.identity())
+        }.map_err(|_| ("scope_mismatch", "account control identity does not match the consumed grant"))?;
         *control_ready = true;
         let result = account.execute(&request, ownership).map_err(|failure| {
             response.error = Some(format!("{failure:#}"));
@@ -676,6 +681,9 @@ fn receive_and_execute(
     let auth = request.method == HOST_AUTH_KEYGEN_METHOD || request.method == HOST_AUTH_RESULT_METHOD;
     if auth {
         let params = validate_auth_request(&request)?;
+        if request.method == HOST_AUTH_KEYGEN_METHOD && params.material.is_none() {
+            return Err(("invalid_request", "keygen mutation requires host-provided key material"));
+        }
         response.operation_id = request.operation_id.clone();
         response.idempotency_key = request.idempotency_key.clone();
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
@@ -685,14 +693,15 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "auth control could not acquire the authorized library"))?;
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "auth control parent watch failed"))?;
-        ownership.recover(&params.identity).map_err(|_| ("auth_recovery_required", "auth transaction recovery requires attention"))?;
-        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
+        ownership.recover_keygen(&params.identity, params.material.as_ref())
+            .map_err(|_| ("auth_recovery_required", "auth transaction recovery requires attention"))?;
+        crate::startup_identity::verify_keygen_control_binding(&params.binding, &params.identity)
             .map_err(|_| ("scope_mismatch", "auth control identity does not match the consumed grant"))?;
         *control_ready = true;
         let result = respire_app::login_transaction::control_keygen(&ownership, &params.identity,
             request.operation_id.as_deref().ok_or(("invalid_request", "auth operation ID is missing"))?,
             request.idempotency_key.as_deref().ok_or(("invalid_request", "auth idempotency key is missing"))?,
-            params.force, request.method == HOST_AUTH_RESULT_METHOD)
+            params.force, request.method == HOST_AUTH_RESULT_METHOD, params.material.as_ref())
             .map_err(|failure| {
                 // Diagnostics stay in this private response, never stderr or argv.
                 response.error = Some(format!("{failure:#}"));

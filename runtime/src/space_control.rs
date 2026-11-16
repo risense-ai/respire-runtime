@@ -22,11 +22,15 @@ impl SpaceRequest {
             (HOST_SPACE_INVITE_METHOD,HostSpaceOperation::Invite { .. })
             | (HOST_SPACE_JOIN_METHOD,HostSpaceOperation::Join { .. })
             | (HOST_SPACE_KICK_METHOD,HostSpaceOperation::Kick { .. }))), "space method and operation mismatch");
-        ensure!(params.invite_code.is_none() || matches!(params.operation,HostSpaceOperation::Join { .. }), "unexpected space secret input");
+        ensure!(!matches!(params.operation,HostSpaceOperation::Kick { .. })
+            || params.invite_code.is_none() && params.material.is_none(), "unexpected space secret input");
         Ok(Self { params, query_only })
     }
     pub(crate) fn binding(&self) -> &ControlBinding { &self.params.binding }
     pub(crate) fn identity(&self) -> &HostAuthIdentity { &self.params.identity }
+    pub(crate) fn verify_binding(&self) -> Result<()> {
+        crate::startup_identity::verify_keygen_control_binding(self.binding(), self.identity())
+    }
     pub(crate) fn execute(&self, request: &RpcRequest, ownership: &AuthOwnership) -> Result<HostSpaceResult> {
         login_transaction::control_space(ownership,
             request.operation_id.as_deref().context("space operation ID missing")?,

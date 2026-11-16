@@ -282,6 +282,23 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     Ok(())
 }
 
+/// Keygen authenticates its candidate using explicit host material, never a credential broker.
+pub(crate) fn verify_keygen_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    verify_managed_boot()
+}
+
 pub(crate) fn verify_auth_control_binding(
     binding: &respire_protocol::ControlBinding,
     identity: &respire_protocol::HostAuthIdentity,
@@ -290,6 +307,23 @@ pub(crate) fn verify_auth_control_binding(
     let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
     respire_spawn::verify_control_parent(grant.supervisor_pid)?;
     respire_app::login_transaction::verify_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
+    let account = match identity {
+        respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
+        _ => None,
+    };
+    validate_control_binding(binding, &startup.context, grant, account)?;
+    verify_managed_boot()
+}
+
+/// Host-owned registration verifies the source receipt without reopening credential custody.
+pub(crate) fn verify_registration_control_binding(
+    binding: &respire_protocol::ControlBinding,
+    identity: &respire_protocol::HostAuthIdentity,
+) -> Result<()> {
+    let startup = STARTUP.get().context("runtime control grant is not consumed")?;
+    let grant = startup.grant.as_ref().context("runtime control grant is missing")?;
+    respire_spawn::verify_control_parent(grant.supervisor_pid)?;
+    respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
     let account = match identity {
         respire_protocol::HostAuthIdentity::Bound { account_id, .. } => Some(account_id.as_str()),
         _ => None,
