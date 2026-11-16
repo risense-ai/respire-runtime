@@ -248,6 +248,20 @@ mod tests {
                 // Only the historical fixture writes factors; production writes must refuse them.
                 std::fs::write(existing.join("session.json"), &original)?;
                 assert!(private_write(&existing.join("session.json"), &original).is_err());
+                // Simulate the host's custody step before Runtime freezes the source identity.
+                let host_alias = format!("legacy-host-prepared-{version}");
+                let primary_backend = crate::keystore::import_credential(&host_alias,
+                    if version == 1 { "pass" } else { "super" }, &primary)?;
+                let legacy_backend = crate::keystore::import_credential(&host_alias, "legacy-secret", &factor)?;
+                let mut host_session = source.clone();
+                for field in ["pass", "super", "secret", "secret_key"] {
+                    host_session.as_object_mut().context("fixture session is an object")?.remove(field);
+                }
+                host_session["keyring_account"] = json!(host_alias);
+                host_session["keyring_backend"] = json!(primary_backend);
+                host_session["legacy_secret_backend"] = json!(legacy_backend);
+                let host_snapshot = serde_json::to_vec(&host_session)?;
+                private_write(&existing.join("session.json"), &host_snapshot)?;
                 let keys = crate::auth::unlock_session_keys(&source, &primary, Some(&primary), "existing")?;
                 let (item_nonce, ciphertext) = keys.encrypt_content(&serde_json::to_string(&json!({
                     "kind":"Context","tags":"","title":"retained","content":"rollback fixture",
@@ -266,8 +280,8 @@ mod tests {
                 let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &authorized,
                     if version == 1 { String::new() } else { primary.clone() }, vault, None)?;
                 prepared.commit()?;
-                let checkpoint: Value = serde_json::from_slice(&std::fs::read(recovery_path())?)?;
-                assert!(checkpoint["active"]["original"].is_null());
+                let stored_snapshot: Value = serde_json::from_slice(&std::fs::read(recovery_path())?)?;
+                assert_eq!(serde_json::from_value::<Vec<u8>>(stored_snapshot["active"]["original"].clone())?, host_snapshot);
                 assert!(!String::from_utf8(std::fs::read(recovery_path())?)?.contains(&factor));
                 let mut pending = load_journal()?;
                 rollback_record_inner(&mut pending, false)?;
