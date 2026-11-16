@@ -85,22 +85,27 @@ impl AccountRequest {
 
     /// The caller has consumed the launch grant, checked its maintenance phase,
     /// bound these parameters to it, and installed the private parent watcher.
-    pub(crate) fn execute(&self, request: &RpcRequest, ownership: Option<AuthOwnership>) -> Result<HostAuthAccountResult> {
+    pub(crate) fn execute(&self, request: &RpcRequest, ownership: Option<AuthOwnership>)
+        -> Result<respire_protocol::host_control::HostAuthLoginReply> {
         let id = request.operation_id.as_deref().context("account operation ID is missing")?;
         let key = request.idempotency_key.as_deref().context("account idempotency key is missing")?;
         if let Self::Complete(params) = self {
             ensure!(ownership.is_none(), "completion must not hold the running target's library lock");
-            return login_transaction::control_account_complete(&params.binding.installation_root,
-                &params.binding.profile, &params.identity, id, key, verify_target_runtime);
+            let receipt = login_transaction::control_account_complete(&params.binding.installation_root,
+                &params.binding.profile, &params.identity, id, key, params.candidate.as_ref(),
+                params.migration_password.as_deref(), verify_target_runtime)?;
+            return login_transaction::login_reply(receipt);
         }
         let ownership = ownership.context("account library ownership is missing")?;
-        match self {
-            Self::Register(params) => login_transaction::control_register(&ownership, id, key, params),
-            Self::Login(params) => login_transaction::control_login(&ownership, id, key, params),
-            Self::Result(params) => login_transaction::control_account_result(&ownership, &params.identity, id, key),
-            Self::Rollback(params) => login_transaction::control_account_rollback(ownership, &params.identity, id, key),
+        let receipt = match self {
+            Self::Register(params) => login_transaction::control_register(&ownership, id, key, params)?,
+            Self::Login(params) => return login_transaction::control_login(&ownership, id, key, params),
+            Self::Result(params) => login_transaction::control_account_result(&ownership, &params.identity, id, key,
+                params.candidate.as_ref())?,
+            Self::Rollback(params) => login_transaction::control_account_rollback(ownership, &params.identity, id, key)?,
             Self::Complete(_) => anyhow::bail!("completion cannot use account library ownership"),
-        }
+        };
+        login_transaction::login_reply(receipt)
     }
 }
 
