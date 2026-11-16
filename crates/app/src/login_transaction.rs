@@ -357,12 +357,12 @@ mod tests {
         ownership.recover(&HostAuthIdentity::Absent)?;
         ownership.recover(&HostAuthIdentity::Absent)?;
         assert_eq!(std::fs::read(crate::service::client_config_path())?, current_config);
-        let result = control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, true)?;
+        let result = control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, false, true, None)?;
         assert_eq!(result.outcome, HostAuthOutcome::RolledBack);
         assert!(result.super_password.is_none());
         assert!(!root.join("session.json").exists());
-        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, true, false).is_err());
-        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &uuid::Uuid::new_v4().to_string(), &id, false, false).is_err());
+        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &id, &id, true, false, None).is_err());
+        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &uuid::Uuid::new_v4().to_string(), &id, false, false, None).is_err());
         journal = load_journal()?;
         assert!(journal.active.is_none());
         assert_eq!(journal.operations.len(), 1);
@@ -614,7 +614,8 @@ mod tests {
         let ownership = AuthOwnership::acquire(&root, &root)?;
         let refusal_id = uuid::Uuid::new_v4().to_string();
         let previous_receipts = load_journal()?.operations.len();
-        let refused = control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, false)?;
+        let material = keygen_existing_protocol::host_material()?;
+        let refused = control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, false, Some(&material))?;
         assert_eq!(refused.outcome, HostAuthOutcome::RolledBack);
         assert!(refused.super_password.is_none());
         assert!(refused.session_sha256.is_none());
@@ -625,11 +626,11 @@ mod tests {
         assert!(record.phase == AuthPhase::RolledBack);
         assert!(record.candidate.is_none() && record.candidate_sha256.is_none() && record.backend.is_none());
         let receipt_bytes = std::fs::read(recovery_path())?;
-        assert_eq!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, true)?.outcome,
+        assert_eq!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, true, None)?.outcome,
             HostAuthOutcome::RolledBack);
-        assert_eq!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, false)?.outcome,
+        assert_eq!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, false, false, Some(&material))?.outcome,
             HostAuthOutcome::RolledBack);
-        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, true, false).is_err());
+        assert!(control_keygen(&ownership, &HostAuthIdentity::Absent, &refusal_id, &refusal_id, true, false, None).is_err());
         assert_eq!(std::fs::read(recovery_path())?, receipt_bytes);
         assert_eq!(std::fs::read(&database_path)?, original_database);
         assert!(!root.join("session.json").exists());
@@ -1432,8 +1433,10 @@ fn require_persistent_auth_backend(backend: &str) -> Result<()> {
 pub fn control_keygen(
     ownership: &AuthOwnership, identity: &HostAuthIdentity, operation_id: &str,
     idempotency_key: &str, force: bool, query_only: bool,
+    material: Option<&respire_protocol::HostAuthKeygenMaterial>,
 ) -> Result<HostAuthResult> {
     crate::service::require_profile_change_host()?;
+    ensure!(query_only || material.is_some(), "keygen mutation requires host-provided key material");
     canonical_operation_id(operation_id)?;
     ensure!(!idempotency_key.is_empty() && idempotency_key.len() <= 128
         && idempotency_key.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
@@ -1451,13 +1454,46 @@ pub fn control_keygen(
         ensure!(record.operation_id == operation_id && record.idempotency_key == idempotency_key
             && record.fingerprint == fingerprint && record.root == ownership.root && record.profile == ownership.profile,
             "auth idempotency conflict");
+        if let (Some(material), Some(_)) = (material, record.candidate.as_ref()) {
+            let session = validate_candidate(record)?;
+            ensure!(session["kdf_salt"].as_str() == Some(material.kdf_salt.as_str())
+                && session["wrapped_urk"].as_str() == Some(material.wrapped_urk.as_str())
+                && session["urk_nonce"].as_str() == Some(material.urk_nonce.as_str())
+                && record.alias == material.keyring_account
+                && record.backend.as_deref() == Some(material.keyring_backend.as_str()),
+                "host keygen material differs from the original operation");
+            crate::memory::SessionKeys::unlock_v4(&material.super_password,
+                &material.kdf_salt, &material.wrapped_urk, &material.urk_nonce)
+                .context("host keygen material does not unlock the original candidate")?;
+        }
         return auth_result(record);
     }
     ensure!(!query_only, "auth operation has no admission receipt");
+    let material = material.context("keygen mutation requires host-provided key material")?;
+    ensure!(material.keyring_account.starts_with("login-") && material.keyring_account.len() <= 128
+        && material.keyring_account.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "invalid host keygen credential account");
+    require_persistent_auth_backend(&material.keyring_backend)?;
+    #[cfg(all(target_os = "linux", any(feature = "native-credential-fixtures", not(any(test, feature = "test-support")))))]
+    ensure!(material.keyring_backend == "secret_service", "unsupported host keygen credential backend");
+    #[cfg(any(not(target_os = "linux"), all(any(test, feature = "test-support"), not(feature = "native-credential-fixtures"))))]
+    ensure!(material.keyring_backend == "native", "unsupported host keygen credential backend");
+    ensure!(!material.keyring_backend.is_empty() && !material.super_password.is_empty(),
+        "host keygen credential metadata or key is missing");
+    crate::memory::SessionKeys::unlock_v4(&material.super_password,
+        &material.kdf_salt, &material.wrapped_urk, &material.urk_nonce)
+        .context("host keygen material does not unlock the candidate")?;
     // Retaining receipts is necessary to prevent an old operation ID from rotating keys again.
     ensure!(journal.operations.len() < 4096, "auth receipt capacity reached; existing results remain queryable");
     let original = read_original(&ownership.profile)?;
-    let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
+    let alias = material.keyring_account.clone();
+    ensure!(!journal.operations.iter().any(|record| record.alias == alias),
+        "host keygen credential slot already belongs to an operation");
+    if let Some(bytes) = original.as_deref() {
+        let session: Value = serde_json::from_slice(bytes).context("invalid keygen source session")?;
+        ensure!(session["keyring_account"].as_str() != Some(alias.as_str()),
+            "host keygen credential slot belongs to the original session");
+    }
     let config = match std::fs::read(crate::service::client_config_path()) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1476,21 +1512,17 @@ pub fn control_keygen(
         return auth_result(&journal.operations[index]);
     }
     let mutation = (|| -> Result<()> {
-        let (secret, _urk, salt, wrapped, nonce) = crate::auth::new_vault_v4()?;
-        let mut session = json!({"vault_version":4,"kdf_salt":salt,"wrapped_urk":wrapped,
-            "urk_nonce":nonce,"keyring_account":alias,"auth_operation_id":operation_id});
-        let backend = crate::keystore::import_credential_checkpoint(&alias, "super", &secret, |backend| {
-            require_persistent_auth_backend(backend)?;
-            journal.active.as_mut().context("auth recovery is missing")?.backends.push(backend.to_owned());
-            session["keyring_backend"] = json!(backend);
-            let candidate = serde_json::to_vec_pretty(&session)?;
-            journal.operations[index].backend = Some(backend.to_owned());
-            journal.operations[index].candidate_sha256 = Some(digest(&candidate));
-            journal.operations[index].candidate = Some(candidate);
-            save_journal(&mut journal)
-        })?;
-        ensure!(journal.operations[index].backend.as_deref() == Some(backend), "auth backend checkpoint mismatch");
-        verify_candidate(&journal.operations[index])?;
+        let session = json!({"vault_version":4,"kdf_salt":material.kdf_salt,
+            "wrapped_urk":material.wrapped_urk,"urk_nonce":material.urk_nonce,
+            "keyring_account":alias,"keyring_backend":material.keyring_backend,
+            "auth_operation_id":operation_id});
+        // Custody is checkpointed by the host before this request; no plaintext enters recovery.
+        journal.active.as_mut().context("auth recovery is missing")?.backends.push(material.keyring_backend.clone());
+        let candidate = serde_json::to_vec_pretty(&session)?;
+        journal.operations[index].backend = Some(material.keyring_backend.clone());
+        journal.operations[index].candidate_sha256 = Some(digest(&candidate));
+        journal.operations[index].candidate = Some(candidate);
+        validate_candidate(&journal.operations[index])?;
         journal.operations[index].phase = AuthPhase::Prepared;
         save_journal(&mut journal)?;
         ensure!(read_original(&ownership.profile)? == original, "auth session changed before commit");
