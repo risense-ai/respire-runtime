@@ -1,127 +1,37 @@
 # Runtime test ownership and execution
 
-`workspace-tests` in `.github/workflows/ci.yml` executes the Runtime workspace
-source tests on every PR, main/release push and manual run. This includes the
-Runtime business implementation and snapshot/store unit tests. The separate
-`cli_business_tests --no-run` step checks compilation only; it is not execution
-evidence.
+PR, main/release pushes and manual source CI run the control-contract checks,
+protocol tests and a locked check of the current Runtime libraries and binaries.
+The source CI does not download CLI products, install models, freeze candidates,
+or require cross-repository execution reports.
 
-All five modules in `crates/commands/examples/cli_business_tests` invoke the real
-CLI: memory revision, diary identity, snapshot lifecycle, account, and
-capture/parser behavior. The current inventory is 30 cases; this is a dated
-inventory, not a fixed execution limit. These are cross-repository integration
-fixtures owned by Runtime, not Runtime-only unit tests.
+## Release acceptance
 
-## External joint execution: CLI is the authoritative entry point
+The release workflow keeps the current eight native platform builds, exact SDK
+locks, payload manifests and public asset digests. After publication, each native
+runner downloads the actual public release assets and verifies complete payloads,
+Runtime identity and normal drain. Build success is not native acceptance.
 
-The single source-integration coverage entry point for these fixtures is
-`risense-ai/respire-cli`, `.github/workflows/ci.yml`, job `runtime-integration`.
-Runtime owns their source and assertions; CLI owns this external joint execution
-and its CLI coverage counters. Runtime CI only compiles the harness. It does not
-execute these business fixtures, call a second runner, or claim their acceptance.
+Linux GNU x64, Windows x64 and macOS ARM64 additionally run the complete workspace
+source tests once per OS. This includes database migrations, snapshots, recovery,
+crypto, admission replay and ownership checks. Existing source-unit fixtures use
+`RSRS_CORE_TEST_MODE=1`; this mode never enters the public product smoke. Source
+fixture success is reported separately from execution of the published binaries.
 
-The CLI job checks out the exact Runtime harness commit in its
-`runtime-tests-source.json`, verifies checkout HEAD and matching SDK locks, and
-uses the instrumented CLI from that same run's `coverage-core` or
-`coverage-runtime_smoke` artifact. Its integration record binds the CLI source,
-run/attempt, source archive digest, CLI executable digest and Runtime harness SHA.
-The official installer supplies the version in the CLI's `runtime-pin.json`;
-the real CPU model and private account credential fixture remain required.
+## Latest-component integration
 
-Keep the official Runtime product source SHA, harness source SHA and CLI source
-SHA distinct. For the current dev.15 product, the expected official source is
-`9338a6654cf395525668dd9faaea3f401abe2d5a`; a harness revision does not replace that
-product identity. The integration job's raw result and exact asset bindings are
-needed before reporting an external joint pass. Merely finding a workflow,
-compiling a harness, or listing test names is not execution evidence.
+CLI and Client2 own keychain access, installation, startup and Runtime process
+management. Their final release acceptance supplies the latest published Runtime
+through the protocol. Runtime retains the business assertions and core/RPC source
+unit tests. Native HTTP integration fixtures remain distinct from source checks.
 
-The current CLI job splits memory revision, diary identity, snapshot lifecycle
-and capture/parser cases into `core`, and account cases into `runtime_smoke`.
-The witness failure assertion remains unchanged. No Runtime-local execution
-report is produced for these fixtures. The CLI Linux integration also does not
-replace native Windows/macOS, release-asset or three-repository candidate gates.
+Historical compatibility concerns databases: stable releases and DEV checkpoints
+that changed the database upgrade to the current DEV. Preserve the original keys,
+existing decrypted records, pending sync data and continued remember/recall/sync.
+Do not create a compatibility matrix for older hosts calling a new Runtime, or add
+DEV upgrade pairs when no database migration occurred.
 
-### Outstanding execution evidence
-
-- The CLI wiring now compares the installed metadata's `source_commit` with
-  the independent expected dev.15 product SHA and records metadata/binary
-  digests. Cloud execution must still prove these checks ran successfully.
-- The CLI wiring retains the required per-module counts and also checks that
-  every listed harness case has an execution assignment. New cases require
-  updating this inventory without dropping existing assertions.
-- The CLI job stages SDK libraries beside its Cargo example harness. Successful
-  dynamic loading and case execution still require evidence from the exact
-  built executable; static wiring checks cannot establish that result.
-- A normal CLI candidate with official dev.15 passed an isolated Windows batch
-  of 31 cases: HTTP 14, memory 6, snapshot 8 and account 3. Report SHA-256:
-  `0ed0d390eda6f87c9a93bc22fc4c6fe2a31a0a482b7b6bc742be6498b088fbf1`.
-  The frozen seven harness source files match `9338` after CRLF normalization.
-  This batch did not execute diary/capture or the new cloud coverage wiring;
-  the earlier intermittent OS5 snapshot failure remains unexplained.
-
-`scripts/required-tests.json` and its candidate/run/attempt-bound report gate are
-unchanged. Missing required tests remain missing. These integration logs are not
-`required-execution/v2` reports and cannot satisfy G1/G2 by themselves.
-
-## Same-name `net_rpc` cases are not additive coverage
-
-The Runtime and CLI each compile their own `crates/commands/src/net_rpc.rs`.
-The Windows inventories overlap by 11 test names; Linux additionally includes
-the two same-name procfs/exited-child cases. Report execution counts per binary,
-but do not sum these names as independent behavior coverage.
-
-The comparison below used Runtime `cebfca8` and the frozen CLI worktree
-`release-cli-dev5-final-20261106`. Source-file SHA-256 values were
-`e43e65fac60a776139010f811e5cfb3603ed9429c6cd57bcb0f514434ecb7159`
-(Runtime) and
-`ac1a48cad2b16cbefe50c99414ea6591e1edb15cbd137a8e4e3de8cd88444ff7`
-(CLI). Recheck the comparison if either implementation changes.
-
-| Same-name case(s) | Actual overlap and owner |
-| --- | --- |
-| `rpc_timeout_recognizes_commands_after_global_values_and_equals_forms`, `rpc_timeout_does_not_treat_tracking_values_or_other_methods_as_commands` | Identical assertions; timeout implementation differs only in command-parser module reference. Client request-budget behavior belongs to CLI. Runtime still has its separate implementation, so these tests are retained pending an implementation ownership change. |
-| `port_is_open_sees_local_listener`, `default_port_is_15169` | Identical assertions. Listener probing is client behavior; the default port is also used by Runtime startup. Keep protection for both compiled copies while they exist. |
-| `origin_empty_is_cli` | Identical assertions and implementation. Runtime `runtime_http.rs` actually calls `origin_ok` for HTTP requests and upgrades. This is server access-control coverage and must remain in Runtime despite the test name. |
-| `version_newer_dev` | Identical assertions. A common version-utility check, not two independently covered behaviors. |
-| `rpc_port_reads_env`, `token_env_beats_file` | Only the environment-module namespace differs. Port selection is used by the server; host token precedence belongs primarily to the client. These are tests of separate compiled copies, not proof of additional behavior. |
-| `health_shape` | CLI adds `Health.rpc` default/payload assertions absent in Runtime. Shared baseline coverage, different total assertions. |
-| `persist_and_load_token_file` | CLI additionally rejects empty, whitespace, invalid UTF-8 and directory token inputs. The Runtime case is not a substitute for those client assertions. |
-| `response_after_client_deadline_reports_unknown_and_can_be_inspected_without_replay` | Different implementations and assertions. Runtime uses delayed loopback transport and an operation-result query; CLI additionally exercises strict response/operation/scope binding and malformed receipt rejection. Same name does not establish a replacement. |
-
-For the 11 Windows names, six function bodies are identical, two differ only in
-environment namespace, and three have substantive assertion differences. No case
-was deleted on the basis of its name. Moving the duplicated client implementation
-is a product change outside this test/CI-only task; the Runtime server checks and
-all current assertions remain in place. The VM's `commands37/app3` inventory is
-an execution inventory pending its own frozen executable digests, not 40 new
-non-overlapping behaviors or a claim of successful execution.
-
-## Explicit unpublished account candidate
-
-Before publishing the next Runtime, the CLI's existing
-`migration-keyring-check.yml` can also execute the original
-`account::authorization_preserves_and_commits_profiles` test. Dispatch that
-workflow on the exact CLI candidate commit, supplying `runtime_candidate_sha`
-with the full Runtime commit that includes this harness. Both checkouts must
-match those identities and use identical SDK locks. The ordinary official-pin
-integration jobs above remain unchanged.
-
-This optional native Linux job builds both binaries and the original harness,
-uses the existing token-free SDK cache and real pinned CPU model, and installs
-an explicitly unpublished local candidate with `runtime install --file`.
-The Runtime version must be its real next DEV version, different from the
-published CLI pin. The generated archive has a complete file inventory and
-SHA-256 digests; the product installer creates and validates its normal receipt.
-The test-only `RSRS_RUNTIME_CANDIDATE_METADATA` opt-in binds that exact receipt,
-Runtime source/binary and CLI source/binary. It does not change production
-installation checks, protocol, client authentication or the official release pin.
-
-The existing private Secret Service wrapper checks native keyring roundtrips
-before and after the unchanged account test, using disposable HOME/XDG paths
-and a private D-Bus session. The account's synthetic loopback server and existing
-unknown-outcome, rollback and credential preservation assertions are retained.
-Only sanitized `result.json` is uploaded. Raw product replies and private state
-remain in runner-temporary files; do not upload them when diagnosing a failure.
-A missing test, failed cleanup, mismatched identity or failed test fails the job.
-This one-test source-candidate result is not a release-asset, full-platform,
-coverage, G1 or G2 acceptance report.
+The historical frozen G1 chain and prebuilt cross-repository test bundles have
+been removed. Missing acceptance evidence remains unverified; source checks,
+compilation, test-name inventories and a successful download cannot substitute
+for final published-product or database upgrade results.
