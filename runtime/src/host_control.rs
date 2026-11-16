@@ -688,8 +688,9 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "auth control could not acquire the authorized library"))?;
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "auth control parent watch failed"))?;
-        ownership.recover(&params.identity).map_err(|_| ("auth_recovery_required", "auth transaction recovery requires attention"))?;
-        crate::startup_identity::verify_auth_control_binding(&params.binding, &params.identity)
+        ownership.recover_keygen(&params.identity, params.material.as_ref())
+            .map_err(|_| ("auth_recovery_required", "auth transaction recovery requires attention"))?;
+        crate::startup_identity::verify_keygen_control_binding(&params.binding, &params.identity)
             .map_err(|_| ("scope_mismatch", "auth control identity does not match the consumed grant"))?;
         *control_ready = true;
         let result = respire_app::login_transaction::control_keygen(&ownership, &params.identity,
