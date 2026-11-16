@@ -137,6 +137,18 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
         let mut missing_snapshot = snapshot;
         missing_snapshot["material"].as_object_mut().context("snapshot material is an object")?.remove("session_sha256");
         assert!(serde_json::from_value::<respire_protocol::maintenance_control::MaintenanceControlParams>(missing_snapshot).is_err());
+        let migration = json!({"candidates":[{"session_sha256":"a".repeat(64),"factors":factors}],
+            "custody":{"keyring_account":"fixture-migration","keyring_backend":"native",
+                "legacy_secret_backend":null,"login_password_retained":true}});
+        let parsed: respire_protocol::migration_control::HostMigrationMaterial =
+            serde_json::from_value(migration.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, migration);
+        let mut unknown_migration = migration.clone();
+        unknown_migration["custody"]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<respire_protocol::migration_control::HostMigrationMaterial>(unknown_migration).is_err());
+        let mut missing_migration = migration;
+        missing_migration.as_object_mut().context("migration material is an object")?.remove("candidates");
+        assert!(serde_json::from_value::<respire_protocol::migration_control::HostMigrationMaterial>(missing_migration).is_err());
         let mut unknown = factors.clone();
         unknown["unexpected"] = json!(true);
         assert!(serde_json::from_value::<respire_protocol::host_control::HostAuthVaultFactors>(unknown).is_err());
@@ -153,6 +165,8 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     let mut unknown = query;
     unknown["verified"] = json!(true);
     assert!(serde_json::from_value::<HostAuthAccountParams>(unknown).is_err());
+    assert_eq!(serde_json::to_value(respire_protocol::migration_control::HostMigrationOutcome::CredentialsRequired)?,
+        json!("credentials_required"));
     let key_input = json!({"password":null,"super_password":null,"account_secret":null,"totp":null,
         "material":{"keyring_account":"fixture-key","keyring_backend":"native",
             "reset":auth["material"],"challenge":"private-key-continuation"}});
@@ -169,6 +183,24 @@ fn host_control_dto_roundtrip_rejects_unknown_fields() -> Result<()> {
     let mut unknown = key_input;
     unknown["material"]["reset"]["unexpected"] = json!(true);
     assert!(serde_json::from_value::<respire_protocol::key_control::HostKeyInput>(unknown).is_err());
+    let event = json!({"plugin_event":1,"id":"12345678-1234-4234-8234-123456789abc",
+        "event":"post-sync","data":{"pulled":2,"pushed":3}});
+    let parsed: respire_protocol::host_plugin::HostPluginEventRequest = serde_json::from_value(event.clone())?;
+    assert_eq!(serde_json::to_value(parsed)?, event);
+    let mut unknown = event.clone();
+    unknown["data"]["command"] = json!("arbitrary-shell");
+    assert!(serde_json::from_value::<respire_protocol::host_plugin::HostPluginEventRequest>(unknown).is_err());
+    let mut unknown = event;
+    unknown["event"] = json!("exec");
+    assert!(serde_json::from_value::<respire_protocol::host_plugin::HostPluginEventRequest>(unknown).is_err());
+    for result in [json!({"status":"completed","warnings":[]}), json!({"status":"failed","error":"fixture failure"})] {
+        let ack = json!({"plugin_event_ack":1,"id":"12345678-1234-4234-8234-123456789abc","result":result});
+        let parsed: respire_protocol::host_plugin::HostPluginEventAck = serde_json::from_value(ack.clone())?;
+        assert_eq!(serde_json::to_value(parsed)?, ack);
+        let mut unknown = ack;
+        unknown["result"]["retry"] = json!(true);
+        assert!(serde_json::from_value::<respire_protocol::host_plugin::HostPluginEventAck>(unknown).is_err());
+    }
     Ok(())
 }
 

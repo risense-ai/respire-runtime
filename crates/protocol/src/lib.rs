@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod maintenance_control;
 pub mod host_control;
+pub mod host_plugin;
 pub mod model_control;
 pub mod secret_control;
 pub mod config_control;
