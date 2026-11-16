@@ -203,12 +203,7 @@ fn unlock_local_session_snapshot(data: &serde_json::Value) -> Result<(SessionKey
     let pass = if data["vault_version"].as_i64().unwrap_or(1) == 1 && supplied_pass.is_none() {
         match data["keyring_backend"].as_str() {
             Some(backend) => crate::keystore::read_imported_v1_password(
-                data["keyring_account"].as_str().unwrap_or(&user), backend).map_err(|error| {
-                    if matches!(error.downcast_ref::<respire_protocol::credentials::CredentialError>(),
-                        Some(respire_protocol::credentials::CredentialError::NoEntry)) {
-                        anyhow::Error::new(SessionCredentialRequired("original login password is required"))
-                    } else { error }
-                })?,
+                data["keyring_account"].as_str().unwrap_or(&user), backend)?,
             None => crate::keystore::load_login_pass(&user).ok_or_else(|| anyhow::Error::new(
                 SessionCredentialRequired("original login password is required")))?,
         }
