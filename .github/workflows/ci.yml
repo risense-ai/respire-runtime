@@ -115,6 +115,7 @@ jobs:
       - name: Run affected authentication recovery unit tests
         if: steps.auth-tests.outputs.required == 'true'
         run: |
+          cargo test --locked -p respire_app_domain --lib keystore::host_tests::imported_read_preserves_missing_credential_type -- --exact
           cargo test --locked -p respire_app --lib login_transaction::tests:: -- --test-threads=1
 
   ci-complete:
