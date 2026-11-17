@@ -148,6 +148,24 @@ jobs:
           else
             echo 'RPC admission unit tests are not affected by this change.'
           fi
+      - name: Check core configuration with the real pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml crates/app-domain/src/core_config.rs crates/app-domain/src/feedback.rs crates/app-domain/src/read_heat.rs crates/app-domain/src/recall_fusion.rs | grep -q .; then
+            unset RSRS_CORE_TEST_MODE ONEMEMORY_CORE_TEST_MODE RESPIRE_CORE_TEST_MODE
+            cargo test --locked -p respire_app_domain --lib feedback::tests::defaults_are_off_and_old_sdk_cannot_silently_accept_enabled_feedback -- --exact --test-threads=1
+            cargo build --locked -p respire_runtime --bin rsrs-runtime
+            node scripts/smoke-runtime-release.mjs --core-config-candidate
+          else
+            echo 'Core query configuration is not affected by this change.'
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-config-candidate-${{ runner.os }}
+          path: smoke-report/core-config-candidate.json
+          if-no-files-found: ignore
       - name: Run affected host event unit tests
         shell: bash
         run: |

@@ -207,6 +207,114 @@ if (process.argv.includes('--check-native-intel')) {
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'release smoke requires a dedicated GitHub runner');
 assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted', 'release smoke requires an ephemeral hosted runner');
 assert.ok(isAbsolute(process.env.RUNNER_TEMP ?? ''), 'RUNNER_TEMP must be absolute');
+if (process.argv.includes('--core-config-candidate')) {
+  const binary = resolve('target/debug', `rsrs-runtime${process.platform === 'win32' ? '.exe' : ''}`);
+  const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'respire-core-config-'));
+  const modelDir = join(root, 'empty-models');
+  mkdirSync(modelDir);
+  mkdirSync(join(root, 'runtime'));
+  const token = randomBytes(32).toString('hex');
+  writeFileSync(join(root, 'runtime/token'), token, {mode: 0o600});
+  writeFileSync(join(root, 'session.json'), JSON.stringify(syntheticSession().session), {mode: 0o600});
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(?:RSRS_|ONEMEMORY_|RESPIRE_|GH_TOKEN$|GITHUB_TOKEN$)/i.test(key)));
+  Object.assign(environment, {RSRS_DATA_DIR: root, RSRS_M3_DIR: modelDir, RSRS_NO_AUTOSYNC: '1',
+    RSRS_CLIENT_ONLY: '0', RSRS_NO_AUTOSTART: '0'});
+  const port = 15000 + (process.pid % 20000), endpoint = `http://127.0.0.1:${port}`;
+  const child = spawn(binary, ['serve', '--host', '127.0.0.1', '--port', String(port), '--data-dir', root],
+    {env: environment, stdio: ['ignore', 'ignore', 'inherit']});
+  let exited, spawnError;
+  child.once('error', error => { spawnError = error; });
+  const exit = new Promise(resolveExit => child.once('close', (code, signal) => {
+    exited = {code, signal}; resolveExit(exited);
+  }));
+  const report = {source_commit: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(),
+    binary_sha256: digest(readFileSync(binary)), core_test_mode: false, passed: false, responses: []};
+  try {
+    let health;
+    for (const deadline = Date.now() + 90000; Date.now() < deadline;) {
+      if (spawnError) throw spawnError;
+      assert.equal(exited, undefined, 'candidate exited before readiness');
+      let response;
+      try { response = await fetch(`${endpoint}/api/health`, {signal: AbortSignal.timeout(3000)}); }
+      catch { await delay(250); continue; }
+      const candidate = await response.json();
+      if (candidate.startup_complete && candidate.credential_state === 'required') { health = candidate; break; }
+      await delay(250);
+    }
+    assert.ok(health, 'candidate did not reach locked readiness');
+    assert.equal(health.store_ready, false);
+    const scope = Object.fromEntries(['account_id', 'instance_id', 'generation'].map(key => [key, health[key]]));
+    let sequence = 0;
+    async function call(method, payload, operation = `core-config-${++sequence}`) {
+      const request = {v: 1, id: `${operation}-request`, operation_id: operation,
+        idempotency_key: `${operation}-key`, scope, method, args: [JSON.stringify(payload)]};
+      const response = await fetch(`${endpoint}/api/rpc`, {method: 'POST',
+        headers: {'Content-Type': 'application/json', Authorization: `Bearer ${token}`},
+        body: JSON.stringify(request), signal: AbortSignal.timeout(30000)});
+      assert.equal(response.status, 200);
+      const reply = await response.json();
+      report.responses.push({request, reply});
+      for (const key of ['id', 'scope', 'operation_id', 'idempotency_key']) assert.deepEqual(reply[key], request[key]);
+      return reply;
+    }
+    const initial = await call('core_config.read', {schema_version: 1});
+    assert.equal(initial.ok, true);
+    assert.deepEqual(initial.envelope.summary.capabilities, {read_heat_contract: 1, recall_fusion_contract: 1});
+    assert.equal(initial.envelope.summary.revision, 0);
+    let birth;
+    if (process.platform === 'linux') birth = readFileSync(`/proc/${process.pid}/stat`, 'utf8').split(') ').at(-1).split(' ')[19];
+    else if (process.platform === 'win32') birth = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `(Get-Process -Id ${process.pid}).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`], {encoding: 'utf8'}).trim();
+    else birth = execFileSync('ps', ['-p', String(process.pid), '-o', 'lstart='], {encoding: 'utf8'}).trim();
+    const marker = {schema: 1, id: 'core-config-candidate', phase: 'Paused', owner_pid: process.pid,
+      owner_birth: birth, expected_version: '2.0.0-dev.24', expected_profile: realpathSync(root)};
+    const markerBytes = Buffer.from(JSON.stringify(marker));
+    mkdirSync(join(root, 'runtime/autostart'));
+    writeFileSync(join(root, 'runtime/autostart/maintenance.json'), markerBytes, {mode: 0o600});
+    const maintenance = {marker_sha256: digest(markerBytes), coordinator_id: marker.id,
+      controller_pid: process.pid, controller_birth: birth, issuer_cli_version: marker.expected_version};
+    const candidate = {read_heat: false, recall_fusion: {fusion: 'attention', fusion_alpha: 0.3}};
+    const validated = await call('core_config.validate', {schema_version: 1, maintenance, candidate});
+    assert.equal(validated.ok, true);
+    assert.equal(validated.envelope.summary.state, 'validated');
+    const payload = {schema_version: 1, maintenance, candidate, expected_revision: 0};
+    const applied = await call('core_config.apply', payload, 'original-apply');
+    assert.equal(applied.ok, true);
+    assert.equal(applied.envelope.summary.state, 'applied');
+    assert.equal(applied.envelope.summary.revision, 1);
+    assert.equal(applied.envelope.summary.effective.read_heat, false);
+    assert.equal(applied.envelope.summary.effective.recall_fusion.fusion, 'attention');
+    assert.deepEqual((await call('core_config.apply', payload, 'original-apply')).envelope, applied.envelope);
+    const current = await call('core_config.read', {schema_version: 1, maintenance});
+    assert.equal(current.ok, true);
+    assert.deepEqual(current.envelope.summary.effective, applied.envelope.summary.effective);
+    const stale = await call('core_config.apply', payload);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.code, 'core_config_rejected');
+    const unauthorized = await call('core_config.apply', {...payload, expected_revision: 1, maintenance: null});
+    assert.equal(unauthorized.code, 'core_config_rejected');
+    const resultRequest = {v: 1, id: 'result-query', scope, method: 'runtime.result', args: ['original-apply']};
+    const result = await fetch(`${endpoint}/api/rpc`, {method: 'POST', headers: {'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`}, body: JSON.stringify(resultRequest), signal: AbortSignal.timeout(30000)});
+    const receipt = await result.json();
+    assert.equal(receipt.envelope.summary.state, 'completed');
+    assert.deepEqual(receipt.envelope.summary.response.envelope, applied.envelope);
+    assert.equal(existsSync(join(root, 'agent.json')), false, 'core interface wrote host configuration');
+    assert.equal(existsSync(join(root, 'rsrs.db')), false, 'keyless core configuration opened a database');
+    assert.deepEqual(readdirSync(modelDir), []);
+    report.passed = true;
+  } catch (error) {
+    report.error = String(error); process.exitCode = 1; console.error(error);
+  } finally {
+    if (!exited) child.kill();
+    await Promise.race([exit, delay(5000)]);
+    mkdirSync(resolve('smoke-report'), {recursive: true});
+    writeFileSync(resolve('smoke-report/core-config-candidate.json'), JSON.stringify(report, null, 2) + '\n');
+    if (report.passed) rmSync(root, {recursive: true});
+  }
+  process.exit(process.exitCode || 0);
+}
 const target = process.env.RUNTIME_TARGET, version = process.env.RUNTIME_VERSION;
 assert.match(target ?? '', /^[A-Za-z0-9_-]+$/);
 assert.match(version ?? '', /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/);

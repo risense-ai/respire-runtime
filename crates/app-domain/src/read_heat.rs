@@ -41,6 +41,9 @@ pub fn reload() -> Result<Option<bool>> {
 }
 
 pub fn effective() -> Result<Option<bool>> {
+    if let Some(candidate) = crate::core_config::active()? {
+        return Ok(candidate.read_heat.as_bool());
+    }
     let path = crate::service::agent_config_path();
     let effective = EFFECTIVE.lock().map_err(|_| anyhow::anyhow!("read_heat configuration lock poisoned"))?;
     if let Some((loaded_path, value)) = effective.as_ref() {

@@ -200,6 +200,32 @@ fn verify_completion_marker(bytes: &[u8], expected_sha256: &str) -> Result<()> {
     Ok(())
 }
 
+/// Public query configuration keeps the host's exact Paused maintenance authority.
+pub(crate) fn verify_core_config_maintenance(
+    binding: Option<&respire_protocol::HostControlMaintenanceBinding>,
+) -> Result<()> {
+    let roots = respire_app::service::resolved_roots()?;
+    let marker = read_private_file(&roots.installation_root.join("runtime/autostart/maintenance.json"))?;
+    match (marker, binding) {
+        (None, None) => Ok(()),
+        (Some(bytes), Some(binding)) => {
+            let marker = parse_control(&bytes)?;
+            anyhow::ensure!(hash(&bytes) == binding.marker_sha256
+                && marker["schema"] == 1 && marker["phase"] == "Paused"
+                && marker["id"] == binding.coordinator_id && !binding.coordinator_id.is_empty()
+                && marker["owner_pid"] == binding.controller_pid
+                && marker["owner_birth"] == binding.controller_birth
+                && marker["expected_version"] == binding.issuer_cli_version
+                && !binding.issuer_cli_version.is_empty() && !binding.controller_birth.is_empty()
+                && marker["expected_profile"].as_str().map(Path::new) == Some(roots.account_data_root.canonicalize()?.as_path())
+                && process_birth(binding.controller_pid)?.as_deref() == Some(binding.controller_birth.as_str()),
+                "core configuration requires the exact live Paused maintenance owner");
+            Ok(())
+        }
+        _ => anyhow::bail!("core configuration maintenance binding is missing or stale"),
+    }
+}
+
 pub(crate) fn consumed_control_grant() -> Result<&'static LaunchGrant> {
     STARTUP.get().and_then(|startup| startup.grant.as_ref())
         .context("runtime control grant is missing")

@@ -108,7 +108,7 @@ pub fn query_settings() -> Result<Map<String, Value>> {
 
 pub fn receipt() -> Result<Value> {
     let configured = configured()?;
-    let settings = effective(&configured)?;
+    let settings = crate::core_config::query_settings()?;
     let defaults = defaults();
     let effective: Map<String, Value> = defaults
         .keys()

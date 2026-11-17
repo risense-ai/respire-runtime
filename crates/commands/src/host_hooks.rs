@@ -26,6 +26,7 @@ pub struct McpHttpIn {
 /// Loopback HTTP handler result shared by the runtime transport.
 pub type HttpReply = (u16, &'static str, Vec<u8>);
 
+pub type VerifyCoreConfigMaintenance = fn(Option<&respire_protocol::HostControlMaintenanceBinding>) -> Result<()>;
 pub type BackgroundPaused = fn() -> bool;
 pub type CheckDirectAccess = fn() -> Result<()>;
 pub type NoteCredentialAccess = fn(bool);
@@ -44,6 +45,7 @@ pub type McpHttpResponse = fn(McpHttpIn) -> HttpReply;
 
 #[derive(Default)]
 pub struct HostHooks {
+    pub verify_core_config_maintenance: Option<VerifyCoreConfigMaintenance>,
     pub background_paused: Option<BackgroundPaused>,
     pub check_direct_access: Option<CheckDirectAccess>,
     pub note_credential_access: Option<NoteCredentialAccess>,
@@ -61,6 +63,7 @@ pub struct HostHooks {
     pub mcp_http_response: Option<McpHttpResponse>,
 }
 
+static VERIFY_CORE_CONFIG_MAINTENANCE: OnceLock<VerifyCoreConfigMaintenance> = OnceLock::new();
 static BACKGROUND_PAUSED: OnceLock<BackgroundPaused> = OnceLock::new();
 static CHECK_DIRECT_ACCESS: OnceLock<CheckDirectAccess> = OnceLock::new();
 static NOTE_CREDENTIAL_ACCESS: OnceLock<NoteCredentialAccess> = OnceLock::new();
@@ -81,6 +84,7 @@ static MCP_HTTP_RESPONSE: OnceLock<McpHttpResponse> = OnceLock::new();
 /// already ran; the first installation wins.
 pub fn install(hooks: HostHooks) -> bool {
     let HostHooks {
+        verify_core_config_maintenance,
         background_paused,
         check_direct_access,
         note_credential_access,
@@ -98,6 +102,7 @@ pub fn install(hooks: HostHooks) -> bool {
         mcp_http_response,
     } = hooks;
     let installed = [
+        verify_core_config_maintenance.map(|hook| VERIFY_CORE_CONFIG_MAINTENANCE.set(hook).is_ok()),
         background_paused.map(|hook| BACKGROUND_PAUSED.set(hook).is_ok()),
         check_direct_access.map(|hook| CHECK_DIRECT_ACCESS.set(hook).is_ok()),
         note_credential_access.map(|hook| NOTE_CREDENTIAL_ACCESS.set(hook).is_ok()),
@@ -115,6 +120,11 @@ pub fn install(hooks: HostHooks) -> bool {
         mcp_http_response.map(|hook| MCP_HTTP_RESPONSE.set(hook).is_ok()),
     ];
     installed.iter().all(|slot| slot.as_ref().is_none_or(|ok| *ok))
+}
+
+pub(crate) fn verify_core_config_maintenance(binding: Option<&respire_protocol::HostControlMaintenanceBinding>) -> Result<()> {
+    VERIFY_CORE_CONFIG_MAINTENANCE.get()
+        .ok_or_else(|| anyhow::anyhow!("core configuration authority verifier is unavailable"))?(binding)
 }
 
 /// Whether runtime maintenance fences background mutations.

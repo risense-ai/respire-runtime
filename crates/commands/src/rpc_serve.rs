@@ -377,8 +377,51 @@ fn business_paused() -> bool {
     STOPPING.load(Ordering::Acquire) || crate::host_hooks::background_paused()
 }
 
+fn core_config_method(method: &str) -> bool {
+    use respire_protocol::core_config::{APPLY_METHOD, READ_METHOD, VALIDATE_METHOD};
+    matches!(method, APPLY_METHOD | READ_METHOD | VALIDATE_METHOD)
+}
+
+fn core_config_response(request: &RpcRequest) -> RpcResponse {
+    use respire_protocol::core_config::*;
+    let result = (|| -> Result<CoreConfigReceipt> {
+        anyhow::ensure!(request.args.len() == 1, "core configuration requires one JSON argument");
+        let params: CoreConfigParams = serde_json::from_str(&request.args[0])?;
+        anyhow::ensure!(params.schema_version == 1, "core configuration schema version mismatch");
+        crate::host_hooks::verify_core_config_maintenance(params.maintenance.as_ref())?;
+        match request.method.as_str() {
+            READ_METHOD => {
+                anyhow::ensure!(params.candidate.is_none() && params.expected_revision.is_none(),
+                    "read does not accept a candidate or expected revision");
+                respire_app::core_config::read()
+            }
+            VALIDATE_METHOD => {
+                anyhow::ensure!(params.expected_revision.is_none(), "validate does not accept expected revision");
+                respire_app::core_config::validate(params.candidate.context("candidate required")?)
+            }
+            APPLY_METHOD => respire_app::core_config::apply(
+                params.candidate.context("candidate required")?,
+                params.expected_revision.context("expected revision required")?),
+            _ => anyhow::bail!("unknown core configuration method"),
+        }
+    })();
+    match result {
+        Ok(receipt) => match serde_json::to_value(receipt) {
+            Ok(summary) => {
+                let mut response = status_response(request);
+                response.operation_id = request.operation_id.clone();
+                response.envelope = Some(ResultEnvelope::new(&request.method, OutputStatus::Ok, summary, Vec::new()));
+                response
+            }
+            Err(error) => error_response(request, "core_config_outcome_unknown", &error.to_string()),
+        },
+        // apply performs every fallible check before its single in-memory state replacement.
+        Err(error) => error_response(request, "core_config_rejected", &format!("{error:#}")),
+    }
+}
+
 pub(crate) fn maintenance_control_method(method: &str) -> bool {
-    matches!(method, "runtime.status" | "runtime.stop" | "runtime.result" | "model.control" | "cli.progress")
+    core_config_method(method) || matches!(method, "runtime.status" | "runtime.stop" | "runtime.result" | "model.control" | "cli.progress")
 }
 
 pub(crate) fn admitted_list() -> Value {
@@ -1240,6 +1283,7 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
 
 fn locked_response(request: &RpcRequest) -> Option<RpcResponse> {
     if !STORE_READY.load(Ordering::Acquire)
+        && !core_config_method(&request.method)
         && !(request.method == "cli.exec" && command_name(&request.args) == Some("status"))
         && !matches!(request.method.as_str(), "runtime.status" | "runtime.stop" | "runtime.result"
             | "cli.progress" | "model.progress")
@@ -1378,6 +1422,12 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             if let Err((code, error)) = validate_scope(request.scope.as_ref(), &current) {
                 return error_response(&request, &code, &error);
             }
+        }
+        if core_config_method(&request.method) {
+            if STOPPING.load(Ordering::Acquire) {
+                return error_response(&request, "runtime_maintenance", "runtime is stopping");
+            }
+            return core_config_response(&request);
         }
         match request.method.as_str() {
         #[cfg(feature = "native-fault-tests")]
@@ -3459,7 +3509,7 @@ fn validate_business_config() -> Result<(), String> {
 
 fn request_current_scope(request: &RpcRequest) -> Result<RuntimeRequestScope, (String, String)> {
     // Result lookup and cancellation keep their identity fence even with broken config.
-    if !matches!(request.method.as_str(), "runtime.result" | "model.control") {
+    if !core_config_method(&request.method) && !matches!(request.method.as_str(), "runtime.result" | "model.control") {
         validate_business_config().map_err(|error| ("invalid_config".to_owned(), error))?;
     }
     Ok(current_scope())
@@ -3755,7 +3805,8 @@ fn admit_locked(
             Admission::Unknown
         });
     }
-    if request.method != "model.control" && business_paused() {
+    if (request.method != "model.control" && !core_config_method(&request.method) && business_paused())
+        || (core_config_method(&request.method) && STOPPING.load(Ordering::Acquire)) {
         return Err((
             "runtime_maintenance".to_owned(),
             "runtime is draining and rejected new business".to_owned(),

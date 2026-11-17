@@ -8,6 +8,10 @@ and by `respire-client2` (which shares the same managed layout and download rule
 Boundary in one sentence: **runtime = core capability + RPC; the CLI or Client2
 owns downloads, installation, component management and persistent private keys.**
 
+Runtime dev.24 exposes [process-local core configuration](docs/core-config.md)
+for candidate validation, atomic application and readback. Hosts own persistence;
+legacy configuration reads remain until a separate boundary audit.
+
 Core capabilities include account authentication, synchronization, database
 management, recall and remember. A serving Runtime never accesses the OS
 credential store. After restart it reports `credential_state: "required"` and

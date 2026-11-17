@@ -8,11 +8,15 @@ workflow), the `runtime-pin.json` file in the CLI repository, and the
 
 ## Frozen host boundary
 
-The host split uses published `respire-protocol` **2.0.0-dev.16** and wire
+The frozen host split uses published `respire-protocol` **2.0.0-dev.16** and wire
 protocol **1**. Complete the Runtime implementation against these existing
 types before accepting CLI and Client2 implementations. Do not add mandatory
 fields or change operation semantics during host integration. A later
 incompatible change requires a separately reviewed protocol version.
+
+Runtime dev.24 adds the independent [core configuration contract](core-config.md)
+in `respire_protocol` **2.0.0-dev.17**, retaining wire protocol **1** and the old
+host-control DTOs. Publish dev.17 before merging host consumers of the new DTOs.
 
 - Runtime owns authentication transactions, synchronization, encrypted database
   management, remember/recall, inference and the RPC/MCP interfaces.
