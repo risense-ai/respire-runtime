@@ -46,11 +46,11 @@ operation ID and idempotency key:
 {
   "state": "applied",
   "revision": 1,
-  "candidate": {"read_heat": false, "recall_fusion": {"fusion": "attention"}},
+  "candidate": {"read_heat": false, "recall_fusion": {"fusion": "attention", "fusion_alpha": 0.3}},
   "effective": {
     "read_heat": false,
     "recall_fusion": {
-      "fusion": "attention", "fusion_alpha": 0.2, "fusion_beta": 0.25,
+      "fusion": "attention", "fusion_alpha": 0.3, "fusion_beta": 0.25,
       "fusion_temperature": 1.0, "fusion_gate_recency": 0.02,
       "fusion_gate_recency_temporal": 1.0, "fusion_gate_hot": 0.1,
       "fusion_gate_tree": 0.02, "fusion_temporal_alpha": 0.15
