@@ -1,6 +1,6 @@
 //! One-shot offline control, dispatched before serving or opening a business store.
 use std::io::{Read, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result};
@@ -14,12 +14,10 @@ use respire_protocol::{
 };
 
 const PROTOCOL_V: u32 = respire_commands::rpc_worker::PROTOCOL_V;
-const CONTROL_DEADLINE: Duration = Duration::from_secs(10);
 
 enum ControlEvent {
     Finished(RpcResponse<ResultEnvelope>),
     ParentRevoked,
-    LongControlStarted,
 }
 
 pub(crate) fn run() -> Result<i32> {
@@ -30,18 +28,13 @@ pub(crate) fn run() -> Result<i32> {
         let response = execute(&worker_progress, &sent);
         let _ = sent.send(ControlEvent::Finished(response));
     })?;
-    let mut deadline = Instant::now() + CONTROL_DEADLINE;
-    let response = loop {
-        match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(ControlEvent::LongControlStarted) => {
-            deadline = Instant::now() + Duration::from_secs(180);
-            continue;
-        }
-        Ok(ControlEvent::Finished(response)) => break response,
+    // Operation lifetime follows the host authorization, not elapsed wall time.
+    let response = match received.recv() {
+        Ok(ControlEvent::Finished(response)) => response,
         Ok(ControlEvent::ParentRevoked) | Err(_) => {
             let mut response = progress.lock().map_err(|_| anyhow::anyhow!("control progress unavailable"))?.clone();
             response.code = Some("control_outcome_unknown".into());
-            response.error = Some("control deadline or parent revocation; query the same operation ID before retrying".into());
+            response.error = Some("control parent authorization ended or worker disconnected; query the same operation ID before retrying".into());
             response.envelope = Some(ResultEnvelope::new(
                 response.envelope.as_ref().map(|envelope| envelope.command.as_str())
                     .unwrap_or(if response.operation_id.is_some() { "keygen" } else { "memory-revision" }),
@@ -50,12 +43,11 @@ pub(crate) fn run() -> Result<i32> {
                     Item::new("store_ready", Status::Skip, "false"),
                 ],
             ));
-            break response;
-        }
+            response
         }
     };
-    // All writes are journaled before effects. Main exits after the response;
-    // a deadline never claims rollback or authorizes a replacement operation.
+    // Writes are journaled before effects; revocation never claims rollback.
+    // Bound only delivery of the completed response if the host stops reading.
     std::thread::Builder::new().name("control-output-deadline".into()).spawn(|| {
         std::thread::sleep(Duration::from_secs(2));
         std::process::exit(2);
@@ -165,8 +157,6 @@ fn receive_and_execute(
             .map_err(|_| ("unauthorized", "offline read parent watch failed"))?;
         crate::startup_identity::verify_offline_read_binding(read.binding(), read.kind)
             .map_err(|_| ("scope_mismatch", "offline read binding mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "offline read deadline unavailable"))?;
         let envelope = read.execute().map_err(|_| {
             if read.kind == respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight {
                 ("snapshot_preflight_blocked", "snapshot validation failed; inspect snapshot recovery before continuing")
@@ -195,8 +185,6 @@ fn receive_and_execute(
             .map_err(|_| ("unauthorized", "private metadata parent watch failed"))?;
         crate::startup_identity::verify_metadata_control_binding(metadata.binding(), metadata.identity())
             .map_err(|_| ("scope_mismatch", "private metadata binding mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private metadata deadline unavailable"))?;
         let result = metadata.execute()
             .map_err(|_| ("metadata_outcome_unknown", "query the original metadata operation before retrying"))?;
         crate::startup_identity::verify_metadata_control_binding(metadata.binding(), metadata.identity())
@@ -233,8 +221,6 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "private migration ownership unavailable"))?;
         crate::startup_identity::verify_auth_control_binding(migration.binding(), migration.identity())
             .map_err(|_| ("scope_mismatch", "private migration identity mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private migration deadline unavailable"))?;
         let result = match migration.execute(&ownership) {
             Ok(result) => result,
             Err(error) if error.downcast_ref::<respire_app::migration::SchemaRejected>().is_some() => {
@@ -289,8 +275,6 @@ fn receive_and_execute(
         };
         crate::startup_identity::verify_auth_control_binding(key.binding(), key.identity())
             .map_err(|_| ("scope_mismatch", "private key identity mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private key deadline unavailable"))?;
         let result = if key.is_complete() {
             key.complete(&request, crate::key_control::verify_target_runtime)
         } else {
@@ -333,8 +317,6 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "private space ownership unavailable"))?;
         space.verify_binding()
             .map_err(|_| ("scope_mismatch", "private space identity mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private space deadline unavailable"))?;
         let result = space.execute(&request,&ownership)
             .map_err(|_| ("space_outcome_unknown", "query the original space operation before retrying"))?;
         space.verify_binding()
@@ -369,8 +351,6 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "private profile ownership unavailable"))?;
         crate::startup_identity::verify_auth_control_binding(profile.binding(), profile.identity())
             .map_err(|_| ("scope_mismatch", "private profile identity mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private profile deadline unavailable"))?;
         let result = profile.execute(&ownership)
             .map_err(|_| ("profile_remove_outcome_unknown", "query the original profile operation before retrying"))?;
         crate::startup_identity::verify_auth_control_binding(profile.binding(), profile.identity())
@@ -405,8 +385,6 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "private identity write ownership unavailable"))?;
         crate::startup_identity::verify_auth_control_binding(identity.binding(), identity.identity())
             .map_err(|_| ("scope_mismatch", "private identity write identity mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private identity write deadline unavailable"))?;
         let result = identity.execute(&request, &ownership)
             .map_err(|_| ("identity_write_outcome_unknown", "query the original identity operation before retrying"))?;
         crate::startup_identity::verify_identity_write_result(identity.binding(), identity.identity(), &result)
@@ -434,8 +412,6 @@ fn receive_and_execute(
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "agent config parent watch failed"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "agent config deadline unavailable"))?;
         let envelope = crate::config_control::execute_agent_config(grant, &request)
             .map_err(|_| ("agent_config_outcome_unknown", "query the original agent config operation; do not replay"))?;
         let receipt: respire_protocol::config_control::AgentConfigReceipt = serde_json::from_value(envelope.summary.clone())
@@ -471,8 +447,6 @@ fn receive_and_execute(
             .map_err(|_| ("auth_ownership_unavailable", "private identity read ownership unavailable"))?;
         crate::startup_identity::verify_auth_control_binding(identity.binding(), identity.identity())
             .map_err(|_| ("scope_mismatch", "private identity read identity mismatch"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "private identity read deadline unavailable"))?;
         let result = identity.execute(&ownership)
             .map_err(|_| ("identity_read_unavailable", "private identity read failed"))?;
         crate::startup_identity::verify_auth_control_binding(identity.binding(), identity.identity())
@@ -527,8 +501,6 @@ fn receive_and_execute(
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "legacy snapshot parent watch failed"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "legacy snapshot controller unavailable"))?;
         let session = respire_app::auth::read_session_json()
             .map_err(|_| ("scope_mismatch", "legacy snapshot session is invalid"))?;
         let account = session["user"].as_str().filter(|value| !value.is_empty())
@@ -580,12 +552,10 @@ fn receive_and_execute(
             .map_err(|_| ("unauthorized", "snapshot authorized grant unavailable"))?;
         response.data_dir = Some(verified_grant.profile.to_str()
             .ok_or(("scope_mismatch", "snapshot authorized profile is not UTF-8"))?.to_owned());
-        // Preserve the authorized profile in deadline and parent-revocation responses too.
+        // Preserve the authorized profile in parent-revocation responses too.
         *progress.lock().map_err(|_| ("control_unavailable", "control progress unavailable"))? = response.clone();
         watch_auth_parent(events.clone())
             .map_err(|_| ("unauthorized", "snapshot parent watch failed"))?;
-        events.send(ControlEvent::LongControlStarted)
-            .map_err(|_| ("control_unavailable", "snapshot controller unavailable"))?;
         let session = respire_app::auth::read_session_json()
             .map_err(|_| ("scope_mismatch", "snapshot session is invalid"))?;
         let account = session["user"].as_str().filter(|value| !value.is_empty())
@@ -728,9 +698,6 @@ fn receive_and_execute(
         if model_verify {
             respire_commands::model_assets::enable_backend_probe_host(
                 respire_commands::model_assets::BackendProbeHost::PrivateControl);
-            // Only the authenticated Paused operation can extend the initial input deadline.
-            events.send(ControlEvent::LongControlStarted)
-                .map_err(|_| ("control_unavailable", "model verification controller unavailable"))?;
         }
         let model = model_params.as_ref()
             .ok_or(("invalid_request", "model preparation parameters missing"))?;
