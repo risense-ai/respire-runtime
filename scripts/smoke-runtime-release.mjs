@@ -244,7 +244,7 @@ const report = {schema: 1, evidence_class: 'native-raw', gate: 'not-evaluated', 
   repository: process.env.GITHUB_REPOSITORY, started_at: new Date().toISOString(), case_results: [],
   run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
   archive_sha256: metadata.archive_sha256, binary_sha256: metadata.binary_sha256,
-  coverage: ['complete-release-payload', 'os-bound-startup-health', 'real-mcp-initialize-tools-status', 'scoped-model-settings-no-assets', 'bad-client-config-rejection-and-recovery', 'normal-stop-final-receipt'],
+  coverage: ['complete-release-payload', 'host-control-delayed-input-no-deadline', 'os-bound-startup-health', 'real-mcp-initialize-tools-status', 'scoped-model-settings-no-assets', 'bad-client-config-rejection-and-recovery', 'normal-stop-final-receipt'],
   g1Passed: false, passed: false};
 const passedCase = (test_id, name) => report.case_results.push({test_id, name, status: 'passed'});
 try {
@@ -300,6 +300,31 @@ try {
     !/^RSRS_/i.test(key) && !/^(GH_TOKEN|GITHUB_TOKEN|RSRS_CORE_SDK_DIR|ONEMEMORY_CORE_SDK_DIR|RESPIRE_CORE_SDK_DIR)$/i.test(key)));
   Object.assign(environment, {RSRS_DATA_DIR: dataDir, RSRS_M3_DIR: modelDir, RSRS_BIN_DIR: payload,
     RSRS_CLIENT_ONLY: '0', RSRS_NO_AUTOSTART: '0', RSRS_NO_AUTOSYNC: '1'});
+  // Cross the former ten-second cutoff, then verify EOF still fails explicitly.
+  child = spawn(executable, ['--host-control-internal'],
+    {cwd: payload, env: environment, stdio: ['pipe', 'pipe', 'inherit']});
+  const controlBytes = [];
+  child.stdout.on('data', bytes => controlBytes.push(bytes));
+  child.once('error', error => { spawnError = error; });
+  const controlExited = new Promise(resolveExit => child.once('close', (code, signal) => {
+    exitState = {code, signal};
+    resolveExit(exitState);
+  }));
+  await delay(11000);
+  if (spawnError) throw spawnError;
+  assert.equal(exitState, undefined, 'host control exceeded an operation deadline');
+  child.stdin.end();
+  const controlExit = await Promise.race([controlExited, delay(5000, undefined, {ref: false})
+    .then(() => { throw new Error('host control did not reject closed input'); })]);
+  assert.deepEqual(controlExit, {code: 2, signal: null});
+  const controlFrame = Buffer.concat(controlBytes);
+  assert.ok(controlFrame.length >= 4);
+  assert.equal(controlFrame.readUInt32BE(0), controlFrame.length - 4);
+  const controlReply = JSON.parse(controlFrame.subarray(4).toString('utf8'));
+  assert.equal(controlReply.code, 'invalid_request');
+  assert.equal(controlReply.ok, false);
+  passedCase('runtime.host-control-no-wall-clock-deadline', 'delayed-input-survives-and-closed-input-is-rejected');
+  exitState = undefined;
   const port = 15000 + (process.pid % 20000), endpoint = `http://127.0.0.1:${port}`;
   child = spawn(executable, ['serve', '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir],
     {cwd: payload, env: environment, stdio: ['ignore', 'ignore', 'inherit']});
