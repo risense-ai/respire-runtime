@@ -14,6 +14,7 @@ pub mod host_plugin;
 pub mod model_control;
 pub mod secret_control;
 pub mod config_control;
+pub mod core_config;
 pub mod identity_control;
 pub mod identity_write_control;
 pub mod space_control;

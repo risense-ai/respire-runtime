@@ -31,6 +31,7 @@ pub use respire_app_domain::memory;
 pub use respire_app_domain::metadata_gate;
 pub use respire_app_domain::prompt;
 pub use respire_app_domain::read_heat;
+pub use respire_app_domain::core_config;
 pub use respire_app_domain::recall_fusion;
 pub use respire_app_domain::resident;
 pub use respire_app_domain::review;

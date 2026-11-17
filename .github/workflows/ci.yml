@@ -1,7 +1,7 @@
 name: Runtime CI
 
-# PR and push runs check current Runtime source and contracts.
-# Native products and full data-safety suites are accepted after publication.
+# PR and push runs check source, contracts and targeted native core configuration.
+# The full platform and data-safety matrix is accepted after publication.
 on:
   workflow_dispatch:
     inputs:
@@ -66,7 +66,7 @@ jobs:
         run: cargo test -p respire_protocol --locked
 
   workspace-tests:
-    # Keep the existing required job name; this is a source check, not native acceptance.
+    # Keep the required job name; targeted core checks do not replace full native acceptance.
     needs: detect
     runs-on: ${{ inputs.source_os || 'ubuntu-latest' }}
     timeout-minutes: 30
@@ -148,6 +148,36 @@ jobs:
           else
             echo 'RPC admission unit tests are not affected by this change.'
           fi
+      - name: Check core configuration with the real pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || git diff --name-only HEAD^ HEAD -- .github/workflows/ci.yml crates/app-domain/src/core_config.rs crates/app-domain/src/feedback.rs crates/app-domain/src/read_heat.rs crates/app-domain/src/recall_fusion.rs | grep -q .; then
+            unset RSRS_CORE_TEST_MODE ONEMEMORY_CORE_TEST_MODE RESPIRE_CORE_TEST_MODE
+            cargo test --locked -p respire_app_domain --lib feedback::tests::defaults_are_off_and_old_sdk_cannot_silently_accept_enabled_feedback -- --exact --test-threads=1
+            cargo build --locked -p respire_runtime --bin rsrs-runtime
+            node scripts/smoke-runtime-release.mjs --core-config-candidate
+          else
+            echo 'Core query configuration is not affected by this change.'
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-config-candidate-${{ runner.os }}
+          path: smoke-report/core-config-candidate.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: success() && github.event_name == 'workflow_dispatch'
+        with:
+          name: core-config-candidate-binary-${{ runner.os }}
+          retention-days: 3
+          path: |
+            target/debug/rsrs-runtime
+            target/debug/rsrs-runtime.exe
+            target/debug/*.dll
+            target/debug/*.so*
+            target/debug/*.dylib
+          if-no-files-found: error
       - name: Run affected host event unit tests
         shell: bash
         run: |
@@ -186,4 +216,4 @@ jobs:
           test "$WORKSPACE_PRESENT" = true || { echo "::error::Required workspace is missing"; exit 1; }
           test "$CONTRACT_RESULT" = success || { echo "::error::Runtime control contract did not pass"; exit 1; }
           test "$CHECK_RESULT" = success || { echo "::error::Runtime source check did not pass"; exit 1; }
-          echo 'Source checks passed. Native and data-safety acceptance run only after publication.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Source checks and affected native core checks passed. Full platform and data-safety acceptance remains post-publication.' >> "$GITHUB_STEP_SUMMARY"

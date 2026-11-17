@@ -269,6 +269,7 @@ fn serve_command(flags: &Flags, boot_token: Option<&str>) -> Result<i32> {
         mcp_http_response: Some(respire_commands::runtime_mcp::http_response),
         managed_id: Some(startup_identity::managed_id),
         verify_managed_boot: Some(startup_identity::verify_managed_boot),
+        verify_core_config_maintenance: Some(startup_identity::verify_core_config_maintenance),
         ..HostHooks::default()
     });
     anyhow::ensure!(installed, "Runtime executor hooks were installed twice");

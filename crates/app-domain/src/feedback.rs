@@ -25,10 +25,7 @@ pub fn query_settings(
     query: &MemoryQuery,
     candidates: &[StoredMemory],
 ) -> Result<Value> {
-    let mut settings = crate::recall_fusion::query_settings()?;
-    if let Some(read_heat) = crate::read_heat::effective()? {
-        settings.insert("read_heat".into(), Value::Bool(read_heat));
-    }
+    let mut settings = crate::core_config::query_settings()?;
     if enabled()? {
         anyhow::ensure!(crate::core_sdk::FEEDBACK_CONTRACT==1,"enabled feedback requires Core SDK feedback contract 1; install the paired SDK/CLI version");
         let threshold = match crate::env::var("RSRS_MARK_SIM") {
@@ -120,6 +117,38 @@ mod tests {
         assert!(!enabled()?);
         std::env::remove_var("RSRS_FEEDBACK");
         assert!(enabled()?);
+        std::env::set_var("RSRS_FEEDBACK", "0");
+        let candidate = respire_protocol::core_config::CoreConfigCandidate {
+            read_heat: serde_json::json!(false),
+            recall_fusion: serde_json::json!({"fusion":"attention", "fusion_alpha":0.3}),
+        };
+        let before = crate::core_config::revision()?;
+        let validated = crate::core_config::validate(candidate.clone())?;
+        assert_eq!(validated.state, "validated");
+        assert_eq!(crate::core_config::revision()?, before);
+        let applied = crate::core_config::apply(candidate.clone(), before)?;
+        assert_eq!(applied.state, "applied");
+        assert_eq!(applied.applies, "next_query");
+        assert_eq!(applied.revision, before + 1);
+        let context = query_settings(&store, &query, &[])?;
+        assert_eq!(context["read_heat"], false);
+        assert_eq!(context["fusion"], "attention");
+        assert_eq!(context["fusion_alpha"], 0.3);
+        assert_eq!(crate::core_config::read()?.effective, applied.effective);
+        assert!(crate::core_config::apply(candidate, before).is_err());
+        assert_eq!(crate::core_config::revision()?, applied.revision);
+        let invalid = respire_protocol::core_config::CoreConfigCandidate {
+            read_heat: serde_json::json!("false"), recall_fusion: serde_json::Value::Null,
+        };
+        assert!(crate::core_config::validate(invalid.clone()).is_err());
+        assert!(crate::core_config::apply(invalid, applied.revision).is_err());
+        assert_eq!(crate::core_config::revision()?, applied.revision);
+        let defaults = respire_protocol::core_config::CoreConfigCandidate {
+            read_heat: serde_json::Value::Null, recall_fusion: serde_json::Value::Null,
+        };
+        let reset = crate::core_config::apply(defaults, applied.revision)?;
+        assert_eq!(reset.effective["read_heat"], true);
+        assert!(query_settings(&store, &query, &[])?.get("read_heat").is_none());
         Ok(())
     }
 }

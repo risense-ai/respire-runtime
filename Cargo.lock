@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.16"
+version = "2.0.0-dev.17"
 dependencies = [
  "anyhow",
  "serde",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "2.0.0-dev.23"
+version = "2.0.0-dev.24"
 dependencies = [
  "anyhow",
  "respire_app",
