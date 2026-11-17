@@ -1,7 +1,6 @@
 //! Private host-owned credential delivery. Serving Runtime has no native credential backend.
 use std::io::{Read, Write};
 use std::sync::{mpsc, Mutex, OnceLock};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use respire_protocol::credentials::{
@@ -130,7 +129,8 @@ impl Entry {
         };
         write_frame(&mut std::io::stdout().lock(), &request)
             .map_err(|_| CredentialError::Unavailable)?;
-        let reply = channel.replies.recv_timeout(Duration::from_secs(15))
+        // The host may wait for the user's keychain approval; channel closure revokes it.
+        let reply = channel.replies.recv()
             .map_err(|_| CredentialError::Unavailable)?;
         if reply.credential_reply != CREDENTIAL_SCHEMA_V || reply.id != id {
             return Err(CredentialError::Unavailable);
