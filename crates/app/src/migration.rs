@@ -808,12 +808,26 @@ fn snapshot_profile_with_material(profile: &Profile, stage: &Path, profiles: &[P
                 {
                     bail!("legacy configuration contains a parent-directory path; originals were preserved");
                 }
-                if let Some(found) = profiles
-                    .iter()
-                    .filter(|candidate| old.starts_with(&candidate.source))
-                    .max_by_key(|candidate| candidate.source.components().count())
-                {
-                    let suffix = old.strip_prefix(&found.source)?;
+                // Windows paths captured by the host may use the extended prefix.
+                let comparable = |path: &Path| -> Result<PathBuf> {
+                    if cfg!(windows) {
+                        crate::service::canonical_profile_path(path)
+                            .context("cannot resolve legacy configuration path; originals were preserved")
+                    } else {
+                        Ok(path.to_path_buf())
+                    }
+                };
+                let old = comparable(&old)?;
+                let mut found = None;
+                for candidate in profiles {
+                    let source = comparable(&candidate.source)?;
+                    let depth = source.components().count();
+                    if old.starts_with(&source) && found.as_ref().is_none_or(|(_, _, best)| depth >= *best) {
+                        found = Some((candidate, source, depth));
+                    }
+                }
+                if let Some((found, source, _)) = found {
+                    let suffix = old.strip_prefix(&source)?;
                     let destination = if suffix.as_os_str().is_empty() {
                         found.destination.clone()
                     } else {

@@ -268,7 +268,7 @@ if (process.argv.includes('--core-config-candidate')) {
       `(Get-Process -Id ${process.pid}).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`], {encoding: 'utf8'}).trim();
     else birth = execFileSync('ps', ['-p', String(process.pid), '-o', 'lstart='], {encoding: 'utf8'}).trim();
     const marker = {schema: 1, id: 'core-config-candidate', phase: 'Paused', owner_pid: process.pid,
-      owner_birth: birth, expected_version: '2.0.0-dev.24',
+      owner_birth: birth, expected_version: '2.0.0-dev.25',
       expected_profile: process.platform === 'win32' ? win32.toNamespacedPath(realpathSync(root)) : realpathSync(root)};
     const markerBytes = Buffer.from(JSON.stringify(marker));
     mkdirSync(join(root, 'runtime/autostart'));

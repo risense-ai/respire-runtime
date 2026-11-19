@@ -428,7 +428,18 @@ fn empty_library_without_session_still_migrates() -> Result<()> {
     let _keyring = memory_keyring();
     let fixture = Fixture::new(&[])?;
     std::fs::remove_file(fixture.source.join("session.json"))?;
+    #[cfg(windows)]
+    {
+        let extended = fixture.source.to_str().context("fixture path must be UTF-8")?;
+        let plain = extended.strip_prefix(r"\\?\").context("expected a canonical Windows path")?;
+        write_json(&fixture.source.join("client.json"), &json!({"data_dir": Path::new(plain).join("pending")}))?;
+    }
     fixture.migrate()?;
+    #[cfg(windows)]
+    {
+        let config: Value = serde_json::from_slice(&std::fs::read(fixture.target().join("client.json"))?)?;
+        assert_eq!(config["data_dir"], json!(fixture.target().join("pending")));
+    }
     assert!(receipt_matches(
         &fixture.target(),
         &identity(&fixture.source)?
