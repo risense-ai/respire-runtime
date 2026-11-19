@@ -1121,8 +1121,8 @@ pub fn data_dir() -> PathBuf {
     data_dir_from_config(read_client_config().as_ref())
 }
 
-// Resolve existing parents before appending absent names; never guess filesystem identity.
-fn canonical_profile_path(path: &Path) -> Option<PathBuf> {
+/// Resolve existing parents before appending absent names; never guess filesystem identity.
+pub fn canonical_profile_path(path: &Path) -> Option<PathBuf> {
     if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
         return None;
     }
