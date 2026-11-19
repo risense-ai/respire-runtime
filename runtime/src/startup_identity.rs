@@ -44,7 +44,8 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     fs::create_dir_all(respire_app::service::main_data_dir())?;
     fs::create_dir_all(respire_app::service::data_dir())?;
     let context = current_context(port)?;
-    let migrated_identity = verify_migrated_local_session(&context.profile)?;
+    let migrated_identity = respire_client_host::identity::read_migrated_local_session(&context.profile, hash)?
+        .map(|(_, identity)| identity);
     let unbound_identity = serving_unbound_identity(&context.profile)?;
     if let Some(identity) = unbound_identity.as_ref() {
         respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, identity)?;
@@ -721,8 +722,14 @@ fn verify_control_authority(
     require_live_supervisor: bool,
 ) -> Result<()> {
     let control = context.root.join("runtime").join("autostart");
-    let registration_bytes = read_private_file(&control.join("registration.json"))?;
     let maintenance_bytes = read_private_file(&control.join("maintenance.json"))?;
+    if !require_live_supervisor
+        && maintenance_bytes.is_none()
+        && grant.is_none_or(|grant| grant.managed_id.is_none() && grant.maintenance.is_none())
+    {
+        return Ok(());
+    }
+    let registration_bytes = read_private_file(&control.join("registration.json"))?;
     let mut registration = registration_bytes
         .as_ref()
         .map(|bytes| parse_control(bytes))
@@ -1119,6 +1126,17 @@ mod tests {
         let offline = std::env::temp_dir().join(format!("respire-offline-fixture-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&offline)?;
         let offline_result = (|| -> Result<()> {
+            let (mut context, _) = fixture();
+            context.root = offline.clone();
+            let control = offline.join("runtime/autostart");
+            fs::create_dir_all(&control)?;
+            fs::write(control.join("registration.json"), b"obsolete registration")?;
+            verify_authority(None, &context)?;
+            assert!(verify_authority_for_mode(None, &context, false).is_err());
+            let marker = control.join("maintenance.json");
+            fs::write(&marker, b"unverified active maintenance")?;
+            assert!(verify_authority(None, &context).is_err());
+            fs::remove_file(marker)?;
             let session_path = offline.join("session.json");
             assert!(serving_unbound_identity(&offline)?.is_none());
             let mut session = json!({"vault_version":4,"kdf_salt":"fixture-salt",
