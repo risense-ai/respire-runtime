@@ -1123,7 +1123,8 @@ mod tests {
 
     #[test]
     fn detached_grant_accepts_only_its_exact_context() -> Result<()> {
-        let offline = std::env::temp_dir().join(format!("respire-offline-fixture-{}", uuid::Uuid::new_v4()));
+        let offline = std::env::temp_dir().canonicalize()?
+            .join(format!("respire-offline-fixture-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&offline)?;
         let offline_result = (|| -> Result<()> {
             let (mut context, _) = fixture();
