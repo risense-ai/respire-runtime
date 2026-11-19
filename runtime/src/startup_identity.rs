@@ -27,6 +27,7 @@ struct LaunchContext {
 struct Startup {
     context: LaunchContext,
     grant: Option<LaunchGrant>,
+    private_control: bool,
     auth_control: bool,
     paused_control: bool,
     unbound_identity: Option<respire_protocol::HostAuthIdentity>,
@@ -80,7 +81,7 @@ pub(crate) fn authorize(supervised: bool, boot_token: Option<&str>, port: u16) -
     };
     respire_commands::rpc_serve::set_launch_instance_id(&instance_id)?;
     STARTUP
-        .set(Startup { context, grant, auth_control: false, paused_control: false, unbound_identity, migrated_identity })
+        .set(Startup { context, grant, private_control: false, auth_control: false, paused_control: false, unbound_identity, migrated_identity })
         .map_err(|_| anyhow::anyhow!("runtime startup identity was installed twice"))?;
     Ok(())
 }
@@ -109,7 +110,7 @@ pub(crate) fn authorize_offline_read(grant: LaunchGrant,
     let context = offline_read_context(grant.port, kind)?;
     validate_grant(&grant, &context, grant.managed_id.is_some(), &grant.nonce, now_ms()?)?;
     verify_offline_read_authority(&grant, &context, kind)?;
-    STARTUP.set(Startup { context, grant: Some(grant), auth_control: false, paused_control: false, unbound_identity: None, migrated_identity: None })
+    STARTUP.set(Startup { context, grant: Some(grant), private_control: true, auth_control: false, paused_control: false, unbound_identity: None, migrated_identity: None })
         .map_err(|_| anyhow::anyhow!("offline read grant was already consumed"))?;
     Ok(())
 }
@@ -303,7 +304,7 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     if let Some(identity) = unbound_identity.as_ref() {
         respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, identity)?;
     }
-    STARTUP.set(Startup { context, grant: Some(grant), auth_control: auth, paused_control: paused, unbound_identity, migrated_identity })
+    STARTUP.set(Startup { context, grant: Some(grant), private_control: true, auth_control: auth, paused_control: paused, unbound_identity, migrated_identity })
         .map_err(|_| anyhow::anyhow!("runtime control grant was already consumed"))?;
     Ok(())
 }
@@ -590,7 +591,11 @@ fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
             respire_app::login_transaction::verify_locked_auth_identity(&startup.context.root, &startup.context.profile, identity)?;
         }
     }
-    verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.paused_control)
+    if startup.private_control {
+        verify_authority_for_mode(startup.grant.as_ref(), &startup.context, startup.paused_control)
+    } else {
+        verify_authority(startup.grant.as_ref(), &startup.context)
+    }
 }
 
 fn verify_migrated_local_session(profile: &Path) -> Result<Option<[String; 2]>> {
@@ -680,26 +685,23 @@ fn validate_grant(
         "runtime launch grant does not match this installation, account, generation or image"
     );
     anyhow::ensure!(
-        grant.supervisor_pid > 0
-            && grant.supervisor_pid != std::process::id()
-            && !grant.supervisor_birth.is_empty()
-            && supervised == grant.managed_id.is_some()
+        supervised == grant.managed_id.is_some()
             && grant.managed_id.as_ref().is_none_or(|id| !id.is_empty())
             && grant.issued_at_ms <= now
             && now <= grant.expires_at_ms
             && grant.expires_at_ms > grant.issued_at_ms
             && grant.expires_at_ms - grant.issued_at_ms <= 60_000,
-        "runtime launch grant owner, mode or expiry is invalid"
+        "runtime launch grant mode or expiry is invalid"
     );
     Ok(())
 }
 
 fn verify_authority(grant: Option<&LaunchGrant>, context: &LaunchContext) -> Result<()> {
-    verify_authority_for_mode(grant, context, false)
+    verify_control_authority(grant, context, false, None, false)
 }
 
 fn verify_authority_for_mode(grant: Option<&LaunchGrant>, context: &LaunchContext, auth: bool) -> Result<()> {
-    verify_control_authority(grant, context, auth, None)
+    verify_control_authority(grant, context, auth, None, true)
 }
 
 fn verify_offline_read_authority(
@@ -710,12 +712,13 @@ fn verify_offline_read_authority(
     match kind {
         HostOfflineRead::MetadataStatus | HostOfflineRead::AgentConfigRead | HostOfflineRead::SnapshotPreflight => {}
     }
-    verify_control_authority(Some(grant), context, false, Some(kind))
+    verify_control_authority(Some(grant), context, false, Some(kind), true)
 }
 
 fn verify_control_authority(
     grant: Option<&LaunchGrant>, context: &LaunchContext, auth: bool,
     offline_read: Option<respire_protocol::metadata_control::HostOfflineRead>,
+    require_live_supervisor: bool,
 ) -> Result<()> {
     let control = context.root.join("runtime").join("autostart");
     let registration_bytes = read_private_file(&control.join("registration.json"))?;
@@ -750,11 +753,16 @@ fn verify_control_authority(
         offline_read,
     )?;
     if let Some(grant) = grant {
-        anyhow::ensure!(
-            process_birth(grant.supervisor_pid)?.as_deref()
-                == Some(grant.supervisor_birth.as_str()),
-            "runtime launch supervisor exited or its PID was reused"
-        );
+        if require_live_supervisor {
+            anyhow::ensure!(
+                grant.supervisor_pid > 0
+                    && grant.supervisor_pid != std::process::id()
+                    && !grant.supervisor_birth.is_empty()
+                    && process_birth(grant.supervisor_pid)?.as_deref()
+                        == Some(grant.supervisor_birth.as_str()),
+                "runtime control supervisor is missing, exited or its PID was reused"
+            );
+        }
         if let Some(binding) = &grant.maintenance {
             anyhow::ensure!(
                 process_birth(binding.controller_pid)?.as_deref()
@@ -1156,8 +1164,6 @@ mod tests {
             ("sync_generation", json!(1)),
             ("image_path", json!("other-image")),
             ("image_sha256", json!("c".repeat(64))),
-            ("supervisor_pid", json!(0)),
-            ("supervisor_birth", json!("")),
             ("managed_id", json!("unexpected")),
             ("port", json!(19170)),
             ("issued_at_ms", json!(3000)),
@@ -1173,6 +1179,14 @@ mod tests {
             );
         }
         assert!(validate_grant(&grant, &context, true, &grant.nonce, 2000).is_err());
+        let mut detached = value.clone();
+        let fields = detached.as_object_mut().context("fixture grant is not an object")?;
+        fields.remove("supervisor_pid");
+        fields.remove("supervisor_birth");
+        let detached: LaunchGrant = serde_json::from_value(detached)?;
+        validate_grant(&detached, &context, false, &grant.nonce, 2000)?;
+        verify_authority(Some(&detached), &context)?;
+        assert!(verify_authority_for_mode(Some(&detached), &context, false).is_err());
         assert!(validate_nonce("../../outside").is_err());
         assert!(validate_nonce("12345678-1234-1234-8234-123456789abc").is_err());
 

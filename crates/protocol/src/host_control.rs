@@ -22,7 +22,10 @@ pub struct HostControlLaunchGrant {
     pub sync_generation: usize,
     pub image_path: PathBuf,
     pub image_sha256: String,
+    // Serving grants may omit these. Private control still verifies their owner.
+    #[serde(default)]
     pub supervisor_pid: u32,
+    #[serde(default)]
     pub supervisor_birth: String,
     pub managed_id: Option<String>,
     pub registration_sha256: Option<String>,

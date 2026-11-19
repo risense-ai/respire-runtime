@@ -1,7 +1,7 @@
 name: Runtime release
 
-# Builds and publishes rsrs-runtime for all eight platform targets, then runs
-# native regression against the public release assets:
+# Builds and runs native regression on the exact rsrs-runtime assets before
+# publishing them for all eight platform targets:
 #   rsrs-runtime-<triple>(.exe)      raw binary
 #   rsrs-runtime-<triple>.tar.gz     binary + core-runtime.json + native Core
 #                                    runtime libraries and notices
@@ -17,7 +17,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish after source and build checks; native acceptance runs on the public assets afterward
+        description: Publish the tested assets after all native and source checks succeed
         default: false
         type: boolean
       dev_version:
@@ -408,10 +408,8 @@ jobs:
           if-no-files-found: error
 
   native-regression:
-    # Publication is complete before this matrix starts. A failed leg remains
-    # failed and must be rerun; source/build success is not native acceptance.
-    name: Post-release native regression (${{ matrix.target }})
-    needs: [plan, publish]
+    name: Pre-release native regression (${{ matrix.target }})
+    needs: [plan, build]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     permissions:
@@ -462,31 +460,14 @@ jobs:
         if: matrix.os == 'macos-15-intel'
         shell: bash
         run: node scripts/smoke-runtime-release.mjs --check-native-intel
-      - name: Download this platform's actual public release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUNTIME_TARGET: ${{ matrix.target }}
-          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          node - <<'NODE'
-          const assert = require('node:assert/strict'), cp = require('node:child_process');
-          const repo = process.env.GITHUB_REPOSITORY, tag = process.env.RUNTIME_TAG, target = process.env.RUNTIME_TARGET;
-          const release = JSON.parse(cp.execFileSync('gh', ['api', `repos/${repo}/releases/tags/${tag}`], {encoding: 'utf8'}));
-          assert.equal(release.tag_name, tag);
-          assert.equal(release.draft, false, 'Native acceptance requires a public release');
-          assert.ok(release.published_at, 'Release has not been published');
-          assert.equal(release.assets.length, 24, 'Incomplete public release inventory');
-          const names = [`rsrs-runtime-${target}.tar.gz`, `runtime-build-${target}.json`,
-            `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`];
-          for (const name of names) {
-            assert.equal(release.assets.filter(asset => asset.name === name && asset.state === 'uploaded' && asset.size > 0).length,
-              1, `Missing or duplicate public release asset: ${name}`);
-          }
-          cp.execFileSync('gh', ['release', 'download', tag, '--repo', repo, '--dir', 'release-assets',
-            ...names.flatMap(name => ['--pattern', name])], {stdio: 'inherit'});
-          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-release-${{ matrix.target }}
+          path: release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-release-binary-${{ matrix.target }}
+          path: release-assets
       - name: Verify archive and binary digests against the build report
         shell: bash
         env:
@@ -569,7 +550,7 @@ jobs:
         if: matrix.source_safety == true
         shell: bash
         env:
-          # Existing unit fixtures use HashingEmbedder; public smoke never uses this mode.
+          # Existing unit fixtures use HashingEmbedder; candidate smoke never uses this mode.
           RSRS_CORE_TEST_MODE: '1'
           RUST_TEST_THREADS: '1'
           RUST_MIN_STACK: '16777216'
@@ -586,7 +567,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$APPDATA" "$LOCALAPPDATA" "$RSRS_DATA_DIR"
           cargo test --workspace --lib --bins --tests --locked -- --test-threads=1 2>&1 | tee data-safety.log
-          echo 'Public asset smoke and complete source data-safety suites passed; source fixtures are not product execution evidence.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Candidate asset smoke and complete source data-safety suites passed; source fixtures are not product execution evidence.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always() && matrix.source_safety == true
         with:
@@ -596,11 +577,11 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [plan, build]
+    needs: [plan, build, native-regression]
     if: >-
       ${{
         !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' &&
-        needs.plan.outputs.publish == 'true'
+        needs.native-regression.result == 'success' && needs.plan.outputs.publish == 'true'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -764,4 +745,4 @@ jobs:
           test "$count" -eq 24 || { echo "::error::Draft release holds $count assets, expected 24"; exit 1; }
           gh release edit "$RUNTIME_TAG" --draft=false
           echo "Published $RUNTIME_TAG with 24 assets"
-          echo "Published $RUNTIME_TAG. Post-release native acceptance is pending; publication is not full G1 evidence." >> "$GITHUB_STEP_SUMMARY"
+          echo "Published $RUNTIME_TAG after native Runtime regression succeeded." >> "$GITHUB_STEP_SUMMARY"
