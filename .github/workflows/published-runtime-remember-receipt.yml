@@ -1,0 +1,56 @@
+name: Published Runtime remember receipt
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/published-runtime-remember-receipt.yml
+      - scripts/smoke-runtime-release.mjs
+
+permissions:
+  contents: read
+
+jobs:
+  published-receipt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check out the published Runtime test baseline
+        uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-runtime
+          ref: 3e10e56a2c73e5ba54ce8c57b61c72aaf4b6bdb5
+          path: published-receipt-baseline
+          persist-credentials: false
+      - name: Recover a discarded remember receipt on the published Runtime
+        working-directory: published-receipt-baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_VERSION: 2.0.0-dev.28
+          RUNTIME_TARGET: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+          repo=risense-ai/respire-runtime
+          tag="v$RUNTIME_VERSION"
+          test "$(gh api "repos/$repo/commits/$tag" --jq .sha)" = "$(git rev-parse HEAD)"
+          metadata="runtime-build-$RUNTIME_TARGET.json"
+          archive="rsrs-runtime-$RUNTIME_TARGET.tar.gz"
+          gh release download "$tag" -R "$repo" -p "$metadata" -p "$archive" -D release-assets
+          for name in "$metadata" "$archive"; do
+            published_digest="$(gh api "repos/$repo/releases/tags/$tag" --jq ".assets[] | select(.name == \"$name\") | .digest")"
+            [[ "$published_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s  %s\n' "${published_digest#sha256:}" "release-assets/$name" | sha256sum --check --strict
+          done
+          env -u GH_TOKEN node ../scripts/smoke-runtime-release.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-published-remember-receipt
+          path: published-receipt-baseline/smoke-report/*.json
+          if-no-files-found: warn

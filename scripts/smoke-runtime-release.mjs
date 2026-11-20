@@ -544,6 +544,54 @@ try {
   await execModel('after-bad-config', []);
   assert.deepEqual(readFileSync(join(dataDir, 'inference.json')), settingsBytes);
   passedCase('runtime.client-json-bad-config', 'scoped-recovery-preserves-inference-settings');
+  const content = 'Synthetic process diary for recovery of an unread write receipt.';
+  const title = 'Unread receipt probe';
+  const write = {...modelRequest(health, 'remember-receipt', []),
+    args: ['--json', 'remember', content, '--importance', 'trivial', '--title', title]};
+  async function sendReceiptProbe(request) {
+    const response = await fetch(`${endpoint}/api/rpc`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: AbortSignal.timeout(30000)});
+    assert.equal(response.status, 200);
+    return response;
+  }
+  // Discard the only write response before decoding it, then look up its original operation.
+  const discarded = await sendReceiptProbe(write);
+  await discarded.body.cancel();
+  const query = {v: 1, id: 'smoke-remember-result', method: 'runtime.result', scope: write.scope,
+    args: [write.operation_id]};
+  const lookedUp = await (await sendReceiptProbe(query)).json();
+  assert.equal(lookedUp.id, query.id);
+  assert.equal(lookedUp.ok, true);
+  const receipt = lookedUp.envelope.summary;
+  assert.equal(receipt.operation_id, write.operation_id);
+  assert.deepEqual(receipt.scope, write.scope);
+  assert.equal(receipt.state, 'completed');
+  const original = receipt.response;
+  for (const key of ['id', 'operation_id', 'scope', 'idempotency_key']) assert.deepEqual(original[key], write[key]);
+  assert.equal(original.ok, true);
+  assert.equal(original.envelope.status, 'ok');
+  const entryID = original.envelope.summary.id;
+  assert.equal(typeof entryID, 'string');
+  assert.notEqual(entryID, '');
+  const show = {...modelRequest(health, 'remember-readback', []), args: ['--json', 'show', entryID]};
+  const readback = await (await sendReceiptProbe(show)).json();
+  assert.equal(readback.ok, true);
+  const entry = readback.envelope.details.entry;
+  assert.equal(entry.id, entryID);
+  assert.equal(entry.title, title);
+  const diary = /^\u3010\u65e5\u8bb0\u3011\d{4}-\d{2}-\d{2} \d{2}:\d{2} (.*)$/u.exec(entry.content);
+  assert.equal(diary?.[1], content);
+  const stale = await (await sendReceiptProbe({...query, id: 'smoke-stale-remember-result',
+    scope: {...query.scope, generation: query.scope.generation + 1}})).json();
+  assert.equal(stale.ok, false);
+  assert.equal(stale.code, 'scope_mismatch');
+  assert.equal(stale.envelope, null);
+  const missing = await (await sendReceiptProbe({...query, id: 'smoke-missing-remember-result',
+    args: ['smoke-never-submitted-operation']})).json();
+  assert.equal(missing.ok, true);
+  assert.equal(missing.envelope.summary.state, 'unknown');
+  assert.equal(missing.envelope.summary.response, null);
+  passedCase('runtime.remember-result', 'recover-original-receipt-and-read-back-without-replay');
   report.stop = {mode: 'standalone', request: Object.fromEntries(
     ['installation_id', 'instance_id', 'account_id', 'generation'].map(key => [key, health[key]]))};
   const response = await fetch(`${endpoint}/api/runtime/stop`, {
