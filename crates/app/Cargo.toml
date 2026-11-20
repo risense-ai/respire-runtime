@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 description = "respire app layer: auth, service, sync, inject, and transport"
 license-file = "../../LICENSE"
-repository = "https://github.com/risense-ai/respire-cli"
+repository = "https://github.com/risense-ai/respire-runtime"
 publish = false
 
 [features]
