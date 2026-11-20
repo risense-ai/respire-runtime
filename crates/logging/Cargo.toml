@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 description = "dependency-free error-level file logging shared by the respire CLI and runtime"
 license-file = "../../LICENSE"
-repository = "https://github.com/risense-ai/respire-cli"
+repository = "https://github.com/risense-ai/respire-runtime"
 publish = false
 
 [dev-dependencies]
