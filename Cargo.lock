@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "2.0.0-dev.28"
+version = "2.0.0-dev.29"
 dependencies = [
  "anyhow",
  "respire_app",
