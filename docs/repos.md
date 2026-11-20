@@ -6,7 +6,7 @@ this repository is the Core-linked source of truth.
 | Repository | Role |
 | --- | --- |
 | `risense-ai/respire-runtime` (this repo) | `rsrs-runtime` binary, RPC server, closed-source Core link, `respire-protocol` publication, 7-platform native regression and release |
-| `risense-ai/respire-cli` | `rsrs` CLI/TUI, asset installation (models, engines), runtime discovery/download/supervision, autostart registration, host account RPC; consumes `respire-protocol` from crates.io and pins a runtime release |
+| `risense-ai/respire-cli` | `rsrs` CLI/TUI, asset installation, Runtime discovery and supervision, and host account operations over the protocol |
 | `risense-ai/respire-core` | Closed-source Core SDK builds; publishes per-target SDK archives (`sdk-v*` tags) that this repository pins and links |
 | `risense-ai/respire-client2` | Wails desktop client; shares the managed runtime directory and download/verify rules, downloads runtime assets from this repository's releases |
 | `risense-ai/respire-docs` | Product documentation |
@@ -16,20 +16,19 @@ Boundaries in one sentence each:
 - Repository = build product = authorization surface: only this repository
   links the closed-source Core; `respire-cli` has no Core link, no
   private-sdk-cache and no native regression matrix.
-- runtime = core capability + RPC; every install, download, registration and
-  configuration entry point lives in the CLI.
+- Runtime exposes core capabilities over RPC and MCP. Each host owns installation,
+  updates, system startup and credential storage.
 
-## Cross-repository pins
+## SDK and host discovery
 
 - `respire-core/.github/workflows/sdk-link.yml` validates its GNU SDK through
   a fixed consumer pinned at `risense-ai/respire-cli@406399841208bf865d8f40c72dbbf6450fb3a44b`.
   After the P2 migration lands, replace that pin with a consumer commit from
   this repository (comment also recorded in `release.yml` next to the SDK
   cache restore step).
-- `respire-cli` consumes `runtime-build-<triple>.json` and `runtime-pin.json`
-  (generated here via `scripts/update-cli-pin.mjs`).
-- `respire-client2` consumes the same release assets from this repository
-  with `runtime_version` as the version authority.
+- CLI and Client2 independently discover and verify Runtime release assets.
+  Product versions identify artifacts. Hosts use the protocol and required
+  capabilities to communicate with a running Runtime.
 
 ## Required CI/release configuration (repository settings)
 

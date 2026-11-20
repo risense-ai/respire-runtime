@@ -61,11 +61,8 @@ runs the native regression matrix and publishes:
 - `runtime-build-<triple>.json` (version, tag, triple, SHA-256 digests and CLI compatibility range)
 
 See [docs/releasing.md](docs/releasing.md) for the full process and
-[docs/version-contract.md](docs/version-contract.md) for how the CLI consumes
-`runtime_version`, `runtime-pin.json` and the health-body compatibility fields.
-
-Release ordering rule: **the runtime repository releases first; the CLI releases
-second** and its pin may only point at an existing runtime release.
+[docs/version-contract.md](docs/version-contract.md) for artifact metadata and
+the protocol contract used by independent hosts.
 
 ## Building from source
 

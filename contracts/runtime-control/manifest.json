@@ -540,7 +540,7 @@
     },
     {
       "path": "fixtures/positive/release-metadata-v2.json",
-      "sha256": "f822e9dd290823b8161075c842d58eecc8c7491fde1c1d70f7de38a174023c7f"
+      "sha256": "a882d7e90f2905f3f4b5b05c6692ac590cbc2454fa1ad0e5c817a88ffac75d39"
     },
     {
       "path": "fixtures/positive/root-layout.json",
@@ -600,7 +600,7 @@
     },
     {
       "path": "schema/release-metadata.schema.json",
-      "sha256": "769e34a3fe927ec1e7d2a2a4b6b06c62a4b769123723ab42820a6b018296e3c8"
+      "sha256": "719f1b298287b5b5340c3f76f2323f7737d09888e06889f6ea753df17ef50e8a"
     },
     {
       "path": "fixtures/positive/stop-final-forced-timeout.json",

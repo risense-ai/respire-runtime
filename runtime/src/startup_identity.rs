@@ -301,7 +301,10 @@ fn authorize_control_inner(grant: LaunchGrant, auth: bool, paused: bool) -> Resu
     // Pin the exact resolved spelling used by memory_revision before it opens DB.
     if !auth { respire_app::service::install_runtime_profile(resolved_profile); }
     let unbound_identity = if auth { None } else { serving_unbound_identity(&context.profile)? };
-    let migrated_identity = if auth { None } else { verify_migrated_local_session(&context.profile)? };
+    let migrated_identity = if auth { None } else {
+        respire_client_host::identity::read_migrated_local_session(&context.profile, hash)?
+            .map(|(_, identity)| identity)
+    };
     if let Some(identity) = unbound_identity.as_ref() {
         respire_app::login_transaction::verify_locked_auth_identity(&context.root, &context.profile, identity)?;
     }
@@ -599,16 +602,6 @@ fn verify_managed_boot_inner(check_login_recovery: bool) -> Result<()> {
     }
 }
 
-fn verify_migrated_local_session(profile: &Path) -> Result<Option<[String; 2]>> {
-    let Some((_, identity)) = respire_client_host::identity::read_migrated_local_session(profile, hash)? else {
-        return Ok(None);
-    };
-    anyhow::ensure!(respire_client_host::identity::read_migrated_local_session(profile, hash)?
-        .map(|(_, identity)| identity)
-        == Some(identity.clone()), "migrated local session changed during credential verification");
-    Ok(Some(identity))
-}
-
 fn serving_unbound_identity(profile: &Path) -> Result<Option<respire_protocol::HostAuthIdentity>> {
     use respire_client_host::identity::{auth_session_identity, AuthSessionIdentity};
     let Some(session) = respire_client_host::identity::read_session_json(&profile.join("session.json"))? else {
@@ -725,8 +718,9 @@ fn verify_control_authority(
     let maintenance_bytes = read_private_file(&control.join("maintenance.json"))?;
     if !require_live_supervisor
         && maintenance_bytes.is_none()
-        && grant.is_none_or(|grant| grant.managed_id.is_none() && grant.maintenance.is_none())
+        && grant.is_none_or(|grant| grant.maintenance.is_none())
     {
+        // Registration belongs to the host. Only transaction authority needs it.
         return Ok(());
     }
     let registration_bytes = read_private_file(&control.join("registration.json"))?;
@@ -1127,16 +1121,19 @@ mod tests {
             .join(format!("respire-offline-fixture-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&offline)?;
         let offline_result = (|| -> Result<()> {
-            let (mut context, _) = fixture();
+            let (mut context, mut supervised) = fixture();
             context.root = offline.clone();
             let control = offline.join("runtime/autostart");
             fs::create_dir_all(&control)?;
             fs::write(control.join("registration.json"), b"obsolete registration")?;
             verify_authority(None, &context)?;
+            supervised.managed_id = Some("third-party-supervisor".to_owned());
+            verify_authority(Some(&supervised), &context)?;
             assert!(verify_authority_for_mode(None, &context, false).is_err());
             let marker = control.join("maintenance.json");
             fs::write(&marker, b"unverified active maintenance")?;
             assert!(verify_authority(None, &context).is_err());
+            assert!(verify_authority(Some(&supervised), &context).is_err());
             fs::remove_file(marker)?;
             let session_path = offline.join("session.json");
             assert!(serving_unbound_identity(&offline)?.is_none());

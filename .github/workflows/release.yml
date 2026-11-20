@@ -34,12 +34,6 @@ concurrency:
   queue: max
   cancel-in-progress: false
 
-env:
-  # CLI compatibility window embedded into every runtime-build-<triple>.json.
-  # Source of truth for the contract: docs/version-contract.md.
-  RUNTIME_MIN_CLI: '2.0.0-dev.11'
-  RUNTIME_MAX_CLI: '*'
-
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -372,7 +366,6 @@ jobs:
             binary_file: process.env.RUNTIME_BINARY_FILE,
             binary_sha256: process.env.RUNTIME_BINARY_SHA256,
             source_commit: process.env.RUNTIME_SOURCE_SHA,
-            compat: {min_cli: process.env.RUNTIME_MIN_CLI, max_cli: process.env.RUNTIME_MAX_CLI},
             protocol_range: {minimum: 1, maximum: 1},
             capabilities: {business_executor: '1', mcp_server: '1', offline_keygen_handoff: '1'},
             files: manifestFiles('payload', 'payload')
@@ -384,9 +377,6 @@ jobs:
           if (!/^[0-9a-f]{40}$/.test(report.source_commit)) throw new Error('Invalid source_commit');
           if (!report.files.some(file => file.path === report.binary_file && file.sha256 === report.binary_sha256)) {
             throw new Error('Binary file manifest does not match binary_sha256');
-          }
-          for (const field of ['min_cli', 'max_cli']) {
-            if (typeof report.compat[field] !== 'string') throw new Error(`Invalid compat.${field}`);
           }
           fs.writeFileSync(`runtime-build-${process.env.RUNTIME_TARGET}.json`, JSON.stringify(report, null, 2) + '\n');
           NODE
@@ -475,8 +465,6 @@ jobs:
           RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
           RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
           RUNTIME_TARGET: ${{ matrix.target }}
-          EXPECTED_MIN_CLI: ${{ env.RUNTIME_MIN_CLI }}
-          EXPECTED_MAX_CLI: ${{ env.RUNTIME_MAX_CLI }}
         run: |
           node - <<'NODE'
           const fs = require('fs'), cp = require('child_process');
@@ -489,10 +477,6 @@ jobs:
           for (const [key, value] of Object.entries(required)) {
             if (report[key] !== value) throw new Error(`runtime-build ${key} differs: ${report[key]} != ${value}`);
           }
-          const compat = report.compat || {};
-          if (compat.min_cli !== process.env.EXPECTED_MIN_CLI || compat.max_cli !== process.env.EXPECTED_MAX_CLI) {
-            throw new Error('runtime-build compat window differs from the workflow contract');
-          }
           const digest = file => cp.execFileSync('sha256sum', [file], {encoding: 'utf8'}).split(' ')[0];
           if (digest(`release-assets/rsrs-runtime-${target}.tar.gz`) !== report.archive_sha256) throw new Error('Archive SHA-256 mismatch');
           if (digest(`release-assets/${report.binary_file}`) !== report.binary_sha256) throw new Error('Binary SHA-256 mismatch');
@@ -503,8 +487,6 @@ jobs:
         env:
           RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
           RUNTIME_TARGET: ${{ matrix.target }}
-          EXPECTED_MIN_CLI: ${{ env.RUNTIME_MIN_CLI }}
-          EXPECTED_MAX_CLI: ${{ env.RUNTIME_MAX_CLI }}
         run: |
           node scripts/smoke-runtime-release.mjs --self-check
           node scripts/smoke-runtime-release.mjs
@@ -628,9 +610,6 @@ jobs:
                 report.archive_file !== `rsrs-runtime-${target}.tar.gz` ||
                 !/^[0-9a-f]{64}$/.test(report.archive_sha256 || '')) {
               throw new Error(`runtime-build-${target}.json identity mismatch`);
-            }
-            if (report.compat?.min_cli !== process.env.RUNTIME_MIN_CLI || report.compat?.max_cli !== process.env.RUNTIME_MAX_CLI) {
-              throw new Error(`runtime-build-${target}.json compat window mismatch`);
             }
             for (const [file, field] of [[`rsrs-runtime-${target}.tar.gz`, 'archive_sha256'], [report.binary_file, 'binary_sha256']]) {
               if (!fs.existsSync(`release-assets/${file}`)) throw new Error(`Missing release asset: ${file}`);

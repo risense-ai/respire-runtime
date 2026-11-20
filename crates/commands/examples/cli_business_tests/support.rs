@@ -26,22 +26,9 @@ pub(super) fn runtime_bin() -> std::io::Result<PathBuf> {
     Ok(binary)
 }
 
-pub(super) fn cli_source() -> anyhow::Result<PathBuf> {
-    let source = PathBuf::from(std::env::var_os("RSRS_CLI_SOURCE_DIR")
-        .context("supply the exact CLI source checkout used to build RSRS_CLI_BIN")?)
-        .canonicalize()?;
-    let expected = std::env::var("RSRS_CLI_SOURCE_SHA")
-        .context("supply the exact CLI source SHA")?;
-    anyhow::ensure!(expected.len() == 40 && expected.bytes().all(|byte|
-        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), "invalid CLI source SHA");
-    // The native workflow verifies both checkout HEADs before it builds either side.
-    anyhow::ensure!(source.join("runtime-pin.json").is_file(), "CLI source pin is missing");
-    Ok(source)
-}
-
 // Candidate mode is test-only and opt-in. It accepts the unmodified receipt from
-// the real offline installer, never a replacement official pin or release claim.
-fn candidate_version(selected: &Value, pinned: &str, binary: &Path) -> anyhow::Result<String> {
+// the real offline installer.
+fn verify_candidate(selected: &Value, binary: &Path) -> anyhow::Result<()> {
     let path = std::env::var_os("RSRS_RUNTIME_CANDIDATE_METADATA")
         .context("candidate metadata path missing")?;
     let raw = std::fs::read_to_string(path)?;
@@ -50,7 +37,7 @@ fn candidate_version(selected: &Value, pinned: &str, binary: &Path) -> anyhow::R
     anyhow::ensure!(source.len() == 40 && source.bytes().all(|byte|
         byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), "invalid Runtime source SHA");
     let version = metadata["runtime_version"].as_str().context("candidate version missing")?;
-    anyhow::ensure!(version != pinned && metadata["schema_version"] == 2
+    anyhow::ensure!(metadata["schema_version"] == 2
         && metadata["candidate"]["kind"] == "unpublished-source-fixture"
         && metadata["source_commit"] == source
         && metadata["candidate"]["cli_source_sha"] == std::env::var("RSRS_CLI_SOURCE_SHA")?
@@ -62,7 +49,7 @@ fn candidate_version(selected: &Value, pinned: &str, binary: &Path) -> anyhow::R
         && selected["sha256"] == metadata["binary_sha256"]
         && selected["sha256"] == format!("{:x}", Sha256::digest(std::fs::read(binary)?)),
         "candidate fixture identity differs from its source-bound offline installation");
-    Ok(version.to_owned())
+    Ok(())
 }
 
 // Copy the installer receipt and inventory verbatim. Product trust validation
@@ -75,17 +62,21 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
     let receipt = source_root.join("runtime.json");
     let selection_bytes = std::fs::read(&receipt)?;
     let selected: Value = serde_json::from_slice(&selection_bytes)?;
-    let pin: Value = serde_json::from_slice(&std::fs::read(cli_source()?.join("runtime-pin.json"))?)?;
-    let pinned = pin["required"].as_str().context("Runtime pin required missing")?;
-    let version = if std::env::var_os("RSRS_RUNTIME_CANDIDATE_METADATA").is_some() {
-        candidate_version(&selected, pinned, &binary)?
-    } else {
-        pinned.to_owned()
-    };
+    let version = version_dir.file_name().and_then(|name| name.to_str())
+        .context("Runtime fixture version directory is invalid")?;
+    let metadata_json = selected["release"]["metadata_json"].as_str()
+        .context("Runtime fixture is missing verified release metadata")?;
+    let metadata: Value = serde_json::from_str(metadata_json)?;
     anyhow::ensure!(selected["version"] == version
-        && selected["release"]["metadata_json"].is_string()
-        && source_root.join("runtime").join(&version) == version_dir,
+        && metadata["runtime_version"] == version
+        && metadata["binary_sha256"] == selected["sha256"]
+        && selected["sha256"] == format!("{:x}", Sha256::digest(std::fs::read(&binary)?))
+        && selected["release"]["metadata_sha256"] == format!("{:x}", Sha256::digest(metadata_json.as_bytes()))
+        && source_root.join("runtime").join(version) == version_dir,
         "Runtime fixture must be a verified managed installation");
+    if std::env::var_os("RSRS_RUNTIME_CANDIDATE_METADATA").is_some() {
+        verify_candidate(&selected, &binary)?;
+    }
     let version_receipt = source_root.join("runtime/.receipts").join(format!("{version}.json"));
     anyhow::ensure!(version_receipt.canonicalize()? == version_receipt,
         "Runtime version receipt must belong to the source installation without links");
@@ -95,7 +86,7 @@ pub(super) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
     let copied_receipt = root.join("bin/runtime/.receipts").join(format!("{version}.json"));
     std::fs::create_dir_all(root.join("bin/runtime/.receipts"))?;
     let mut pending = vec![
-        (version_dir.to_path_buf(), root.join("bin/runtime").join(&version)),
+        (version_dir.to_path_buf(), root.join("bin/runtime").join(version)),
         (version_receipt, copied_receipt.clone()),
         (receipt, root.join("bin/runtime.json")),
     ];

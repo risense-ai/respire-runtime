@@ -29,11 +29,10 @@ locked until the host delivers its key material.
 
 ## Identity and health
 
-At startup the binary publishes its `RuntimeIdentity`
-(`runtime_version` = this crate's version, compat window `min_cli = 1.0.20`,
-`max_cli = *`) through `respire_commands::rpc_serve::set_runtime_identity`.
-The `/api/health` body carries the extension under the `runtime` key plus a
-flattened `runtime_version`, so older CLI builds keep working additively.
+At startup the binary publishes its own version through
+`respire_commands::rpc_serve::set_runtime_identity`. The `/api/health`
+response reports the version for diagnostics and declares the wire protocol
+version and capabilities for callers.
 
 `RSRS_RUNTIME_BOOT_TOKEN` is consumed with `respire_spawn` semantics: read
 once, then removed from the environment. Runtime verifies each host launch grant against its profile and process identity.
