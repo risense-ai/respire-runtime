@@ -1,21 +1,20 @@
 # Automatic releases
 
-Push an unused release tag pointing to a reviewed commit on `main`:
+Push an unused DEV tag that matches `runtime/Cargo.toml` and `Cargo.lock` at a
+reviewed commit on `main`:
 
 ```sh
 git tag v1.4.0-dev.1 <reviewed-main-commit>
 git push origin v1.4.0-dev.1
-# Stable uses the same automatic workflow, for example v1.4.0.
 ```
 
-DEV tags determine the binary version; CI prepares the matching ephemeral
-Cargo version. Stable tags require the runtime source version to match first.
-DEV releases publish as prereleases; stable releases are the pinned versions
-consumed by the CLI.
+CI verifies that the tag matches the Runtime source version. DEV releases
+publish as prereleases. The stable publication path requires separate
+authorization.
 
 Manual `workflow_dispatch` remains available: pass `ref` (branch, commit or
 tag), `publish`, and for non-tag sources the exact `dev_version`
-(`X.Y.Z-dev.N`). A stable tag always publishes.
+(`X.Y.Z-dev.N`). Use `publish=false` for candidate builds and native validation.
 
 ## What the Release workflow produces
 
@@ -38,7 +37,7 @@ and the `runtime/` libraries, matching the managed directory layout that
 
 ## Gate sequence
 
-1. `plan`: tag/version validation (stable tag must match the source version),
+1. `plan`: tag and source version validation,
    main-ancestry check for published sources.
 2. `build` (8-platform matrix): pinned Core SDK from the exact cache,
    release build, SDK staging, archive assembly, SHA-256 computation,
