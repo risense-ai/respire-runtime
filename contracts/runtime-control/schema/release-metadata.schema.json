@@ -16,14 +16,6 @@
     "binary_file": { "type": "string", "minLength": 1 },
     "binary_sha256": { "$ref": "#/$defs/sha256" },
     "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "compat": {
-      "type": "object",
-      "required": ["min_cli", "max_cli"],
-      "properties": {
-        "min_cli": { "type": "string" },
-        "max_cli": { "type": "string" }
-      }
-    },
     "protocol_range": {
       "type": "object",
       "required": ["minimum", "maximum"],

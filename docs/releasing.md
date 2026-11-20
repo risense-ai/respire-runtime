@@ -54,19 +54,13 @@ and the `runtime/` libraries, matching the managed directory layout that
 
 Tag CI runs in its own concurrency group; publication is serialized repo-wide.
 
-## Downstream consumption order
+## Independent consumers
 
-1. This repository publishes `vX.Y.Z` (see docs/version-contract.md for the
-   iron rule: runtime first).
-2. Generate and merge the CLI pin update PR:
-   `node scripts/update-cli-pin.mjs X.Y.Z --from-builds <downloaded assets>`
-   produces `runtime-pin.json` and the PR text for `risense-ai/respire-cli`.
-3. Cut the CLI release; its pin now points at an existing runtime release.
-4. `respire-client2` reads `runtime-build-<triple>.json` (`runtime_version`)
-   and downloads `rsrs-runtime-<triple>.tar.gz` from this repository's
-   releases, verifying SHA-256 before install.
+Hosts discover Runtime releases on their selected channel, verify the artifact
+digests, and use the published [protocol contract](version-contract.md).
+Each product publishes on its own schedule.
 
 ## Version increments
 
 Every user-visible runtime change set bumps the patch version and ships as a
-new tag; dev previews use `vX.Y.Z-dev.N` and never update the CLI pin.
+new tag. DEV previews use `vX.Y.Z-dev.N`.
