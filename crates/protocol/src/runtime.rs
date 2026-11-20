@@ -1,4 +1,4 @@
-//! runtime/CLI split-era wire contract (version pinning, compat window, asset reporting).
+//! Wire types for Runtime identity, operations, assets and release metadata.
 //!
 //! Pure serde data shared by the `rsrs` CLI and the `rsrs-runtime` binary across
 //! repository boundaries. The published crate is the single source of truth for
@@ -8,19 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// CLI versions accepted by a runtime build (semver window, `max_cli` may be `*`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeCompat {
-    pub min_cli: String,
-    pub max_cli: String,
-}
-
 /// Runtime identity block embedded in the `/health` body extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeIdentity {
     /// Version of the `rsrs-runtime` binary itself (its own `CARGO_PKG_VERSION`).
     pub runtime_version: String,
-    pub runtime_compat: RuntimeCompat,
 }
 
 /// Identity fixed by the caller for one Runtime business operation.
@@ -131,11 +123,7 @@ impl RuntimeIdentity {
     /// Health-body extension under the `runtime` key; additive, older CLIs ignore it.
     pub fn health_extension_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "runtime_version": self.runtime_version,
-            "runtime_compat": {
-                "min_cli": self.runtime_compat.min_cli,
-                "max_cli": self.runtime_compat.max_cli,
-            }
+            "runtime_version": self.runtime_version
         })
     }
 }
@@ -318,7 +306,6 @@ pub struct RuntimeBuildMeta {
     pub binary_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
-    pub compat: RuntimeCompat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_range: Option<ProtocolRange>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -353,7 +340,6 @@ struct RawRuntimeBuildMeta {
     binary_file: Option<String>,
     binary_sha256: Option<String>,
     source_commit: Option<String>,
-    compat: Option<RuntimeCompat>,
     protocol_range: Option<ProtocolRange>,
     #[serde(default)]
     capabilities: BTreeMap<String, String>,
@@ -417,9 +403,6 @@ impl RuntimeBuildMeta {
         let binary = raw
             .binary_sha256
             .ok_or(RuntimeBuildMetaError::MissingField("binary_sha256"))?;
-        let compat = raw
-            .compat
-            .ok_or(RuntimeBuildMetaError::MissingField("compat"))?;
         if tag.strip_prefix('v') != Some(runtime_version.as_str()) {
             return Err(RuntimeBuildMetaError::AliasConflict("tag/runtime_version"));
         }
@@ -484,7 +467,6 @@ impl RuntimeBuildMeta {
             binary_file,
             binary_sha256: binary,
             source_commit: raw.source_commit,
-            compat,
             protocol_range: raw.protocol_range,
             capabilities: raw.capabilities,
             files: raw.files,
@@ -530,10 +512,6 @@ mod tests {
     fn identity() -> RuntimeIdentity {
         RuntimeIdentity {
             runtime_version: "1.0.21-dev.1".to_owned(),
-            runtime_compat: RuntimeCompat {
-                min_cli: "1.0.20".to_owned(),
-                max_cli: "*".to_owned(),
-            },
         }
     }
 
@@ -541,7 +519,7 @@ mod tests {
     fn health_extension_roundtrip() -> anyhow::Result<()> {
         let json = identity().health_extension_json();
         assert_eq!(json["runtime_version"], "1.0.21-dev.1");
-        assert_eq!(json["runtime_compat"]["min_cli"], "1.0.20");
+        assert!(json.get("runtime_compat").is_none());
         let back: RuntimeIdentity = serde_json::from_value(serde_json::json!({
             "runtime_version": "1.0.21-dev.1",
             "runtime_compat": {"min_cli": "1.0.20", "max_cli": "*"}
@@ -598,10 +576,6 @@ mod tests {
             binary_sha256: "2222222222222222222222222222222222222222222222222222222222222222"
                 .to_owned(),
             source_commit: Some("dd45330c9848ebb73f2d98a363e6af0de3fc5a91".to_owned()),
-            compat: RuntimeCompat {
-                min_cli: "1.0.20".to_owned(),
-                max_cli: "*".to_owned(),
-            },
             protocol_range: Some(ProtocolRange {
                 minimum: 1,
                 maximum: 1,

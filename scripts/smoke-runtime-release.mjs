@@ -464,8 +464,7 @@ try {
     assert.equal(candidate.runtime_version, version);
     assert.ok(Array.isArray(candidate.capabilities) &&
       ['business_executor', 'mcp_server'].every(capability => candidate.capabilities.includes(capability)));
-    assert.equal(candidate.runtime?.runtime_compat?.min_cli, process.env.EXPECTED_MIN_CLI);
-    assert.equal(candidate.runtime?.runtime_compat?.max_cli, process.env.EXPECTED_MAX_CLI);
+    assert.equal(candidate.runtime?.runtime_version, version);
     if (candidate.store_ready === true && candidate.state === 'ready') {
       assert.ok(unlockSent, 'Runtime opened the store before host key delivery');
       health = candidate;

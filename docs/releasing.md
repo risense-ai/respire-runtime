@@ -46,7 +46,7 @@ and the `runtime/` libraries, matching the managed directory layout that
    native ARM hardware runners only.
 3. `native-regression` (8-platform matrix): digest verification of the actual
    artifacts, then a real serve/health/stop smoke of the built binary with the
-   `runtime_version` and `runtime_compat` contract checks. After the P2
+   Runtime identity and protocol checks. After the P2
    migration this job additionally carries the full inference, migration and
    startup-supervision regression suites moved from `respire-cli`.
 4. `publish`: inventory and digest re-verification of all 24 assets, draft

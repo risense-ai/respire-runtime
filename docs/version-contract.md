@@ -3,7 +3,7 @@
 This document defines how `respire-runtime` and `respire-cli` stay compatible
 while releasing independently. The contract's machine-readable pieces are the
 `runtime-build-<triple>.json` release metadata (produced by the Release
-workflow), the `runtime-pin.json` file in the CLI repository, and the
+workflow) and the
 `respire-protocol` crate published from `crates/protocol` in this repository.
 
 ## Frozen host boundary
@@ -39,9 +39,8 @@ host-control DTOs. Publish dev.17 before merging host consumers of the new DTOs.
   interrupted host credential-cleanup journals are not a compatibility promise;
   unsupported journals are retained and explicitly rejected.
 
-Freeze the accepted Runtime source and public asset hashes first, then complete
-CLI and finally Client2 against that baseline. Product version numbers remain
-independent; protocol and required capabilities determine compatibility.
+Runtime, CLI and Client2 release independently. Protocol versions and the
+capabilities used by a request determine interoperability.
 
 ## runtime_version
 
@@ -55,57 +54,16 @@ independent; protocol and required capabilities determine compatibility.
 - The CLI has its own version train and never derives its version from the
   runtime or vice versa.
 
-## runtime-pin.json consumption rules (CLI side)
+## Release metadata and health
 
-The CLI repository carries a pin file:
+Runtime release metadata describes the Runtime artifact, its digests, the
+supported protocol range and capabilities. Each host can discover and verify
+an artifact from the requested release channel. A test run may record an exact
+artifact version and digest for reproducibility.
 
-```json
-{ "schema_version": 1, "required": "x.y.z", "accept": ">=x.y.z,<2.0.0" }
-```
-
-- **Automatic download uses `required`** as an exact pin (build-time
-  determinism, decision #5 of the split plan). It never resolves "latest".
-- **`accept` is a reuse range**: an already-installed managed runtime whose
-  `runtime_version` falls inside `accept` is reused without forced
-  replacement; outside the range the CLI replaces it (draining in-flight
-  requests first, semantics unchanged from the combined binary).
-- After this repository publishes a new release, a follow-up PR in the CLI
-  repository updates the pin (`scripts/update-cli-pin.mjs` in this repository
-  generates the content). Merge that PR before cutting the CLI release.
-
-## Release ordering iron rule
-
-**The runtime repository releases first; the CLI repository releases second.**
-
-- A CLI pin may only reference an existing runtime release. Because the pin is
-  exact, a pin pointing at a non-existent release is a release blocker; CI on
-  the CLI side refuses such pins (pin existence gate).
-- client2 switches its asset source last, after both repositories ship.
-
-## health body extension fields
-
-The runtime `/health` body carries, in addition to the existing fields:
-
-```json
-{
-  "runtime_version": "1.4.0",
-  "runtime_compat": { "min_cli": "2.0.0-dev.11", "max_cli": "*" }
-}
-```
-
-- `runtime_version` equals the releasing `Cargo.toml` version.
-- `runtime_compat.min_cli` / `max_cli` declare the CLI versions this runtime
-  accepts; `max_cli: "*"` means no upper bound. The Release workflow embeds
-  the same window into every `runtime-build-<triple>.json`; the values are
-  defined once as workflow-level environment variables (`RUNTIME_MIN_CLI`,
-  `RUNTIME_MAX_CLI`).
-- The host-owned credential channel and foreground Runtime lifecycle require CLI
-  `2.0.0-dev.11` or later. Earlier CLIs cannot supply the required host credentials
-  or launch this Runtime through its current lifecycle contract.
-- The CLI installer validates the metadata's CLI window before installation.
-  Its `runtime_acceptable(health)` check additionally requires the Runtime's
-  version to be in the CLI's accept window, the expected managed path, and no
-  stalled inference.
+Health reports the actual `runtime_version` for diagnosis. Clients check the
+wire protocol and capabilities before calling a method. A host delivering
+credentials also verifies the receiving Runtime and account scope.
 
 ## PROTOCOL_V hard gate
 
@@ -150,12 +108,6 @@ remain required. DEV-to-DEV upgrades are required for persistent-format changes;
 DEV revisions without such changes do not add a separate migration baseline.
 Old-client/new-Runtime and new-client/old-Runtime compatibility are not release
 requirements. See [Client2 upgrades](client2-split-compatibility.md).
-
-After the new Runtime release exists, update both the CLI download default and
-its minimum supported Runtime to this host-owned generation. Upgrading the CLI
-must not silently reuse dev.17 just because the old accept range includes it.
-Later Runtime releases may remain reusable when the protocol, capabilities and
-supported range match; no equal-version requirement is introduced.
 
 Runtime 2.0.0-dev.18 removes the embedded host command entry points. Both
 Client2 0.2.56 and 2.0.0-dev.5 still select their installed Runtime image for

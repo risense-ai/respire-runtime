@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use respire_protocol::{
-    RuntimeCompat, RuntimeIdentity, RuntimeRequestScope, RuntimeStopOutcome, RuntimeStopReceipt,
+    RuntimeIdentity, RuntimeRequestScope, RuntimeStopOutcome, RuntimeStopReceipt,
     RuntimeUnfinishedOperation,
 };
 use serde_json::{json, Value};
@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 static RUNTIME_IDENTITY: OnceLock<RuntimeIdentity> = OnceLock::new();
 
 /// Publish the serving binary's identity; the first call wins. The health body
-/// and every RPC reply report it so clients can pin-check the managed runtime.
+/// and every RPC reply report it for diagnostics.
 pub fn set_runtime_identity(identity: RuntimeIdentity) -> bool {
     RUNTIME_IDENTITY.set(identity).is_ok()
 }
@@ -42,10 +42,6 @@ pub fn set_runtime_identity(identity: RuntimeIdentity) -> bool {
 pub(crate) fn runtime_identity() -> RuntimeIdentity {
     RUNTIME_IDENTITY.get().cloned().unwrap_or(RuntimeIdentity {
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
-        runtime_compat: RuntimeCompat {
-            min_cli: env!("CARGO_PKG_VERSION").to_owned(),
-            max_cli: "*".to_owned(),
-        },
     })
 }
 
@@ -192,15 +188,10 @@ fn bin_version() -> &'static str {
 
 /// Publish the identity of a host binary that serves in-process as the
 /// split-transition shim (the CLI exe behind `--runtime-internal`): it reports
-/// its own train so client version gates keep matching, with an unbounded
-/// compatibility window. First publication still wins.
+/// its own version for diagnostics. First publication still wins.
 pub fn publish_shim_identity(version: &'static str) -> bool {
     set_runtime_identity(RuntimeIdentity {
         runtime_version: version.to_owned(),
-        runtime_compat: RuntimeCompat {
-            min_cli: version.to_owned(),
-            max_cli: "*".to_owned(),
-        },
     })
 }
 

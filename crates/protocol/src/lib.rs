@@ -51,7 +51,7 @@ pub use runtime::{
     BackendLoadRuntime, BackendLoadRuntimeKind, BackendLoadSdkPin, BackendLoadState, BackendLoadStatus,
     AssetRequirement, AssetState, AssetsStatus, ProtocolRange, RpcRequest, RpcResponse, RuntimeBuildFile,
     RuntimeBuildMeta,
-    RuntimeBuildMetaError, RuntimeCompat, RuntimeIdentity, RuntimeRequestScope, RuntimeStopOutcome, RuntimeStopReceipt,
+    RuntimeBuildMetaError, RuntimeIdentity, RuntimeRequestScope, RuntimeStopOutcome, RuntimeStopReceipt,
     RuntimeUnfinishedOperation, RuntimeUnfinishedOutcome,
 };
 

@@ -26,12 +26,9 @@ use anyhow::{Context, Result};
 use respire_commands::host_hooks::{self, HostHooks};
 use respire_commands::net_rpc;
 use respire_commands::rpc_serve::{self, RuntimeFlags};
-use respire_protocol::{RuntimeCompat, RuntimeIdentity};
+use respire_protocol::RuntimeIdentity;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// CLI compatibility window for this runtime train (runtime-pin.json aligns).
-const MIN_CLI: &str = "2.0.0-dev.11";
-const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
     for name in ["RSRS_SUPER", "RSRS_PASS", "RESPIRE_SUPER", "RESPIRE_PASS", "ONEMEMORY_SUPER", "ONEMEMORY_PASS"] {
@@ -243,10 +240,6 @@ fn apply_data_dir(flags: &Flags) {
 fn publish_identity() {
     let _ = rpc_serve::set_runtime_identity(RuntimeIdentity {
         runtime_version: VERSION.to_owned(),
-        runtime_compat: RuntimeCompat {
-            min_cli: MIN_CLI.to_owned(),
-            max_cli: MAX_CLI.to_owned(),
-        },
     });
 }
 
