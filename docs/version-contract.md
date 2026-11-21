@@ -48,9 +48,8 @@ capabilities used by a request determine interoperability.
   It increments **independently** of the CLI version: every user-visible
   runtime change set bumps the patch version; developer previews use
   `X.Y.Z-dev.N`.
-- A stable release tag `vX.Y.Z` must exactly match the source
-  `runtime_version`; dev tags `vX.Y.Z-dev.N` may point at any reviewed `main`
-  commit.
+- Every Runtime release tag must match the source `runtime_version`.
+  DEV publication uses a reviewed `main` commit and a `vX.Y.Z-dev.N` tag.
 - The CLI has its own version train and never derives its version from the
   runtime or vice versa.
 
