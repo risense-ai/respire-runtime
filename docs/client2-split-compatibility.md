@@ -1,9 +1,9 @@
 # Client2 upgrades and the pure Runtime
 
 The current split removes the embedded CLI and host compatibility entry points
-from Runtime. Upgrade CLI and Client2 before using the pure Runtime. Historical
-clients that invoke removed host commands are upgrade sources, not supported
-consumers of the new Runtime.
+from Runtime. Each host can manage and use a Runtime that provides the protocol,
+methods and capabilities it requires. Record explicit incompatibility for any
+required historical host method that Runtime no longer provides.
 
 ## Independent components
 
@@ -33,16 +33,17 @@ changed; a DEV with no persistent-format change does not need a separate
 DEV-to-DEV matrix entry. Preserve unknown historical formats until their
 equivalence is established.
 
-Acceptance verifies existing data, database integrity, migration recovery,
-host-key unlock after restart, login and sync, and real remember/recall after
-upgrade. It does not require old Client2 or old CLI to operate against the new
-Runtime, old Runtime to operate with the new clients, or the continued presence
-of removed host RPCs.
+Migration acceptance verifies existing data, database integrity, migration
+recovery, host-key unlock after restart, login, sync, and real remember/recall
+after upgrade. Test online interoperability separately by changing one
+component at a time. Verify the requested operations and receipts when protocol
+and methods are supported. Verify explicit failure when a required method or
+authorization is missing.
 
 ## Publication
 
-Validate the new components together using authenticated candidate artifacts.
-Publish Runtime before CLI pins reference its release, then publish CLI and
-Client2 as the coordinated DEV update. This ordering ensures downloadable
-assets exist; it does not impose matching component versions or commit IDs.
-Verify the public assets and the database upgrade path after publication.
+Each component has its own release and validation workflow. Use authenticated
+candidate artifacts for regression and record the exact inputs. When a host
+test downloads Runtime, publish the verified Runtime asset on the intended
+channel before testing the host's download. Recheck the public assets and the
+database upgrade path after publication.

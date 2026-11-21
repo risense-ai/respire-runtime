@@ -2,18 +2,20 @@
 
 ## Version selection
 
-Components match through the wire protocol and required capabilities, not equal
-product versions, SDK versions or source commits. The upgraded CLI obtains the
-current supported Runtime through its published download pin. Resolve and verify
-that release's target, assets and integrity before installation; a `latest`
-label alone does not prove compatibility. Candidate hashes identify tested
-artifacts and do not bind independently released components in production.
+Components interoperate through the wire protocol and required capabilities.
+Each host obtains Runtime through its selected Runtime channel or explicit
+Runtime selection. Verify its target, assets and integrity before installation.
+The host checks actual protocol and method support before using it. Record
+candidate versions and hashes as evidence for the combinations tested.
 
 Upgrade regression prepares data with each supported historical stack, upgrades
 the components, then verifies database migration, integrity and memory operations
 with the new compatible stack. Include database-changing DEV checkpoints; omit
-redundant DEV combinations with unchanged persistent formats. Running old clients
-against the new Runtime is not an acceptance requirement.
+redundant DEV combinations with unchanged persistent formats. Run a separate
+online interoperability check using the original client executable against
+the running Runtime, with the required protocol, method and authorization.
+Record success for the exact tested operations or the explicit reason for
+rejection. Database migration evidence does not imply online interoperability.
 
 ## Wire protocol
 
@@ -43,9 +45,9 @@ combination remains active and is reported as dev.
 
 ## Legacy consumers
 
-The following describes historical installers and preservation checks. These
-clients supply upgrade databases; their old Runtime interfaces are not a support
-requirement for the coordinated DEV update.
+The following describes historical installers and preservation checks. Old
+Runtime interfaces require a method and authorization supported by the running
+Runtime. Preserve the original artifacts needed to construct upgrade fixtures.
 
 The old CLI consumers that treat `sha256` and `binary_sha256` as the same value
 cannot install canonical schema 2 archives whose hashes differ. They keep only
