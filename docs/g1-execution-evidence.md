@@ -1,5 +1,8 @@
 # G1 execution evidence v2
 
+This is the historical format for the retired cross-repository workflow. See
+[Runtime test ownership and execution](testing.md) for current acceptance.
+
 ## Source CI and explicit candidate acceptance
 
 Ordinary pull requests, pushes and manual runs without candidate inputs execute

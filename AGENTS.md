@@ -38,8 +38,8 @@
 - Protocol changes: publish the new `respire-protocol` version to crates.io first,
   then merge the consumer PRs in this repository and in `respire-cli`. CI refuses
   locks that point at unpublished versions.
-- Release order: runtime repository first, CLI repository second. The CLI pin may only
-  reference an existing runtime release. See [docs/version-contract.md](docs/version-contract.md).
+- Release Runtime, CLI and Client2 independently. A hosted test that downloads a
+  public Runtime must select an existing release. See [docs/version-contract.md](docs/version-contract.md).
 - Version increments: every user-visible change set bumps the patch version of this
   repository's own `runtime_version`; developer previews use `vX.Y.Z-dev.N` tags.
 
