@@ -21,15 +21,19 @@ fixture success is reported separately from execution of the published binaries.
 ## Latest-component integration
 
 CLI and Client2 own keychain access, installation, startup and Runtime process
-management. Their final release acceptance supplies the latest published Runtime
-through the protocol. Runtime retains the business assertions and core/RPC source
+management. Each host's acceptance selects a verified Runtime with the wire
+protocol, methods and capabilities the test requires. Record the tested
+artifact identities. Runtime retains the business assertions and core/RPC source
 unit tests. Native HTTP integration fixtures remain distinct from source checks.
 
-Historical compatibility concerns databases: stable releases and DEV checkpoints
-that changed the database upgrade to the current DEV. Preserve the original keys,
-existing decrypted records, pending sync data and continued remember/recall/sync.
-Do not create a compatibility matrix for older hosts calling a new Runtime, or add
-DEV upgrade pairs when no database migration occurred.
+For historical database migration, test stable releases and DEV checkpoints that
+changed the persistent format. Preserve the original keys, decrypt existing
+records, preserve pending sync data and verify continued remember, recall and sync.
+
+Test online interoperability by changing one component at a time. Verify
+supported operations and receipts with historical hosts and runtimes. Record
+explicit errors for protocol mismatches, missing methods or capabilities, and
+authorization failures.
 
 The historical frozen G1 chain and prebuilt cross-repository test bundles have
 been removed. Missing acceptance evidence remains unverified; source checks,

@@ -1,5 +1,8 @@
 # Host-owned credentials: draft acceptance record
 
+This record preserves the November 15 acceptance scope. See
+[Runtime test ownership and execution](testing.md) for current acceptance.
+
 This is a validation plan and partial evidence record, not a passing acceptance
 report. The coordinated drafts are Runtime #84, CLI #290 and Client2 #42 in
 `risense-ai`. They must remain drafts until the other in-flight work is complete,

@@ -6,17 +6,15 @@ while releasing independently. The contract's machine-readable pieces are the
 workflow) and the
 `respire-protocol` crate published from `crates/protocol` in this repository.
 
-## Frozen host boundary
+## Host boundary
 
-The frozen host split uses published `respire-protocol` **2.0.0-dev.16** and wire
-protocol **1**. Complete the Runtime implementation against these existing
-types before accepting CLI and Client2 implementations. Do not add mandatory
-fields or change operation semantics during host integration. A later
-incompatible change requires a separately reviewed protocol version.
+The current wire protocol is **1**. Check the required methods and capabilities
+for each request. Mandatory field or operation-semantics changes that break
+compatibility require a separately reviewed protocol version.
 
-Runtime dev.24 adds the independent [core configuration contract](core-config.md)
-in `respire_protocol` **2.0.0-dev.17**, retaining wire protocol **1** and the old
-host-control DTOs. Publish dev.17 before merging host consumers of the new DTOs.
+The [core configuration contract](core-config.md) was added in Runtime dev.24
+with `respire-protocol` **2.0.0-dev.17**. It retained wire protocol **1** and the
+existing host-control DTOs.
 
 - Runtime owns authentication transactions, synchronization, encrypted database
   management, remember/recall, inference and the RPC/MCP interfaces.
@@ -93,20 +91,23 @@ When a change touches the RPC contract:
    crates.io; a consumer PR referencing an unpublished version must not merge.
 
 
-## Current stage-one DEV scope
+## Upgrade and online interoperability
 
-The coordinated DEV update validates the new CLI, Runtime and Client2 together.
-Compatibility is determined by the shared protocol and required capabilities,
-not matching component version numbers, source commits or workflow runs. Exact
-candidate source and artifact identities are regression provenance only.
+Each component can be updated independently. Verify the selected components
+against the shared wire protocol, required methods and capabilities. Use exact
+candidate source and artifact identities to reproduce each regression.
 
 Historical releases provide databases for upgrade testing: prepare data with the
 historical stack, upgrade the hosts and Runtime, then validate that data with the
 new stack. Latest applicable stable and historical stable database upgrades
 remain required. DEV-to-DEV upgrades are required for persistent-format changes;
 DEV revisions without such changes do not add a separate migration baseline.
-Old-client/new-Runtime and new-client/old-Runtime compatibility are not release
-requirements. See [Client2 upgrades](client2-split-compatibility.md).
+Exercise the older host with a new Runtime and the new host with an older
+Runtime by changing one component at a time. Verify operations and receipts when
+the required contract is available. Verify explicit errors when a required
+contract or authorization is missing. See [Client2 upgrades](client2-split-compatibility.md).
+
+## Historical DEV observations
 
 Runtime 2.0.0-dev.18 removes the embedded host command entry points. Both
 Client2 0.2.56 and 2.0.0-dev.5 still select their installed Runtime image for
@@ -114,20 +115,13 @@ host operations and require the removed model catalog/progress RPCs. Upgrade
 those clients before selecting this Runtime; their historical compatibility
 checks do not establish compatibility with the pure Runtime.
 
-The G1 freeze workflow authenticates the selected new Client2 candidate from its
-successful Desktop client workflow. Each frozen run records the actual source,
-build identity, workflow, run, artifact ID, ZIP digest, archive digest and
-executable digest. Confirm these identities against the selected candidate
-before acceptance. An unpublished input is not a released-client or passing G1
-claim, and a recorded source hash is not a production compatibility requirement.
-All seven lifecycle cases and process identity, RPC boundary and cleanup
-assertions remain required. Each ready-library case first runs public CLI
-keygen in the existing hosted private Secret Service fixture, stops the setup
-owner, then tests automatic host key delivery without inherited key variables.
-The fixture verifies credential ownership and removal. Credential-free restart
-locking remains a separate required native check. Current Windows checks and published
-upgrade acceptance remain separate. Interactive Keychain authorization is not
-established by this evidence.
+The retired cross-repository G1 freeze workflow authenticated the selected
+Client2 candidate from its successful Desktop client workflow. Its receipts
+recorded source, build, workflow, run, artifact ID and package digests. The
+ready-library cases used public CLI keygen to seed a private Secret Service
+fixture. They then stopped the setup owner and verified automatic host key
+delivery without inherited key variables. Credential-free restart locking was a
+separate native check. Interactive Keychain authorization was outside the scope.
 
 Runtime 1.0.21-dev.3 and later provide a standalone doctor that
 executes Runtime-owned store, asset/backend, index and optional bounded remote
