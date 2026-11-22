@@ -30,7 +30,6 @@ jobs:
           node-version: '24'
       - name: Resolve exact SDK cache identity
         id: sdk
-        working-directory: runtime-source
         env:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
@@ -51,7 +50,6 @@ jobs:
           path: target/musl-cache
           key: musl-x86_64-unknown-linux-musl-ort-da9b5e3-rust-1.95-v1
       - name: Build the static x64 musl candidate
-        working-directory: runtime-source
         env:
           EXPECTED: ${{ steps.sdk.outputs.key }}
           RESTORED: ${{ steps.sdk-cache.outputs.cache-matched-key }}
