@@ -1,0 +1,34 @@
+{
+  "entry": {
+    "id": "fixture-entry",
+    "kind": "Context",
+    "tags": [],
+    "title": "old entry",
+    "content": "fixture text",
+    "user": "fixture",
+    "computer": "",
+    "project": "",
+    "created_at": "",
+    "updated_at": "",
+    "emotion": -1,
+    "parent_id": "",
+    "see_also": "older-a, older-b",
+    "future_field": {"revision": 2}
+  },
+  "query": {"text": "needle", "limit": 3, "future_hint": true},
+  "snapshot": {
+    "id": "fixture-entry",
+    "deleted": false,
+    "updated_at": "",
+    "kind": "context",
+    "tags": "",
+    "title": "old entry",
+    "project": "",
+    "computer": "",
+    "parent_id": "",
+    "created_at": "",
+    "content_head": "fixture text",
+    "recall_count": 0,
+    "importance": "normal"
+  }
+}
