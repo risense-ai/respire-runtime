@@ -66,7 +66,7 @@ async function run(background) {
         prepareMs: Number(trace[4]), observedMs: Math.round(performance.now())});
     }
   });
-  const exited = new Promise(resolveExit => child.once('close', resolveExit));
+  const exited = new Promise(resolveExit => child.once('close', (code, signal) => resolveExit({code, signal})));
   const observation = {requestedBackground: background, traces};
   report.cases.push(observation);
   let scope;
@@ -156,7 +156,15 @@ async function run(background) {
     console.log(JSON.stringify({...observation, traces: undefined}));
     const stop = await request('/api/runtime/stop', {...scope, installation_id: health.installation_id},
       {'X-Respire-Lifecycle': 'coordinator-v1'});
-    assert.equal(stop.state, 'drained');
+    assert.equal(stop.ok, true);
+    assert.equal(stop.state, 'accepted');
+    const exit = await Promise.race([exited, delay(35000, undefined, {ref: false}).then(() => {
+      throw new Error('Runtime drain did not finish');
+    })]);
+    assert.deepEqual(exit, {code: 0, signal: null});
+    const receipt = JSON.parse(readFileSync(join(data, 'runtime', `stop-${health.instance_id}.json`), 'utf8'));
+    assert.equal(receipt.operation_id, stop.operation_id);
+    assert.equal(receipt.state, 'drained');
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
       const stopped = await Promise.race([exited.then(() => true), delay(3000).then(() => false)]);
