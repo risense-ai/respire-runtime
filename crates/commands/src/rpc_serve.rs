@@ -597,6 +597,7 @@ fn start_profile_switch_target(
     let admission = PROFILE_ADMISSION
         .lock()
         .map_err(|_| anyhow::anyhow!("model admission lock poisoned"))?;
+    // The RPC still holds the write gate. Releasing it wakes waiters before rebuilding.
     anyhow::ensure!(
         PROFILE_SWITCH_RUNNING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1317,16 +1318,6 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             "runtime maintenance pauses model/index preparation",
         );
     }
-    if request.method == "cli.exec"
-        && PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
-        && !is_status(&request.args)
-    {
-        return error_response(
-            &request,
-            "model_switch_busy",
-            "model switch in progress; semantic queries and writes are paused; inspect model.progress",
-        );
-    }
     let operation = if !matches!(
         request.method.as_str(),
         "runtime.result"
@@ -1708,7 +1699,7 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
                 data_dir: Some(respire_app::service::data_dir().display().to_string()),
             },
             Err(error) => error_response(&request,
-                if error.starts_with("runtime_maintenance") { "runtime_maintenance" } else if error.starts_with("invalid_config:") { "invalid_config" } else if error.starts_with("scope_mismatch") { "scope_mismatch" } else { "daemon_unavailable" }, &error),
+                command_error_code(&error), &error),
         },
         other => error_response(
             &request,
@@ -1725,6 +1716,20 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             .remove(&operation.storage_id);
     }
     response
+}
+
+fn command_error_code(error: &str) -> &'static str {
+    if error.starts_with("runtime_maintenance") {
+        "runtime_maintenance"
+    } else if error.starts_with("invalid_config:") {
+        "invalid_config"
+    } else if error.starts_with("scope_mismatch") {
+        "scope_mismatch"
+    } else if error == "model_switch_busy" {
+        "model_switch_busy"
+    } else {
+        "daemon_unavailable"
+    }
 }
 
 fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse {
@@ -1746,7 +1751,7 @@ fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse 
             data_dir: Some(respire_app::service::data_dir().display().to_string()),
         },
         Err(error) => error_response(request,
-            if error.starts_with("runtime_maintenance") { "runtime_maintenance" } else if error.starts_with("invalid_config:") { "invalid_config" } else if error.starts_with("scope_mismatch") { "scope_mismatch" } else { "daemon_unavailable" }, &error),
+            command_error_code(&error), &error),
     }
 }
 
@@ -1780,17 +1785,6 @@ pub fn dispatch_deferred(
     }
     if let Some(response) = locked_response(&request) {
         action(response);
-        return;
-    }
-    if request.method == "cli.exec"
-        && PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
-        && !is_status(&request.args)
-    {
-        action(error_response(
-            &request,
-            "model_switch_busy",
-            "model switch in progress; semantic queries and writes are paused; inspect model.progress",
-        ));
         return;
     }
     if request.method != "cli.exec" {
@@ -3468,29 +3462,56 @@ fn requires_scope(method: &str) -> bool {
     !matches!(method, "runtime.status" | "runtime.stop" | "assets.status" | "cli.progress" | "model.catalog" | "model.progress")
 }
 
+fn model_switch_blocks(request: &RpcRequest) -> bool {
+    PROFILE_SWITCH_RUNNING.load(Ordering::Acquire)
+        && request.method == "cli.exec"
+        && !is_status(&request.args)
+}
+
+fn model_switch_busy() -> (String, String) {
+    (
+        "model_switch_busy".to_owned(),
+        "model switch in progress; semantic queries and writes are paused; inspect model.progress".to_owned(),
+    )
+}
+
+fn read_request_identity(
+    request: &RpcRequest,
+) -> Result<std::sync::RwLockReadGuard<'static, ()>, (String, String)> {
+    if matches!(request.method.as_str(), "runtime.result" | "model.control")
+        || (request.method == "cli.exec" && command_name(&request.args) == Some("recall"))
+        || model_switch_blocks(request)
+    {
+        return SCOPE_EXECUTION.try_read().map_err(|_| (
+            "scope_mismatch".to_owned(), "Runtime identity is changing or unavailable".to_owned(),
+        ));
+    }
+    SCOPE_EXECUTION.read().map_err(|_| (
+        "scope_mismatch".to_owned(), "identity fence poisoned".to_owned(),
+    ))
+}
+
 fn validate_request_scope(request: &RpcRequest) -> Result<(), (String, String)> {
     if !requires_scope(&request.method) { return Ok(()); }
     if request.scope.is_none() {
         return Err(("scope_required".to_owned(), "business requests require scope".to_owned()));
     }
-    if matches!(request.method.as_str(), "runtime.result" | "model.control") {
-        let _scope_held = SCOPE_EXECUTION.try_read().map_err(|_| (
-            "scope_mismatch".to_owned(), "Runtime identity is changing or unavailable".to_owned(),
-        ))?;
-        let _fence = ADMISSIONS.lock().map_err(|_| (
-            "admission_lock_poisoned".to_owned(), "runtime admission lock is poisoned".to_owned(),
-        ))?;
-        return validate_scope(request.scope.as_ref(), &current_scope());
-    }
-    let _scope_held = SCOPE_EXECUTION.read().map_err(|_| (
-        "scope_mismatch".to_owned(), "identity fence poisoned".to_owned(),
-    ))?;
+    let _scope_held = read_request_identity(request)?;
     let gate = shared_exclusive();
-    let _held = gate.acquire(true);
+    let skips_gate = matches!(request.method.as_str(), "runtime.result" | "model.control");
+    let held = if skips_gate {
+        None
+    } else {
+        gate.acquire_foreground_unless(|| model_switch_blocks(request))
+    };
     let _fence = ADMISSIONS.lock().map_err(|_| (
         "admission_lock_poisoned".to_owned(), "runtime admission lock is poisoned".to_owned(),
     ))?;
-    validate_scope(request.scope.as_ref(), &request_current_scope(request)?)
+    validate_scope(request.scope.as_ref(), &request_current_scope(request)?)?;
+    if !skips_gate && held.is_none() {
+        return Err(model_switch_busy());
+    }
+    Ok(())
 }
 
 fn validate_business_config() -> Result<(), String> {
@@ -3721,16 +3742,23 @@ fn admit(
     request: &RpcRequest,
     operation: &OperationIdentity,
 ) -> Result<Admission, (String, String)> {
-    let _scope_held = SCOPE_EXECUTION.read().map_err(|_| (
-        "scope_mismatch".to_owned(), "identity fence poisoned".to_owned(),
-    ))?;
+    let _scope_held = read_request_identity(request)?;
     let gate = shared_exclusive();
     // Legacy progress must observe the command while it holds the execution gate.
-    let _held = if matches!(request.method.as_str(), "model.control" | "cli.progress") { None } else { Some(gate.acquire(true)) };
+    let skips_gate = matches!(request.method.as_str(), "model.control" | "cli.progress");
+    let held = if skips_gate {
+        None
+    } else {
+        gate.acquire_foreground_unless(|| model_switch_blocks(request))
+    };
     let mut admitted = ADMISSIONS.lock().map_err(|_| (
         "admission_lock_poisoned".to_owned(), "runtime admission lock is poisoned".to_owned(),
     ))?;
     let current = request_current_scope(request)?;
+    if !skips_gate && held.is_none() {
+        validate_scope(request.scope.as_ref(), &current)?;
+        return Err(model_switch_busy());
+    }
     admit_locked(request, operation, &current, &mut admitted)
 }
 

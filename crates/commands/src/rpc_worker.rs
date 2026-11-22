@@ -506,6 +506,24 @@ impl WriteGate {
         state.held = true;
         WriteGuard(self)
     }
+    pub(crate) fn acquire_foreground_unless(&self, cancelled: impl Fn() -> bool) -> Option<WriteGuard<'_>> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.foreground += 1;
+        loop {
+            if cancelled() {
+                state.foreground -= 1;
+                self.changed.notify_all();
+                return None;
+            }
+            if !state.held {
+                state.foreground -= 1;
+                state.held = true;
+                return Some(WriteGuard(self));
+            }
+            state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
     pub fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if foreground {
