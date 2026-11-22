@@ -679,7 +679,7 @@ fn start_profile_switch_target(
                     crate::model_progress::check()?;
                     let embedder = respire_app::memory::bge::BgeEmbedder::load_model(&target.model)?;
                     store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"main-index"}))?)?;
-                    store.build_index_with_progress(&keys,&embedder,&target.model,false,|done,total| {
+                    store.build_candidate_index_with_progress(&keys,&embedder,&target,|done,total| {
                         check_sync_context(epoch)?;
                         crate::model_progress::update("switch-index",&target.model,done as u64,Some(total as u64))
                     })?;

@@ -4,6 +4,7 @@ use super::LocalStore;
 use crate::transport::MemoryTransport;
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
+use std::borrow::Cow;
 
 fn generation_key(model: &str) -> Result<String> { respire_core_sdk::generation_key(model) }
 
@@ -70,7 +71,10 @@ impl LocalStore {
     }
 
     pub(super) fn store_artifact(&self, memory: &crate::StoredMemory, model: &str) -> Result<()> {
-        let generation = generation_key(model)?;
+        self.store_artifact_in_generation(memory, &generation_key(model)?)
+    }
+
+    fn store_artifact_in_generation(&self, memory: &crate::StoredMemory, generation: &str) -> Result<()> {
         // The source guard also protects a newer artifact from an older prepared snapshot.
         self.connection.execute_batch("SAVEPOINT core_artifact_publish")?;
         let result = (|| -> Result<()> {
@@ -111,20 +115,24 @@ impl LocalStore {
     }
 
     pub fn index_missing(&self, model: &str) -> Result<bool> {
+        self.index_missing_in_generation(&generation_key(model)?)
+    }
+
+    fn index_missing_in_generation(&self, generation: &str) -> Result<bool> {
         Ok(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext))",
-            params![generation_key(model)?], |row| row.get(0))?)
+            params![generation], |row| row.get(0))?)
     }
 
     pub fn index_pending(&self, model: &str) -> Result<bool> {
-        let missing: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.deleted=0 AND NOT EXISTS
-             (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext))",
-            params![generation_key(&model)?], |row| row.get(0))?;
-        if missing { return Ok(true); }
+        self.index_pending_by(|| generation_key(model))
+    }
+
+    fn index_pending_by<Key: AsRef<str>>(&self, resolve: impl Fn() -> Result<Key>) -> Result<bool> {
+        if self.index_missing_in_generation(resolve()?.as_ref())? { return Ok(true); }
         let mut statement = self.connection.prepare("SELECT a.artifact FROM core_artifacts a JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source WHERE a.model=?1 AND m.deleted=0")?;
-        let artifacts = statement.query_map([generation_key(model)?], |row| row.get::<_, Vec<u8>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let artifacts = statement.query_map([resolve()?.as_ref()], |row| row.get::<_, Vec<u8>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(!respire_core_sdk::index_ready(&artifacts)?)
     }
 
@@ -159,12 +167,45 @@ impl LocalStore {
     /// Checkpoint a candidate generation without publishing an active model.
     pub fn build_index_with_progress<E: crate::memory::search::Embedder>(
         &self, keys: &crate::memory::SessionKeys, embedder: &E, model: &str,
-        activate: bool, mut progress: impl FnMut(usize, usize) -> Result<()>,
+        activate: bool, progress: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<usize> {
+        self.build_index(keys, embedder, model, activate, None, progress)
+    }
+
+    /// Checkpoint a single immutable model-switch candidate. This does not
+    /// replace the caller's Runtime identity, sync, or activation fences.
+    pub fn build_candidate_index_with_progress<E: crate::memory::search::Embedder>(
+        &self, keys: &crate::memory::SessionKeys, embedder: &E,
+        selection: &respire_core_sdk::profiles::Selection,
+        progress: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<usize> {
+        respire_core_sdk::profiles::exclusive(|| {
+            respire_core_sdk::profiles::scoped(selection.clone(), || {
+                self.build_index(keys, embedder, &selection.model, false, Some(selection), progress)
+            })
+        })
+    }
+
+    fn build_index<E: crate::memory::search::Embedder>(
+        &self, keys: &crate::memory::SessionKeys, embedder: &E, model: &str,
+        activate: bool, candidate: Option<&respire_core_sdk::profiles::Selection>,
+        mut progress: impl FnMut(usize, usize) -> Result<()>,
     ) -> Result<usize> {
         progress(0, 0)?;
-        let missing = self.index_missing(model)?;
+        if let Some(selection) = candidate {
+            anyhow::ensure!(embedder.model_name() == selection.model, "candidate embedder does not match the immutable target");
+        }
+        let pinned = candidate.map(respire_core_sdk::profiles::generation_key_for_profile).transpose()?;
+        let resolve = || -> Result<Cow<'_, str>> {
+            match pinned.as_deref() {
+                Some(generation) => Ok(Cow::Borrowed(generation)),
+                // Legacy settings can be reread between progress checkpoints.
+                None => generation_key(model).map(Cow::Owned),
+            }
+        };
+        let missing = self.index_missing_in_generation(resolve()?.as_ref())?;
         if !missing && self.meta_get("retrieval_model")?.as_deref() == Some(model)
-            && !self.index_pending(model)?
+            && !self.index_pending_by(resolve)?
         {
             progress(0, 0)?;
             return Ok(0);
@@ -179,7 +220,7 @@ impl LocalStore {
                  FROM memories m WHERE deleted=0 AND NOT EXISTS
                  (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)
                  ORDER BY dirty DESC,updated_at DESC")?;
-            let rows = statement.query_map([generation_key(model)?], Self::row_to_memory)?
+            let rows = statement.query_map([resolve()?.as_ref()], Self::row_to_memory)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         } else {
@@ -190,9 +231,14 @@ impl LocalStore {
         let mut completed = 0;
         for (index, stored) in candidates.iter().enumerate() {
             progress(index, candidates.len())?;
-            let artifact = self.connection.query_row(
+            let generation = resolve()?;
+            // Reuse only the statement; observe artifacts after every progress
+            // checkpoint so resumed/published rows and errors keep their order.
+            let artifact = self.connection.prepare_cached(
                 "SELECT artifact FROM core_artifacts WHERE memory_id=?1 AND model=?2 AND source=?3",
-                params![stored.id, generation_key(model)?, stored.ciphertext], |r| r.get::<_, Vec<u8>>(0)).optional()?;
+            )?.query_row(
+                params![stored.id, generation.as_ref(), stored.ciphertext], |r| r.get::<_, Vec<u8>>(0),
+            ).optional()?;
             if let Some(artifact) = artifact {
                 if respire_core_sdk::index_ready(&[artifact])? { continue; }
             }
@@ -208,7 +254,7 @@ impl LocalStore {
             progress(index, candidates.len())?;
             let mut derived = stored.clone();
             derived.local_artifact = prepared.artifact;
-            self.store_artifact(&derived, model)?;
+            self.store_artifact_in_generation(&derived, resolve()?.as_ref())?;
             completed += 1;
         }
         progress(candidates.len(), candidates.len())?;
@@ -216,7 +262,7 @@ impl LocalStore {
         let missing: i64 = tx.query_row(
             "SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)",
-            params![generation_key(&model)?], |r| r.get(0))?;
+            params![resolve()?.as_ref()], |r| r.get(0))?;
         if missing != 0 {
             return Err(IndexSourceChanged { pending: missing }.into());
         }
@@ -333,3 +379,7 @@ mod copy_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "retrieval_generation_tests.rs"]
+mod generation_tests;
