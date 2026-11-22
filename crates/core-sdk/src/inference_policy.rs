@@ -1,6 +1,13 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
 
+pub(crate) fn configured_background_threads() -> Result<usize> {
+    background_threads(
+        crate::env::var("RSRS_INTRA_THREADS").ok().as_deref(),
+        std::thread::available_parallelism().map_or(2, |cores| cores.get()),
+    )
+}
+
 /// Host policy is immutable for a worker lifetime; only the background lane uses it.
 pub(crate) fn background_threads(value: Option<&str>, cores: usize) -> Result<usize> {
     match value {

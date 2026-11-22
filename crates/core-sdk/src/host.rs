@@ -368,10 +368,7 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     if let Some(selection) = crate::profiles::current()? {
         return crate::profiles::initialize(core, &selection);
     }
-    let background_intra_threads = crate::inference_policy::background_threads(
-        crate::env::var("RSRS_INTRA_THREADS").ok().as_deref(),
-        std::thread::available_parallelism().map_or(2, |cores| cores.get()),
-    )?;
+    let background_intra_threads = crate::inference_policy::configured_background_threads()?;
     let directory = crate::bge::resolve_model_dir()?;
     let selected = legacy_model(&directory)?;
     let engine = selected.engine;

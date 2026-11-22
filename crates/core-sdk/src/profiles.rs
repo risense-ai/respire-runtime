@@ -183,6 +183,9 @@ pub(crate) fn initialize(core: &mut crate::Core, selection: &Selection) -> Resul
         anyhow::ensure!(capabilities["mlx_backend_contract"].as_u64() == Some(1), "the paired Core SDK was built without the Apple MLX backend; install a Core SDK built with the mlx feature");
     }
     let mut config = selection.config()?;
+    if selection.backend_profile.backend == "onnx" {
+        config["background_intra_threads"] = json!(crate::inference_policy::configured_background_threads()?);
+    }
     let mut loaded = LOADED_CONFIG.lock().map_err(|_| anyhow::anyhow!("profile model cache poisoned"))?;
     if loaded.as_ref() == Some(&config) {
         let mut reuse = config.clone();
@@ -191,8 +194,8 @@ pub(crate) fn initialize(core: &mut crate::Core, selection: &Selection) -> Resul
         return Ok(());
     }
     *loaded = None;
+    let identity = config.clone();
     config["reuse_current"] = json!(false);
-    let identity = selection.config()?;
     #[cfg(windows)]
     if selection.backend_profile.backend == "onnx" {
         crate::host::register_selected_catalog(selection.engine, || core.register_providers())?;
