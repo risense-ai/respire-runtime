@@ -166,10 +166,10 @@ impl App {
     // ── read ──
 
     pub fn status(&self) -> Result<StatusInfo> {
-        let blobs = self.store.all(true)?;
+        let (local_total, local_alive) = self.store.catalog_counts()?;
         Ok(StatusInfo {
-            local_total: blobs.len(),
-            local_alive: blobs.iter().filter(|m| !m.deleted).count(),
+            local_total,
+            local_alive,
             remote_configured: remote_configured(),
             max_updated_at: self.store.max_updated_at().ok().flatten(),
             data_dir: data_dir().to_string_lossy().into_owned(),
@@ -1726,10 +1726,10 @@ pub fn subtree_members(
 /// status does not need vectors, so this path skips one model load.
 pub fn status_light() -> Result<StatusInfo> {
     let (root, store) = open_store_with_profile()?;
-    let blobs = store.all(true)?;
+    let (local_total, local_alive) = store.catalog_counts()?;
     Ok(StatusInfo {
-        local_total: blobs.len(),
-        local_alive: blobs.iter().filter(|m| !m.deleted).count(),
+        local_total,
+        local_alive,
         remote_configured: remote_configured(),
         max_updated_at: store.max_updated_at().ok().flatten(),
         data_dir: root.to_string_lossy().into_owned(),
