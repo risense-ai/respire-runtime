@@ -18,13 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          persist-credentials: false
-          path: harness
-      - uses: actions/checkout@v5
-        with:
           ref: ${{ inputs.candidate_sha }}
           persist-credentials: false
-          path: runtime-source
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: harness
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -42,13 +42,13 @@ jobs:
       - uses: actions/cache/restore@v4
         id: sdk-cache
         with:
-          path: runtime-source/.sdk/${{ env.TARGET }}
+          path: .sdk/${{ env.TARGET }}
           key: ${{ steps.sdk.outputs.key }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache/restore@v4
         with:
-          path: runtime-source/target/musl-cache
+          path: target/musl-cache
           key: musl-x86_64-unknown-linux-musl-ort-da9b5e3-rust-1.95-v1
       - name: Build the static x64 musl candidate
         working-directory: runtime-source
@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir benchmark-report
-          payload="runtime-source/target/ci/$TARGET/release"
+          payload="target/ci/$TARGET/release"
           sha=$(sha256sum "$payload/rsrs-runtime" | cut -d' ' -f1)
           jq -n --arg source "$CANDIDATE_SHA" --arg binary "$sha" --arg path "$payload" \
             '{source_commit:$source,binary_sha256:$binary,binary_file:"rsrs-runtime",payload:$path}' \
