@@ -449,18 +449,14 @@ pub fn run_tree_deepen(
     let app = respire_app::service::App::open()?;
     match (root, auto) {
         (_, true) => {
-            let all = app.store.all(false)?;
-            let roots: Vec<&respire_app::StoredMemory> = all
-                .iter()
-                .filter(|m| m.local_parent_id.is_empty())
-                .collect();
+            let (roots, mut batch) = respire_app::service::DeepenAuto::open(&app.store)?;
             let mut total_built = 0usize;
             let mut total_moved = 0usize;
             let mut items = Vec::new();
             let mut details = Vec::new();
             for r in &roots {
-                let plan = match respire_app::service::deepen_plan(&app.store, &r.id, min) {
-                    Ok((_, p)) if !p.sub_roots.is_empty() => p,
+                let plan = match batch.plan(&r.id, min) {
+                    Ok(Some(p)) if !p.sub_roots.is_empty() => p,
                     Err(error) if error.downcast_ref::<respire_app::service::IndexPending>().is_some() => return Err(error),
                     _ => continue,
                 };
@@ -475,10 +471,10 @@ pub fn run_tree_deepen(
                 )?;
                 total_built += b;
                 total_moved += m;
-                let name = if r.local_title.is_empty() {
+                let name = if r.title.is_empty() {
                     respire_app::service::short_id(&r.id)
                 } else {
-                    r.local_title.clone()
+                    r.title.clone()
                 };
                 items.push(OutputItem::new(
                     name,
@@ -490,7 +486,7 @@ pub fn run_tree_deepen(
                 ));
                 details.push(serde_json::json!({
                     "root": r.id,
-                    "title": r.local_title,
+                    "title": r.title,
                     "built": b,
                     "moved": m,
                     "sub_roots": titles,

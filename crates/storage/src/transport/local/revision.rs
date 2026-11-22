@@ -23,6 +23,15 @@ impl super::LocalStore {
     pub fn memory_revision(&self) -> Result<String> {
         read_revision(&self.connection)
     }
+
+    /// Read only active ID/parent pairs; callers must validate the snapshot revision.
+    pub fn active_tree_links(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, parent_id FROM memories WHERE deleted = 0",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 fn read_revision(connection: &Connection) -> Result<String> {

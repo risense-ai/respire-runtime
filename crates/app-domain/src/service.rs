@@ -20,6 +20,8 @@ use crate::sync::{remote_configured, sync_all};
 use crate::transport::local::LocalStore;
 use crate::transport::MemoryTransport;
 
+mod deepen;
+pub use deepen::{deepen_plan, DeepenAuto, DeepenRoot};
 mod merge;
 pub use merge::{merge_entries, merge_entries_with_metadata, merge_entries_with_metadata_revision};
 
@@ -2931,43 +2933,6 @@ pub struct DeepenSubRoot {
     pub title: String,
     pub member_ids: Vec<String>,
     pub member_titles: Vec<String>,
-}
-
-/// Fat-root deepen plan (read-only): request grouping suggestions from the private Core,
-/// and return material for the user to name the proposed sub-outlines.
-pub fn deepen_plan(
-    store: &LocalStore,
-    root_prefix: &str,
-    min_sim: f32,
-) -> Result<(String, DeepenPlan)> {
-    let candidates = store.all(false)?;
-    let root_id = resolve_prefix(&candidates, root_prefix)?;
-    let direct: HashSet<&str> = candidates.iter()
-        .filter(|entry| entry.local_parent_id == root_id)
-        .map(|entry| entry.id.as_str()).collect();
-    let mut descendants = HashSet::new();
-    let mut pending: Vec<&str> = direct.iter().copied().collect();
-    while let Some(parent) = pending.pop() {
-        for entry in candidates.iter().filter(|entry| entry.local_parent_id == parent) {
-            if descendants.insert(entry.id.as_str()) {
-                pending.push(entry.id.as_str());
-            }
-        }
-    }
-    // Core's deepen contract requires at least 15 children and a mostly flat root.
-    if direct.len() < 15 || descendants.len() * 3 > direct.len() * 2 {
-        return Err(crate::input_error::InputError(format!(
-            "this root is not flat ({} direct children, {} in the grandchild chain) \u{2014} hierarchy already exists or too few entries to deepen",
-            direct.len(), descendants.len(),
-        )).into());
-    }
-    require_candidates_ready(store, &candidates)?;
-    respire_core_sdk::execute(
-        "deepen_plan",
-        serde_json::json!({
-            "snapshots":respire_core_sdk::metadata_snapshots(&candidates), "root":root_prefix, "min":min_sim,
-        }),
-    )
 }
 
 /// Apply deepen: write the AI-chosen sub-outline titles. spec.title = sub-outline title (sub_roots order).
