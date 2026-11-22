@@ -28,29 +28,41 @@ impl LocalStore {
         &self,
         out: &mut [crate::memory::model::StoredMemory],
     ) -> Result<()> {
+        // Keep only the small ID lookup: collecting all joined source and
+        // artifact values first would duplicate the encrypted catalog at peak.
+        let positions: std::collections::HashMap<String, usize> = out
+            .iter().enumerate().map(|(index, memory)| (memory.id.clone(), index)).collect();
+        debug_assert_eq!(positions.len(), out.len(), "catalog IDs must be unique");
+        self.visit_retrieval_index(|id, source, artifact| {
+            if let Some(&index) = positions.get(id) {
+                let memory = &mut out[index];
+                // SQL checks the database source; also protect an earlier snapshot.
+                if memory.ciphertext == source {
+                    memory.local_artifact = artifact.to_vec();
+                }
+            }
+        })
+    }
+
+    pub(super) fn visit_retrieval_index(
+        &self, mut visit: impl FnMut(&str, &str, &[u8]),
+    ) -> Result<()> {
         let mut stmt = self.connection.prepare(
             "SELECT a.memory_id,a.source,a.artifact FROM core_artifacts a
              JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source
              WHERE a.model=?1 AND m.deleted=0",
         )?;
-        // Keep only the small ID lookup. Collecting every source ciphertext and
-        // artifact first duplicates the entire encrypted catalog at peak.
-        let positions: std::collections::HashMap<String, usize> = out.iter()
-            .enumerate().map(|(index, memory)| (memory.id.clone(), index)).collect();
-        debug_assert_eq!(positions.len(), out.len(), "catalog IDs must be unique");
         let mut rows = stmt.query(params![self.active_generation_key()?])?;
         while let Some(row) = rows.next()? {
             let id = row.get_ref(0)?.as_str()?;
             let source = row.get_ref(1)?.as_str()?;
-            // Preserve the previous collect's decoding errors even if this row
-            // is absent from, or no longer matches, the supplied snapshot.
-            let artifact: Vec<u8> = row.get(2)?;
-            if let Some(&index) = positions.get(id) {
-                let memory = &mut out[index];
-                // The SQL join checks the database source; this check also
-                // protects a supplied snapshot from a newer database source.
-                if memory.ciphertext == source {
-                    memory.local_artifact = artifact;
+            // Validate every joined locator, even when it would not attach.
+            // Use the original getter on a type failure to retain its error.
+            match row.get_ref(2)? {
+                rusqlite::types::ValueRef::Blob(artifact) => visit(id, source, artifact),
+                _ => {
+                    let artifact: Vec<u8> = row.get(2)?;
+                    visit(id, source, &artifact);
                 }
             }
         }

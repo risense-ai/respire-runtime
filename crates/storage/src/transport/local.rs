@@ -16,6 +16,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
 
+mod catalog;
 mod feedback;
 pub use feedback::FeedbackCounts;
 mod witness;
@@ -85,13 +86,6 @@ pub struct SkillRunStats {
 
 pub struct LocalStore {
     connection: Connection,
-}
-
-fn json_column<T: serde::de::DeserializeOwned>(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<T> {
-    let text: String = row.get(column)?;
-    serde_json::from_str(&text).map_err(|error| rusqlite::Error::FromSqlConversionFailure(
-        column, rusqlite::types::Type::Text, Box::new(error),
-    ))
 }
 
 /// A local safety gate only; projections and history do not authenticate ciphertext.
@@ -340,43 +334,6 @@ impl LocalStore {
             )
             .optional()?;
         super::timestamp_after(previous.as_deref())
-    }
-
-    fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMemory> {
-        let local_embedding = None;
-        Ok(StoredMemory {
-            id: row.get(0)?,
-            user: row.get(1)?,
-            ciphertext: row.get(2)?,
-            nonce: row.get(3)?,
-            embedding_enc: row.get(4)?,
-            updated_at: row.get(5)?,
-            deleted: row.get::<_, i64>(6)? != 0,
-            local_kind: row.get(7)?,
-            local_tags: row.get(8)?,
-            local_title: row.get(9)?,
-            local_project: row.get(10)?,
-            local_computer: row.get(11)?,
-            local_embedding,
-            local_parent_id: row.get(14)?,
-            local_created_at: row.get(13)?,
-            local_content_head: row.get(15)?,
-            local_recall_count: row.get(16)?,
-            local_importance: row.get(17).unwrap_or_else(|_| "normal".to_owned()),
-            local_device: row.get(18).unwrap_or_default(),
-            local_modified_by: row.get(19).unwrap_or_default(),
-            local_chunks: Vec::new(),
-            local_artifact: Vec::new(),
-            local_meta: respire_protocol::MemoryMeta {
-                memory_contract: row.get(20)?,
-                summary: row.get(21)?,
-                source_refs: json_column(row, 22)?,
-                valid_until: row.get(23)?,
-                review_at: row.get(24)?,
-                artifact: json_column(row, 25)?,
-                verification: json_column(row, 26)?,
-            },
-        })
     }
 
     /// Dirty rows (local new/edit/delete, pending cloud push). Includes tombstones.
@@ -1337,18 +1294,7 @@ impl MemoryTransport for LocalStore {
     }
 
     fn all(&self, include_deleted: bool) -> Result<Vec<StoredMemory>> {
-        let sql = if include_deleted {
-            "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
-             FROM memories"
-        } else {
-            "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
-                 kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
-             FROM memories WHERE deleted = 0"
-        };
-        let mut statement = self.connection.prepare(sql)?;
+        let mut statement = self.catalog_statement(include_deleted)?;
         let rows = statement.query_map([], Self::row_to_memory)?;
         let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         self.attach_retrieval_index(&mut out)?;
