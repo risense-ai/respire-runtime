@@ -473,3 +473,46 @@ fn existing_completed_receipts_never_recopy_or_overwrite_destination_edits() -> 
     assert!(!fixture.target().join("accounts/legacy-onememory").exists());
     Ok(())
 }
+
+#[test]
+fn historical_memory_ciphertext_and_vector_are_readable_by_runtime() -> anyhow::Result<()> {
+    const RECORD: &str = include_str!("fixtures/legacy-memory-v1/legacy_stored_memory.json");
+    const PLAINTEXT: &str = include_str!("fixtures/legacy-memory-v1/legacy_payload_v2.json");
+    const VECTOR: &[u8] = include_bytes!("fixtures/legacy-memory-v1/legacy_embedding.f32le");
+
+    fn tamper_hex(ciphertext: &str) -> anyhow::Result<String> {
+        let (first, rest) = ciphertext.split_at_checked(1)
+            .context("fixture ciphertext must begin with a hexadecimal byte")?;
+        Ok(format!("{}{}", if first == "0" { "1" } else { "0" }, rest))
+    }
+
+    let stored: crate::StoredMemory = serde_json::from_str(RECORD)?;
+    let urk = [42; 32];
+    let keys = crate::SessionKeys::from_urk(urk)?;
+    assert_eq!(keys.decrypt_content(&stored.ciphertext, &stored.nonce)?, PLAINTEXT);
+
+    let entry = crate::MemoryEngine::open(&keys, &stored)?;
+    assert_eq!(entry.id, stored.id);
+    assert_eq!(entry.kind, crate::Kind::Knowledge);
+    assert_eq!(entry.title, "Legacy fixture");
+    assert_eq!(entry.content, "Frozen synthetic historical format sample.");
+    assert_eq!(entry.importance, "normal");
+    assert_eq!(entry.emotion, -1.0);
+    assert!(entry.parent_id.is_empty());
+
+    let migrated = keys.migrate_embedding(&stored.embedding_enc)?;
+    let (nonce, ciphertext) = migrated.strip_prefix(crate::memory::crypto::RSRS_PREFIX)
+        .and_then(|value| value.split_once(':'))
+        .context("migrated vector must carry the current encrypted namespace")?;
+    let target = crate::memory::crypto::derive_subkey(&urk, b"rsrs:embedding:v1")?;
+    assert_eq!(crate::memory::crypto::decrypt_bytes(&target, ciphertext, nonce)?, VECTOR);
+
+    let mut corrupted = stored;
+    corrupted.ciphertext = tamper_hex(&corrupted.ciphertext)?;
+    assert!(crate::MemoryEngine::open(&keys, &corrupted).is_err());
+    let (nonce, ciphertext) = corrupted.embedding_enc.split_once(':')
+        .context("fixture must contain a historical encrypted vector")?;
+    let corrupted_vector = format!("{nonce}:{}", tamper_hex(ciphertext)?);
+    assert!(keys.migrate_embedding(&corrupted_vector).is_err());
+    Ok(())
+}
