@@ -1285,39 +1285,39 @@ fn locked_response(request: &RpcRequest) -> Option<RpcResponse> {
     None
 }
 
-pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
+/// Protocol admission is shared by blocking callers and the HTTP callback
+/// path. Scope is still checked under the admission and execution fences.
+fn validate_rpc_entry(request: &RpcRequest) -> Option<RpcResponse> {
     if request.v != PROTOCOL_V {
-        return error_response(
-            &request,
-            "protocol_version_mismatch",
-            "protocol version mismatch",
-        );
+        return Some(error_response(request, "protocol_version_mismatch", "protocol version mismatch"));
     }
-    if request.id.trim().is_empty()
-        || request.id.len() > 256
-        || request.id.chars().any(char::is_whitespace)
-    {
-        return error_response(
-            &request,
-            "invalid_request_id",
-            "request ID must contain 1 to 256 characters and no whitespace",
-        );
+    if !valid_identifier(&request.id) {
+        return Some(error_response(request, "invalid_request_id",
+            "request ID must contain 1 to 256 characters and no whitespace"));
     }
-    if let Err((code, error)) = validate_request_scope(&request) {
-        return error_response(&request, &code, &error);
+    if let Err((code, error)) = validate_request_scope(request) {
+        return Some(error_response(request, &code, &error));
     }
-    if let Some(response) = locked_response(&request) {
-        return response;
+    if let Some(response) = locked_response(request) {
+        return Some(response);
     }
     if matches!(request.method.as_str(), "model.prepare" | "index.prepare")
         && crate::host_hooks::background_paused()
     {
-        return error_response(
-            &request,
-            "runtime_maintenance",
-            "runtime maintenance pauses model/index preparation",
-        );
+        return Some(error_response(request, "runtime_maintenance",
+            "runtime maintenance pauses model/index preparation"));
     }
+    None
+}
+
+pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
+    if let Some(response) = validate_rpc_entry(&request) {
+        return response;
+    }
+    dispatch_validated(request, tx)
+}
+
+fn dispatch_validated(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
     let operation = if !matches!(
         request.method.as_str(),
         "runtime.result"
@@ -1760,35 +1760,12 @@ pub fn dispatch_deferred(
     tx: &Sender<Job>,
     action: impl FnOnce(RpcResponse) + Send + 'static,
 ) {
-    if request.v != PROTOCOL_V {
-        action(error_response(
-            &request,
-            "protocol_version_mismatch",
-            "protocol version mismatch",
-        ));
-        return;
-    }
-    if request.id.trim().is_empty()
-        || request.id.len() > 256
-        || request.id.chars().any(char::is_whitespace)
-    {
-        action(error_response(
-            &request,
-            "invalid_request_id",
-            "request ID must contain 1 to 256 characters and no whitespace",
-        ));
-        return;
-    }
-    if let Err((code, error)) = validate_request_scope(&request) {
-        action(error_response(&request, &code, &error));
-        return;
-    }
-    if let Some(response) = locked_response(&request) {
+    if let Some(response) = validate_rpc_entry(&request) {
         action(response);
         return;
     }
     if request.method != "cli.exec" {
-        action(dispatch(request, tx));
+        action(dispatch_validated(request, tx));
         return;
     }
     let operation = match operation_identity(&request) {
@@ -3868,6 +3845,30 @@ pub fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_error_envelopes_match_blocking_and_deferred_dispatch() -> Result<()> {
+        let (tx, queued) = mpsc::channel();
+        for (id, version, method, code) in [
+            ("good-id", PROTOCOL_V + 1, "cli.exec", "protocol_version_mismatch"),
+            ("bad id", PROTOCOL_V, "cli.exec", "invalid_request_id"),
+            ("good-id", PROTOCOL_V, "cli.exec", "scope_required"),
+            ("good-id", PROTOCOL_V, "model.configure", "scope_required"),
+        ] {
+            let request: RpcRequest = serde_json::from_value(json!({
+                "v":version, "id":id, "method":method, "args":[],
+            }))?;
+            let direct = dispatch(request.clone(), &tx);
+            let (reply, received) = mpsc::channel();
+            dispatch_deferred(request, &tx, move |response| { let _ = reply.send(response); });
+            let deferred = received.recv_timeout(Duration::from_secs(1))?;
+            assert_eq!(direct.code.as_deref(), Some(code));
+            assert_eq!(serde_json::to_value(direct)?, serde_json::to_value(deferred)?);
+        }
+        assert!(matches!(queued.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        Ok(())
+    }
+
     #[test]
     fn active_execution_context_restores_nested_and_unwound_scope() {
         let initial_scope = ACTIVE_EXECUTION_SCOPE.with(|slot| slot.borrow().clone());
