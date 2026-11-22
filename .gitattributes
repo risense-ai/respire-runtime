@@ -1,1 +1,6 @@
 contracts/runtime-control/** text eol=lf
+
+# Frozen historical bytes are verified against checked-in digests.
+crates/app/src/fixtures/legacy-memory-v1/legacy_payload_v2.json -text
+crates/app/src/fixtures/legacy-memory-v1/legacy_stored_memory.json -text
+crates/app/src/fixtures/legacy-memory-v1/legacy_embedding.f32le -text
