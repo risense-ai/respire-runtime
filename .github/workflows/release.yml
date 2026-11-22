@@ -1,728 +1,94 @@
-name: Runtime release
-
-# Builds and runs native regression on the exact rsrs-runtime assets before
-# publishing them for all eight platform targets:
-#   rsrs-runtime-<triple>(.exe)      raw binary
-#   rsrs-runtime-<triple>.tar.gz     binary + core-runtime.json + native Core
-#                                    runtime libraries and notices
-#   runtime-build-<triple>.json      schema-2 build metadata and integrity manifest
+name: Runtime musl Granite recall regression
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
-      ref:
-        description: Runtime branch, commit, vX.Y.Z or vX.Y.Z-dev.N tag
-        default: main
+      candidate_sha:
+        description: Exact Runtime repair commit to build and test
         required: true
         type: string
-      publish:
-        description: Publish the tested assets after all native and source checks succeed
-        default: false
-        type: boolean
-      dev_version:
-        description: Exact DEV version (X.Y.Z-dev.N), matching runtime/Cargo.toml; required when ref is not a v* tag
-        default: ''
-        type: string
-
 permissions:
   contents: read
-
-# Every publication holds this lock so two releases can never interleave.
-concurrency:
-  group: runtime-release-publication
-  queue: max
-  cancel-in-progress: false
-
+  actions: read
 jobs:
-  plan:
+  granite:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    outputs:
-      sha: ${{ steps.plan.outputs.sha }}
-      version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
-      channel: ${{ steps.plan.outputs.channel }}
-      publish: ${{ steps.plan.outputs.publish }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Require the migrated runtime workspace (phase P2 gate)
-        run: |
-          if [ ! -f runtime/Cargo.toml ]; then
-            echo "::error::The runtime workspace has not been migrated yet (phase P2 subtree migration). This workflow is complete but intentionally refuses to run against the skeleton."
-            exit 1
-          fi
-      - id: plan
-        env:
-          RELEASE_REF: ${{ inputs.ref || github.ref }}
-          RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
-          RELEASE_DEV_VERSION: ${{ inputs.dev_version }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node - <<'NODE'
-          const fs = require('fs'), cp = require('child_process');
-          const cargo = fs.readFileSync('runtime/Cargo.toml', 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-          if (!cargo) throw new Error('runtime/Cargo.toml has no version');
-          const ref = process.env.RELEASE_REF.replace(/^refs\/tags\//, '');
-          const tagEvent = process.env.RELEASE_REF.startsWith('refs/tags/') || /^v\d+\./.test(ref);
-          let channel, version;
-          if (tagEvent) {
-            if (process.env.RELEASE_DEV_VERSION) throw new Error('A release tag cannot be combined with an exact DEV override');
-            if (!/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(ref)) throw new Error('Release tags must use vX.Y.Z or vX.Y.Z-dev.N');
-            version = ref.slice(1);
-            channel = version.includes('-dev.') ? 'dev' : 'latest';
-            cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
-          } else {
-            if (!/^\d+\.\d+\.\d+-dev\.\d+$/.test(process.env.RELEASE_DEV_VERSION || '')) throw new Error('Manual non-tag builds require the dev_version input (X.Y.Z-dev.N)');
-            version = process.env.RELEASE_DEV_VERSION;
-            channel = 'dev';
-            if (process.env.RELEASE_PUBLISH === 'true') cp.execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
-          }
-          if (cargo !== version) throw new Error('Release version must match runtime/Cargo.toml; update the manifest and Cargo.lock before building');
-          if (channel === 'latest') throw new Error('Stable publication requires separate promotion authorization; this workflow currently publishes DEV releases');
-          const sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);
-          console.log(`Planned runtime release ${version} (${channel}) from ${sha}, publish=${process.env.RELEASE_PUBLISH}`);
-          NODE
-
-  build:
-    name: Release (${{ matrix.target }})
-    needs: plan
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Match the oldest GNU userland supported by the Client2 packages.
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-15
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
+    timeout-minutes: 35
     env:
-      # Match the separately linked Core's unwind runtime; keep the Windows CRT dynamic.
-      RUSTFLAGS: ${{ matrix.rustflags }}
+      TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - name: Require native Windows ARM64 hardware
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        shell: pwsh
-        run: |
-          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
-            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
-          }
-      - name: Require real native Linux ARM64 hardware
-        shell: bash
-        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
+          path: harness
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+          path: runtime-source
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Configure Intel macOS cross compilation on Apple silicon
-        if: matrix.target == 'x86_64-apple-darwin'
-        shell: bash
+      - name: Resolve exact SDK cache identity
+        id: sdk
+        working-directory: runtime-source
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           set -euo pipefail
-          test "$RUNNER_ARCH" = 'ARM64'
-          test "$(uname -s)" = 'Darwin'
-          test "$(sysctl -n hw.optional.arm64)" = '1'
-          sdk="$(xcrun --sdk macosx --show-sdk-path)"
-          cc="$(xcrun --find clang)"
-          cxx="$(xcrun --find clang++)"
-          ar="$(xcrun --find ar)"
-          {
-            echo "SDKROOT=$sdk"
-            echo "CC_x86_64_apple_darwin=$cc"
-            echo "CXX_x86_64_apple_darwin=$cxx"
-            echo "AR_x86_64_apple_darwin=$ar"
-            echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=$cc"
-            echo 'MACOSX_DEPLOYMENT_TARGET=13.4'
-          } >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: ${{ matrix.target }}
-      - name: Resolve the pinned SDK dependency cache
-        id: sdk-cache
-        shell: bash
-        run: |
-          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
-          target="${{ matrix.target }}"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$TARGET")" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
-        id: sdk-cache-restore
-        if: steps.sdk-cache.outputs.key != ''
+        id: sdk-cache
         with:
-          path: .sdk/${{ steps.sdk-cache.outputs.target }}
-          key: ${{ steps.sdk-cache.outputs.key }}
+          path: runtime-source/.sdk/${{ env.TARGET }}
+          key: ${{ steps.sdk.outputs.key }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: steps.sdk-cache.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      # NOTE: respire-core's sdk-link.yml currently validates its GNU SDK through a
-      # fixed CLI consumer pinned at risense-ai/respire-cli@406399841208bf865d8f40c72dbbf6450fb3a44b
-      # (sdk-link.yml, "Checkout the fixed reviewed CLI consumer"). After the P2
-      # migration lands, update that pin to a consumer commit from this repository;
-      # respire-runtime becomes the Core-linked source of truth.
-      - name: Prepare pinned binary Core SDK
-        if: ${{ !contains(matrix.target, '-musl') }}
-        shell: bash
-        run: node scripts/fetch-core-sdk.mjs '${{ matrix.target }}'
-      - name: Resolve the build directory
-        id: builddir
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ '${{ matrix.target }}' == *-musl ]]; then
-            # scripts/build-linux-musl.sh builds inside its container into target/ci.
-            echo "dir=target/ci/${{ matrix.target }}/release" >> "$GITHUB_OUTPUT"
-          else
-            echo "dir=target/release-build/${{ matrix.target }}/release" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Build release binary
-        if: ${{ !contains(matrix.target, '-musl') }}
-        shell: bash
-        run: |
-          cargo build --release --locked -p respire_runtime --bin rsrs-runtime \
-            --target '${{ matrix.target }}' --target-dir target/release-build
       - uses: actions/cache/restore@v4
-        if: contains(matrix.target, '-musl')
-        id: musl-cache
         with:
-          path: target/musl-cache
-          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
-      - name: Build static musl binary and verify libc independence
-        if: contains(matrix.target, '-musl')
-        shell: bash
-        run: bash scripts/build-linux-musl.sh '${{ matrix.target }}'
-      # The musl container already stages its payload as root; a second host
-      # staging pass cannot chmod those notices and changes nothing.
-      - name: Stage the Core runtime payload next to the binary
-        if: ${{ !contains(matrix.target, '-musl') }}
-        shell: bash
+          path: runtime-source/target/musl-cache
+          key: musl-x86_64-unknown-linux-musl-ort-da9b5e3-rust-1.95-v1
+      - name: Build the static x64 musl candidate
+        working-directory: runtime-source
         env:
-          RSRS_CORE_SDK_DIR: ${{ github.workspace }}/.sdk/${{ matrix.target }}
-        run: node scripts/stage-core-runtime.mjs '${{ steps.builddir.outputs.dir }}'
-      - name: Assemble the release archive and metadata
-        id: assemble
-        shell: bash
-        env:
-          RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
-          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
-          RUNTIME_CHANNEL: ${{ needs.plan.outputs.channel }}
-          RUNTIME_TARGET: ${{ matrix.target }}
-          RUNTIME_SOURCE_SHA: ${{ needs.plan.outputs.sha }}
-          BUILD_DIR: ${{ steps.builddir.outputs.dir }}
+          EXPECTED: ${{ steps.sdk.outputs.key }}
+          RESTORED: ${{ steps.sdk-cache.outputs.cache-matched-key }}
         run: |
           set -euo pipefail
-          target="$RUNTIME_TARGET"
-          suffix=''; if [[ "$target" == *windows* ]]; then suffix='.exe'; fi
-          # Cargo emits the bare binary name; every published artifact and the
-          # runtime-build metadata use the triple-qualified release name that
-          # the CLI downloader and client2 validate against.
-          built="rsrs-runtime$suffix"
-          binary="rsrs-runtime-$target$suffix"
-          export RUNTIME_BINARY_FILE="$binary"
-          test -f "$BUILD_DIR/$built" || { echo "::error::Built binary missing at $BUILD_DIR/$built"; exit 1; }
-          test -f "$BUILD_DIR/core-runtime.json" || { echo "::error::Staged core-runtime.json missing; the SDK staging step failed silently"; exit 1; }
-          test -d "$BUILD_DIR/core-notices" || { echo "::error::Staged Core SDK notices missing"; exit 1; }
-          rm -rf payload; mkdir payload
-          cp "$BUILD_DIR/$built" "payload/$binary"
-          cp "$BUILD_DIR/core-runtime.json" payload/core-runtime.json
-          # SDK staging preserves loader-relative paths next to the binary.
-          # Copy every declared file, including root DLLs and nested resources.
-          node - <<'NODE'
-          const fs = require('fs'), path = require('path'), {createHash} = require('crypto');
-          const manifest = JSON.parse(fs.readFileSync('payload/core-runtime.json', 'utf8'));
-          if (manifest.schema_version !== 1 || manifest.target !== process.env.RUNTIME_TARGET ||
-              !Array.isArray(manifest.files) || !manifest.files.length || manifest.files.length > 4094) {
-            throw new Error('Invalid staged Core runtime manifest');
-          }
-          const seen = new Set(['core-runtime.json', process.env.RUNTIME_BINARY_FILE.toLowerCase()]);
-          let total = 0;
-          for (const file of manifest.files) {
-            if (typeof file.path !== 'string' || file.path.length > 1024 || /[\\:\x00-\x1f\x7f]/.test(file.path) ||
-                file.path.split('/').some(part => !part || part === '.' || part === '..' || /[. ]$/.test(part))) {
-              throw new Error('Unsafe staged Core payload path');
-            }
-            const key = file.path.toLowerCase();
-            if (seen.has(key)) throw new Error('Duplicate staged Core payload path');
-            seen.add(key);
-            let source = process.env.BUILD_DIR;
-            for (const part of file.path.split('/')) {
-              source = path.join(source, part);
-              if (fs.lstatSync(source).isSymbolicLink()) throw new Error('Linked staged Core payload');
-            }
-            const info = fs.lstatSync(source);
-            if (!info.isFile() || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > 256 * 2**20 ||
-                info.size !== file.size || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('Invalid staged Core payload file');
-            total += info.size;
-            if (total > 512 * 2**20) throw new Error('Core payload exceeds extraction limit');
-            const bytes = fs.readFileSync(source);
-            if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error('Staged Core payload checksum mismatch');
-            const destination = path.join('payload', file.path);
-            fs.mkdirSync(path.dirname(destination), {recursive: true});
-            fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-            fs.chmodSync(destination, info.mode & 0o777);
-          }
-          NODE
-          if [ -n "$(find payload -type l -print -quit)" ]; then
-            echo "::error::Symlinked release payloads are forbidden"
-            exit 1
-          fi
-          export RUNTIME_BINARY_FILE="$binary"
-          tar --format=ustar -czf "rsrs-runtime-$target.tar.gz" -C payload .
-          node - <<'NODE'
-          const cp = require('child_process'), fs = require('fs');
-          const target = process.env.RUNTIME_TARGET;
-          const binary = `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`;
-          const archive = `rsrs-runtime-${process.env.RUNTIME_TARGET}.tar.gz`;
-          const entries = cp.execFileSync('tar', ['-tzf', archive], {encoding: 'utf8'})
-            .split(/\r?\n/).filter(Boolean);
-          const resources = JSON.parse(fs.readFileSync('payload/core-runtime.json', 'utf8')).files;
-          const required = new Set([binary, 'core-runtime.json', ...resources.map(file => file.path)]);
-          const directories = new Set();
-          for (const file of required) {
-            const parts = file.split('/');
-            while (parts.length > 1) { parts.pop(); directories.add(parts.join('/')); }
-          }
-          const seen = new Set();
-          let runtimeFiles = 0, noticeFiles = 0;
-          for (const raw of entries) {
-            const entry = raw.replace(/^\.\//, '').replace(/\/$/, '');
-            if (!entry || entry === '.') continue;
-            const safePath = !entry.includes('\\') && !entry.startsWith('/') &&
-              entry.split('/').every(part => part && part !== '.' && part !== '..');
-            const withinWhitelist = required.has(entry) || directories.has(entry);
-            if (seen.has(entry.toLowerCase())) throw new Error('Duplicate archive payload path');
-            seen.add(entry.toLowerCase());
-            if (!safePath || !withinWhitelist) throw new Error(`Unsafe archive path: ${entry}`);
-            if (required.has(entry) && entry !== binary && entry !== 'core-runtime.json' && !entry.startsWith('core-notices/')) ++runtimeFiles;
-            if (entry.startsWith('core-notices/')) ++noticeFiles;
-          }
-          for (const name of required) {
-            if (!entries.some(entry => entry.replace(/^\.\//, '') === name)) throw new Error(`Archive is missing ${name}`);
-          }
-          if (!noticeFiles) throw new Error('Archive is missing redistribution notices');
-          console.log(`Verified archive whitelist: ${entries.length} entries; runtime files: ${runtimeFiles}`);
-          NODE
-          tar_sha256="$(sha256sum "rsrs-runtime-$target.tar.gz" | cut -d ' ' -f 1)"
-          binary_sha256="$(sha256sum "payload/$binary" | cut -d ' ' -f 1)"
-          export RUNTIME_TAR_SHA256="$tar_sha256" RUNTIME_BINARY_SHA256="$binary_sha256" RUNTIME_BINARY_FILE="$binary"
-          node - <<'NODE'
-          const {createHash} = require('crypto');
-          const fs = require('fs');
-          const path = require('path');
-          function manifestFiles(directory, root) {
-            const files = [];
-            for (const entry of fs.readdirSync(directory, {withFileTypes: true}).sort((a, b) => a.name.localeCompare(b.name))) {
-              const file = path.join(directory, entry.name);
-              if (entry.isDirectory()) files.push(...manifestFiles(file, root));
-              else if (entry.isFile()) {
-                const relative = path.relative(root, file).split(path.sep).join('/');
-                files.push({path: relative, size: fs.statSync(file).size,
-                  sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex')});
-              } else throw new Error(`Unsupported payload entry: ${file}`);
-            }
-            return files;
-          }
-          const report = {
-            schema_version: 2,
-            runtime_version: process.env.RUNTIME_VERSION,
-            tag: process.env.RUNTIME_TAG,
-            channel: process.env.RUNTIME_CHANNEL,
-            target_triple: process.env.RUNTIME_TARGET,
-            archive_file: `rsrs-runtime-${process.env.RUNTIME_TARGET}.tar.gz`,
-            archive_sha256: process.env.RUNTIME_TAR_SHA256,
-            binary_file: process.env.RUNTIME_BINARY_FILE,
-            binary_sha256: process.env.RUNTIME_BINARY_SHA256,
-            source_commit: process.env.RUNTIME_SOURCE_SHA,
-            protocol_range: {minimum: 1, maximum: 1},
-            capabilities: {business_executor: '1', mcp_server: '1', offline_keygen_handoff: '1'},
-            files: manifestFiles('payload', 'payload')
-          };
-          if (!/^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$/.test(report.runtime_version)) throw new Error('Invalid runtime_version');
-          for (const field of ['archive_sha256', 'binary_sha256']) {
-            if (!/^[a-f0-9]{64}$/.test(report[field])) throw new Error(`Invalid ${field}`);
-          }
-          if (!/^[0-9a-f]{40}$/.test(report.source_commit)) throw new Error('Invalid source_commit');
-          if (!report.files.some(file => file.path === report.binary_file && file.sha256 === report.binary_sha256)) {
-            throw new Error('Binary file manifest does not match binary_sha256');
-          }
-          fs.writeFileSync(`runtime-build-${process.env.RUNTIME_TARGET}.json`, JSON.stringify(report, null, 2) + '\n');
-          NODE
-          echo "tar_sha256=$tar_sha256" >> "$GITHUB_OUTPUT"
-          echo "binary_sha256=$binary_sha256" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 5
-          name: runtime-release-${{ matrix.target }}
-          path: |
-            rsrs-runtime-${{ matrix.target }}.tar.gz
-            runtime-build-${{ matrix.target }}.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 5
-          name: runtime-release-binary-${{ matrix.target }}
-          path: payload/rsrs-runtime*
-          if-no-files-found: error
-
-  native-regression:
-    name: Pre-release native regression (${{ matrix.target }})
-    needs: [plan, build]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            source_safety: true
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            source_safety: true
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            source_safety: true
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-      - name: Require native Windows ARM64 hardware
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        shell: pwsh
+          test -n "$EXPECTED" && test "$EXPECTED" = "$RESTORED"
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          bash scripts/build-linux-musl.sh "$TARGET"
+      - name: Fetch pinned IBM Granite assets
         run: |
-          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
-            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
-          }
-      - name: Require real native Linux ARM64 hardware
-        shell: bash
-        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Require native Intel Mac hardware
-        if: matrix.os == 'macos-15-intel'
-        shell: bash
-        run: node scripts/smoke-runtime-release.mjs --check-native-intel
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime-release-${{ matrix.target }}
-          path: release-assets
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime-release-binary-${{ matrix.target }}
-          path: release-assets
-      - name: Verify archive and binary digests against the build report
-        shell: bash
+          set -euo pipefail
+          mkdir candidate
+          base=https://huggingface.co/ibm-granite/granite-embedding-311m-multilingual-r2/resolve/44399559930365213510b1ee2eb15ded83374f0e
+          curl -fsSL --retry 2 "$base/onnx/model_quint8_avx2.onnx" -o candidate/granite.onnx
+          curl -fsSL --retry 2 "$base/tokenizer.json" -o candidate/tokenizer.json
+          sha256sum -c <<'HASHES'
+          f1fdd44e7e1ac51f12ab7957c7bd092e064d596c288513bf9d326842f669edee  candidate/granite.onnx
+          0087c868b33bad550a78a08d19798cfd7f713cde4f020803b8f51f405503e15f  candidate/tokenizer.json
+          HASHES
+      - name: Probe recall during the real Granite switch in Alpine
         env:
-          RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
-          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
-          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
-          RUNTIME_TARGET: ${{ matrix.target }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
-          node - <<'NODE'
-          const fs = require('fs'), cp = require('child_process');
-          const target = process.env.RUNTIME_TARGET, version = process.env.RUNTIME_VERSION;
-          const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
-          const required = {schema_version: 2, runtime_version: version, tag: process.env.RUNTIME_TAG,
-            target_triple: target, archive_file: `rsrs-runtime-${target}.tar.gz`,
-            source_commit: process.env.RUNTIME_SHA,
-            binary_file: `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}`};
-          for (const [key, value] of Object.entries(required)) {
-            if (report[key] !== value) throw new Error(`runtime-build ${key} differs: ${report[key]} != ${value}`);
-          }
-          const digest = file => cp.execFileSync('sha256sum', [file], {encoding: 'utf8'}).split(' ')[0];
-          if (digest(`release-assets/rsrs-runtime-${target}.tar.gz`) !== report.archive_sha256) throw new Error('Archive SHA-256 mismatch');
-          if (digest(`release-assets/${report.binary_file}`) !== report.binary_sha256) throw new Error('Binary SHA-256 mismatch');
-          console.log(`Verified ${target} digests for runtime ${version}`);
-          NODE
-      - name: Verify complete release payload and normal drain
-        shell: bash
-        env:
-          RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
-          RUNTIME_TARGET: ${{ matrix.target }}
-        run: |
-          node scripts/smoke-runtime-release.mjs --self-check
-          node scripts/smoke-runtime-release.mjs
+          set -euo pipefail
+          mkdir benchmark-report
+          payload="runtime-source/target/ci/$TARGET/release"
+          sha=$(sha256sum "$payload/rsrs-runtime" | cut -d' ' -f1)
+          jq -n --arg source "$CANDIDATE_SHA" --arg binary "$sha" --arg path "$payload" \
+            '{source_commit:$source,binary_sha256:$binary,binary_file:"rsrs-runtime",payload:$path}' \
+            > "candidate/runtime-build-$TARGET.json"
+          docker run --rm -v "$PWD:/workspace" -w /workspace node:24-alpine \
+            node harness/scripts/granite-recall-busy.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          retention-days: 7
-          name: runtime-smoke-${{ matrix.target }}
-          path: smoke-report/*.json
+          name: granite-musl-recall-busy
+          path: |
+            benchmark-report/
+            candidate/runtime-build-*.json
           if-no-files-found: warn
-      # Run database migration, snapshot/recovery, crypto and ownership tests
-      # once per OS; libc/architecture asset coverage is supplied by smoke above.
-      - uses: dtolnay/rust-toolchain@1.95.0
-        if: matrix.source_safety == true
-      - name: Resolve source data-safety SDK identity
-        if: matrix.source_safety == true
-        id: safety-sdk
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmp sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json
-          echo "key=$(node scripts/sdk-ci-cache.mjs key '${{ matrix.target }}')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        if: matrix.source_safety == true
-        id: safety-sdk-restore
-        with:
-          path: .sdk/${{ matrix.target }}
-          key: ${{ steps.safety-sdk.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Verify source data-safety SDK bytes
-        if: matrix.source_safety == true
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.safety-sdk.outputs.key }}
-          MATCHED_KEY: ${{ steps.safety-sdk-restore.outputs.cache-matched-key }}
-        run: |
-          set -euo pipefail
-          test -z "${CORE_SDK_READ_TOKEN:-}"
-          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
-          node scripts/fetch-core-sdk.mjs '${{ matrix.target }}'
-      - name: Run complete source data-safety suites (not product evidence)
-        if: matrix.source_safety == true
-        shell: bash
-        env:
-          # Existing unit fixtures use HashingEmbedder; candidate smoke never uses this mode.
-          RSRS_CORE_TEST_MODE: '1'
-          RUST_TEST_THREADS: '1'
-          RUST_MIN_STACK: '16777216'
-          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=-crt-static' || '' }}
-          CARGO_PROFILE_DEV_DEBUG: line-tables-only
-          CARGO_PROFILE_TEST_DEBUG: line-tables-only
-          XDG_CONFIG_HOME: ${{ runner.temp }}/runtime-safety-config
-          XDG_DATA_HOME: ${{ runner.temp }}/runtime-safety-data
-          XDG_CACHE_HOME: ${{ runner.temp }}/runtime-safety-cache
-          APPDATA: ${{ runner.temp }}/runtime-safety-appdata
-          LOCALAPPDATA: ${{ runner.temp }}/runtime-safety-local
-          RSRS_DATA_DIR: ${{ runner.temp }}/runtime-safety-state
-        run: |
-          set -euo pipefail
-          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$APPDATA" "$LOCALAPPDATA" "$RSRS_DATA_DIR"
-          cargo test --workspace --lib --bins --tests --locked -- --test-threads=1 2>&1 | tee data-safety.log
-          echo 'Candidate asset smoke and complete source data-safety suites passed; source fixtures are not product execution evidence.' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        if: always() && matrix.source_safety == true
-        with:
-          name: runtime-data-safety-${{ matrix.target }}
-          path: data-safety.log
-          retention-days: 7
-          if-no-files-found: error
-
-  publish:
-    needs: [plan, build, native-regression]
-    if: >-
-      ${{
-        !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' &&
-        needs.native-regression.result == 'success' && needs.plan.outputs.publish == 'true'
-      }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-release-*
-          path: release-assets
-          merge-multiple: true
-      - name: Verify the complete eight-platform asset inventory and digests
-        env:
-          RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
-          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
-          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
-          RUNTIME_CHANNEL: ${{ needs.plan.outputs.channel }}
-        run: |
-          node - <<'NODE'
-          const fs = require('fs'), cp = require('child_process');
-          const targets = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl',
-            'aarch64-unknown-linux-musl', 'aarch64-apple-darwin', 'x86_64-apple-darwin',
-            'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
-          const expected = [];
-          for (const target of targets) {
-            expected.push(`rsrs-runtime-${target}.tar.gz`, `runtime-build-${target}.json`);
-            expected.push(target.includes('windows') ? `rsrs-runtime-${target}.exe` : `rsrs-runtime-${target}`);
-          }
-          expected.sort();
-          const digest = file => cp.execFileSync('sha256sum', [file], {encoding: 'utf8'}).split(' ')[0];
-          for (const target of targets) {
-            const report = JSON.parse(fs.readFileSync(`release-assets/runtime-build-${target}.json`, 'utf8'));
-            if (report.schema_version !== 2 || report.runtime_version !== process.env.RUNTIME_VERSION ||
-                report.tag !== process.env.RUNTIME_TAG || report.target_triple !== target ||
-                report.source_commit !== process.env.RUNTIME_SHA || report.channel !== process.env.RUNTIME_CHANNEL ||
-                report.binary_file !== `rsrs-runtime-${target}${target.includes('windows') ? '.exe' : ''}` ||
-                report.archive_file !== `rsrs-runtime-${target}.tar.gz` ||
-                !/^[0-9a-f]{64}$/.test(report.archive_sha256 || '')) {
-              throw new Error(`runtime-build-${target}.json identity mismatch`);
-            }
-            for (const [file, field] of [[`rsrs-runtime-${target}.tar.gz`, 'archive_sha256'], [report.binary_file, 'binary_sha256']]) {
-              if (!fs.existsSync(`release-assets/${file}`)) throw new Error(`Missing release asset: ${file}`);
-              if (digest(`release-assets/${file}`) !== report[field]) throw new Error(`SHA-256 mismatch for ${file}`);
-            }
-          }
-          const actual = fs.readdirSync('release-assets').sort();
-          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-            throw new Error(`Asset inventory mismatch:\nexpected ${JSON.stringify(expected, null, 2)}\nactual   ${JSON.stringify(actual, null, 2)}`);
-          }
-          console.log(`Verified ${expected.length} release assets for runtime ${process.env.RUNTIME_VERSION}`);
-          NODE
-      - name: Create the draft release and upload every verified asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
-          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
-          RUNTIME_CHANNEL: ${{ needs.plan.outputs.channel }}
-          RUNTIME_VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          notes="rsrs-runtime ${RUNTIME_VERSION} (${RUNTIME_CHANNEL})."
-          if gh release view "$RUNTIME_TAG" --json isDraft >/dev/null 2>&1; then
-            test "$(gh release view "$RUNTIME_TAG" --json isDraft --jq .isDraft)" = true || { echo 'Release is already public; use a new version'; exit 1; }
-            gh release edit "$RUNTIME_TAG" --target "$RUNTIME_SHA" --title "$RUNTIME_TAG" --notes "$notes"
-          else
-            if [ "$RUNTIME_CHANNEL" = dev ]; then
-              gh release create "$RUNTIME_TAG" --draft --prerelease --target "$RUNTIME_SHA" --title "$RUNTIME_TAG" --notes "$notes"
-            else
-              gh release create "$RUNTIME_TAG" --draft --target "$RUNTIME_SHA" --title "$RUNTIME_TAG" --notes "$notes"
-            fi
-          fi
-          gh release upload "$RUNTIME_TAG" release-assets/* --clobber
-      - name: Require successful Runtime source CI for the exact release SHA
-        shell: bash
-        timeout-minutes: 5
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUNTIME_SHA: ${{ needs.plan.outputs.sha }}
-        run: |
-          node - <<'NODE'
-          const assert = require('node:assert/strict'), cp = require('child_process');
-          const repo = process.env.GITHUB_REPOSITORY, sha = process.env.RUNTIME_SHA;
-          assert.match(repo || '', /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
-          assert.match(sha || '', /^[a-f0-9]{40}$/);
-          const read = (path, paginate = false) => JSON.parse(cp.execFileSync('gh',
-            ['api', ...(paginate ? ['--paginate', '--slurp'] : []), `repos/${repo}/${path}`],
-            {encoding: 'utf8', timeout: 30000}));
-          function inventory(path, field) {
-            const pages = read(path, true);
-            assert.ok(Array.isArray(pages) && pages.length > 0, 'Missing CI API pages');
-            const entries = pages.flatMap(page => {
-              assert.ok(Array.isArray(page[field]), `Missing CI ${field}`);
-              return page[field];
-            });
-            for (const page of pages) assert.equal(page.total_count, entries.length, 'Incomplete CI inventory');
-            return entries;
-          }
-          function latestPush() {
-            const runs = inventory(`actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&per_page=100`, 'workflow_runs');
-            const matching = runs.filter(run => run.head_sha === sha && run.event === 'push');
-            assert.ok(matching.length > 0, 'No push source CI for the release SHA');
-            for (const run of matching) assert.ok(Number.isSafeInteger(run.id) && run.id > 0, 'Invalid CI run ID');
-            return matching.sort((a, b) => b.id - a.id)[0];
-          }
-          function validateRun(run) {
-            assert.equal(run.repository?.full_name, repo, 'CI belongs to another repository');
-            assert.equal(run.head_repository?.full_name, repo, 'CI source belongs to another repository');
-            assert.equal(run.head_sha, sha, 'CI source SHA differs');
-            assert.equal(run.event, 'push', 'CI is not a push run');
-            assert.equal(run.path, '.github/workflows/ci.yml', 'CI workflow differs');
-            assert.equal(run.status, 'completed', 'CI is not terminal');
-            assert.equal(run.conclusion, 'success', 'Source CI must succeed');
-            assert.ok(Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0, 'Invalid CI attempt');
-          }
-          const selected = latestPush();
-          validateRun(selected);
-          const runPath = `actions/runs/${selected.id}`, run = read(runPath);
-          validateRun(run);
-          assert.equal(run.id, selected.id, 'CI run differs');
-          assert.equal(run.run_attempt, selected.run_attempt, 'CI attempt changed');
-          const jobs = inventory(`${runPath}/attempts/${run.run_attempt}/jobs?per_page=100`, 'jobs');
-          for (const job of jobs) {
-            assert.equal(job.run_id, run.id, 'CI job belongs to another run');
-            assert.equal(job.run_attempt, run.run_attempt, 'CI job belongs to another attempt');
-            assert.equal(job.head_sha, sha, 'CI job source SHA differs');
-            assert.equal(job.status, 'completed', 'CI job is not terminal');
-            assert.ok(['success', 'skipped', 'neutral'].includes(job.conclusion),
-              `Unexpected CI job failure: ${job.name} (${job.conclusion})`);
-          }
-          for (const name of ['detect', 'workspace-tests', 'control-contract', 'ci-complete']) {
-            const matching = jobs.filter(job => job.name === name);
-            assert.equal(matching.length, 1, `Missing or duplicate required CI job: ${name}`);
-            assert.equal(matching[0].status, 'completed', `CI job is not terminal: ${name}`);
-            assert.equal(matching[0].conclusion, 'success', `CI job did not succeed: ${name}`);
-          }
-          // Refuse a rerun or a newer push run that appeared while jobs were read.
-          for (const current of [read(runPath), latestPush()]) {
-            validateRun(current);
-            assert.equal(current.id, run.id, 'Latest push CI changed');
-            assert.equal(current.run_attempt, run.run_attempt, 'Latest CI attempt changed');
-          }
-          console.log(`Verified source CI ${run.id} attempt ${run.run_attempt} for ${sha}; this is not aggregate or full G1 evidence`);
-          NODE
-      - name: Make the release public
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUNTIME_TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          count="$(gh release view "$RUNTIME_TAG" --json assets --jq '.assets | length')"
-          test "$count" -eq 24 || { echo "::error::Draft release holds $count assets, expected 24"; exit 1; }
-          gh release edit "$RUNTIME_TAG" --draft=false
-          echo "Published $RUNTIME_TAG with 24 assets"
-          echo "Published $RUNTIME_TAG after native Runtime regression succeeded." >> "$GITHUB_STEP_SUMMARY"
