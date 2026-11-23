@@ -17,6 +17,7 @@ use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
 
 mod catalog;
+pub use catalog::ActiveTreeCatalog;
 mod feedback;
 pub use feedback::FeedbackCounts;
 mod witness;

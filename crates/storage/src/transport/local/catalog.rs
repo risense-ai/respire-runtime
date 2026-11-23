@@ -118,6 +118,15 @@ fn json_column<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Only the metadata needed to enumerate and screen automatic deepen roots.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct ActiveTreeCatalog {
+    /// Root ID and its original title, in catalog order.
+    pub roots: Vec<(String, String)>,
+    /// Live ID and parent ID, from the same catalog read as the roots.
+    pub links: Vec<(String, String)>,
+}
+
 impl LocalStore {
     pub(super) fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<StoredMemory> {
         MemoryColumns::<String>::read(row).map(Into::into)
@@ -126,19 +135,45 @@ impl LocalStore {
     /// Validate what a full catalog read would accept, without collecting
     /// ciphertext, materialized memories, or opaque retrieval bytes.
     pub fn catalog_counts(&self) -> Result<(usize, usize)> {
-        let mut statement = self.catalog_statement(true)?;
-        let rows = statement.query_map([], |row| {
-            Ok(!MemoryColumns::<CheckedText>::read(row)?.deleted)
-        })?;
         let mut total = 0;
         let mut alive = 0;
-        for row in rows {
-            alive += usize::from(row?);
+        self.visit_validated_catalog(true, |_, deleted| {
+            alive += usize::from(!deleted);
             total += 1;
+            Ok(())
+        })?;
+        Ok((total, alive))
+    }
+
+    /// Preserve full live catalog validation and order without materializing
+    /// ciphertext, full memories, or their derived index artifacts.
+    pub fn active_tree_catalog(&self) -> Result<ActiveTreeCatalog> {
+        let mut catalog = ActiveTreeCatalog::default();
+        self.visit_validated_catalog(false, |row, _| {
+            let id: String = row.get(0)?;
+            let parent: String = row.get(14)?;
+            if parent.is_empty() {
+                catalog.roots.push((id.clone(), row.get(9)?));
+            }
+            catalog.links.push((id, parent));
+            Ok(())
+        })?;
+        Ok(catalog)
+    }
+
+    fn visit_validated_catalog(
+        &self,
+        include_deleted: bool,
+        mut visit: impl FnMut(&Row<'_>, bool) -> rusqlite::Result<()>,
+    ) -> Result<()> {
+        let mut statement = self.catalog_statement(include_deleted)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let deleted = MemoryColumns::<CheckedText>::read(row)?.deleted;
+            visit(row, deleted)?;
         }
         // Catalog decoding has always taken precedence over locator errors.
-        self.visit_retrieval_index(|_, _, _| {})?;
-        Ok((total, alive))
+        self.visit_retrieval_index(|_, _, _| {})
     }
 
     pub(super) fn catalog_statement(
@@ -288,6 +323,79 @@ mod tests {
             &store,
             |error| matches!(error, rusqlite::Error::InvalidColumnType(2, name, rusqlite::types::Type::Text) if name == "artifact"),
         );
+        Ok(())
+    }
+
+    fn same_tree_catalog_error(
+        store: &LocalStore,
+        expected: impl FnOnce(&rusqlite::Error) -> bool,
+    ) {
+        let Err(old) = store.all(false) else {
+            panic!("full live catalog unexpectedly accepted the fixture");
+        };
+        let Err(new) = store.active_tree_catalog() else {
+            panic!("tree projection unexpectedly accepted the fixture");
+        };
+        let Some(old_sql) = old.downcast_ref::<rusqlite::Error>() else {
+            panic!("full live catalog returned a non-SQLite error: {old:#}");
+        };
+        let Some(new_sql) = new.downcast_ref::<rusqlite::Error>() else {
+            panic!("tree projection returned a non-SQLite error: {new:#}");
+        };
+        assert!(expected(old_sql), "unexpected baseline error: {old:#}");
+        assert_eq!(format!("{old_sql:?}"), format!("{new_sql:?}"));
+        assert_eq!(format!("{old:#}"), format!("{new:#}"));
+    }
+
+    #[test]
+    fn tree_projection_matches_order_and_live_row_and_locator_validation() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = LocalStore::open(&temporary.path().join("db.sqlite"))?;
+        assert_eq!(store.active_tree_catalog()?, ActiveTreeCatalog::default());
+        let generation = store.active_generation_key()?;
+        store.connection.execute_batch(
+            "INSERT INTO memories(id,parent_id,title,ciphertext,deleted) VALUES
+             ('root-b','','B','root-source',0),('root-a','','A','a-source',0),
+             ('child','root-b','Child','child-source',0),('old','','Gone','old-source',1);
+             UPDATE memories SET recall_count=x'ff' WHERE id='old';",
+        )?;
+        store.connection.execute(
+            "INSERT INTO core_artifacts(memory_id,model,source,artifact) VALUES
+             ('root-b',?1,'root-source',x'ff00'),
+             ('child',?1,'stale-source','invalid stale locator'),
+             ('old',?1,'old-source','invalid tombstone locator')",
+            [&generation],
+        )?;
+        let all = store.all(false)?;
+        let expected = ActiveTreeCatalog {
+            roots: all
+                .iter()
+                .filter(|row| row.local_parent_id.is_empty())
+                .map(|row| (row.id.clone(), row.local_title.clone()))
+                .collect(),
+            links: all
+                .into_iter()
+                .map(|row| (row.id, row.local_parent_id))
+                .collect(),
+        };
+        assert_eq!(store.active_tree_catalog()?, expected);
+        assert_eq!(expected.roots.len(), 2);
+        assert_eq!(expected.links.len(), 3);
+        assert!(store.catalog_counts().is_err(), "status still validates corrupt tombstones");
+
+        store.connection.execute_batch(
+            "UPDATE memories SET recall_count=x'ff' WHERE id='child';
+             UPDATE core_artifacts SET source='child-source' WHERE memory_id='child';",
+        )?;
+        same_tree_catalog_error(&store, |error| {
+            matches!(error, rusqlite::Error::InvalidColumnType(16, name, rusqlite::types::Type::Blob) if name == "recall_count")
+        });
+        store.connection.execute_batch(
+            "UPDATE memories SET recall_count=0 WHERE id='child';",
+        )?;
+        same_tree_catalog_error(&store, |error| {
+            matches!(error, rusqlite::Error::InvalidColumnType(2, name, rusqlite::types::Type::Text) if name == "artifact")
+        });
         Ok(())
     }
 
