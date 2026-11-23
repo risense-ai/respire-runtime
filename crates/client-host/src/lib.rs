@@ -1,17 +1,14 @@
 #![forbid(unsafe_code)]
 
-//! Client host helpers shared without app or Core dependencies.
+//! Runtime host identity and low-level helpers without app or Core dependencies.
+//! Account and installation root resolution is owned by app-domain service.
 
 pub mod config;
 pub mod credential;
-pub mod env;
 pub mod identity;
 pub mod input_error;
 #[cfg(feature = "locks")]
 pub mod lock;
-pub mod paths;
-pub mod roots;
-pub mod settings;
 mod version;
 
 pub use version::version_cmp;
