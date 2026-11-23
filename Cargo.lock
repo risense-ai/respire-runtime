@@ -1443,14 +1443,12 @@ name = "respire_client_host"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "dirs",
  "hex",
  "rand",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
- "whoami",
 ]
 
 [[package]]
