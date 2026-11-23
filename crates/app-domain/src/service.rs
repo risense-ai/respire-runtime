@@ -3005,12 +3005,7 @@ pub fn deepen_apply<E: crate::memory::search::Embedder>(
         }
         Ok((built, moved))
     })?;
-    // Write-path gate autosync_active(): always off in tests — otherwise fixtures would be pushed to the real cloud
-    // (proven 2026-09-16: 14 test rows polluted the cloud).
-    if autosync_active() && remote_configured() {
-        let _ =
-            crate::sync::build_remote_from_env().and_then(|remote| sync_all(keys, store, &remote));
-    }
+    notify_autosync();
     Ok((built, moved))
 }
 
@@ -3135,12 +3130,7 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
         let stored = MemoryEngine::seal(keys, embedder, &e, &user)?;
         store.put(&stored)?;
     }
-    // Sync after split: write-path gate — old impl only looked at remote_configured(); after the user turned auto-sync off
-    // split still hit the network, and test fixtures were pushed to the real cloud (proven 2026-09-16).
-    if autosync_active() && remote_configured() {
-        let _ =
-            crate::sync::build_remote_from_env().and_then(|remote| sync_all(keys, store, &remote));
-    }
+    notify_autosync();
     Ok(spec.items.len())
 }
 
