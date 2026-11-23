@@ -78,17 +78,17 @@ impl LocalStore {
         // The source guard also protects a newer artifact from an older prepared snapshot.
         self.connection.execute_batch("SAVEPOINT core_artifact_publish")?;
         let result = (|| -> Result<()> {
-            self.connection.execute(
+            // Cache only plans; every execution binds the current source and
+            // runs inside this same publication savepoint.
+            self.connection.prepare_cached(
                 "DELETE FROM core_artifacts WHERE memory_id=?1 AND (source<>?2 OR ?3=1)
                  AND EXISTS(SELECT 1 FROM memories m WHERE m.id=?1 AND m.ciphertext=?2 AND m.deleted=?3)",
-                params![memory.id, memory.ciphertext, memory.deleted as i64],
-            )?;
+            )?.execute(params![memory.id, memory.ciphertext, memory.deleted as i64])?;
             if !memory.deleted && !memory.local_artifact.is_empty() {
-                self.connection.execute(
+                self.connection.prepare_cached(
                     "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
                      SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
-                    params![memory.id, generation, memory.ciphertext, memory.local_artifact],
-                )?;
+                )?.execute(params![memory.id, generation, memory.ciphertext, memory.local_artifact])?;
             }
             Ok(())
         })();
@@ -316,6 +316,48 @@ impl LocalStore {
 #[cfg(test)]
 mod copy_tests {
     use super::*;
+
+    #[test]
+    fn artifact_publication_rebinds_source_and_rolls_back_guarded_delete() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = LocalStore::open(&directory.path().join("publication.db"))?;
+        let mut a = super::super::tests::sample("a");
+        let mut b = super::super::tests::sample("b");
+        a.local_artifact = vec![1];
+        b.local_artifact = vec![2];
+        store.connection.execute_batch(
+            "INSERT INTO memories(id,ciphertext) VALUES('a','aabbcc'),('b','aabbcc');
+             INSERT INTO core_artifacts(memory_id,model,source,artifact)
+             VALUES('a','old','stale-source',x'ff');",
+        )?;
+        let read = |id: &str| -> Result<Vec<(String, String, Vec<u8>)>> {
+            let mut rows = store.connection.prepare(
+                "SELECT model,source,artifact FROM core_artifacts WHERE memory_id=?1 ORDER BY model",
+            )?;
+            let values = rows.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            Ok(values.collect::<rusqlite::Result<_>>()?)
+        };
+        store.store_artifact_in_generation(&b, "g2")?;
+        let before = read("a")?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER deny_fixture_insert BEFORE INSERT ON core_artifacts
+             WHEN NEW.memory_id='a' BEGIN SELECT RAISE(ABORT, 'fixture rejects insert'); END;",
+        )?;
+        let failure = store.store_artifact_in_generation(&a, "g1").err()
+            .ok_or_else(|| anyhow::anyhow!("publication unexpectedly survived rejecting trigger"))?;
+        assert!(failure.to_string().contains("fixture rejects insert"), "{failure:#}");
+        assert_eq!(read("a")?, before, "the preceding guarded delete must roll back");
+        assert_eq!(read("b")?, vec![("g2".into(), "aabbcc".into(), vec![2])]);
+        store.connection.execute_batch("DROP TRIGGER deny_fixture_insert")?;
+        store.store_artifact_in_generation(&a, "g1")?;
+        assert_eq!(read("a")?, vec![("g1".into(), "aabbcc".into(), vec![1])]);
+        let mut stale = a.clone();
+        stale.ciphertext = "stale-source".into();
+        stale.local_artifact = vec![3];
+        store.store_artifact_in_generation(&stale, "g2")?;
+        assert_eq!(read("a")?, vec![("g1".into(), "aabbcc".into(), vec![1])]);
+        Ok(())
+    }
 
     #[test]
     fn attachments_preserve_source_deleted_model_and_subset_guards() -> Result<()> {
