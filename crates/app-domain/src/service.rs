@@ -3137,15 +3137,15 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
 // ── small helpers ──
 
 pub fn open_store() -> Result<LocalStore> {
-    validate_client_config()?;
-    crate::snapshot::ensure_no_incomplete_restore(&data_dir())?;
     open_store_with_profile().map(|(_, store)| store)
 }
 
 /// Return the identity captured for this exact connection, not a later config read.
 pub fn open_store_with_profile() -> Result<(PathBuf, LocalStore)> {
-    validate_client_config()?;
-    let root = data_dir();
+    // Resolve from the same strict read we validated; do not use data_dir's
+    // independent permissive read or a config cached across business requests.
+    let config = read_client_config_for_write()?;
+    let root = data_dir_from_config(Some(&config));
     crate::snapshot::ensure_no_incomplete_restore(&root)?;
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
@@ -3731,6 +3731,54 @@ mod tests {
         ];
         let m2 = subtree_members(&cyclic, "aaaaaaaa-root");
         assert!(m2.contains("aaaaaaaa-root") && m2.contains("bbbbbbbb-child"));
+    }
+
+    #[test]
+    fn normal_store_open_uses_checked_account_and_keeps_snapshot_gate() -> Result<()> {
+        let isolation = crate::test_lock::Isolate::new()?;
+        let account = isolation.path().join("accounts/model-profile");
+        std::fs::create_dir_all(&account)?;
+        std::fs::write(client_config_path(), serde_json::to_vec(&serde_json::json!({
+            "data_dir": account,
+        }))?)?;
+        let marker = account.join(".snapshot-maintenance.json");
+        std::fs::write(&marker, b"fixture maintenance")?;
+        for error in [open_store().err(), open_store_with_profile().err()] {
+            assert!(error.context("maintenance did not block normal store open")?
+                .to_string().contains("snapshot maintenance blocks normal library access"));
+        }
+        assert!(!account.join("rsrs.db").exists());
+        assert!(!isolation.path().join("rsrs.db").exists());
+        std::fs::remove_file(marker)?;
+
+        let (opened, store) = open_store_with_profile()?;
+        assert_eq!(opened, account);
+        drop(store);
+        assert!(account.join("rsrs.db").is_file());
+        assert!(!isolation.path().join("rsrs.db").exists());
+        open_store()?;
+        Ok(())
+    }
+
+    #[test]
+    fn normal_store_open_remains_strict_before_checking_restore_state() -> Result<()> {
+        let isolation = crate::test_lock::Isolate::new()?;
+        // A malformed config must never fall back to the isolated/default DB.
+        std::fs::write(isolation.path().join(".snapshot-maintenance.json"), b"fixture maintenance")?;
+        for (body, message) in [
+            ("{", "contains invalid JSON"),
+            ("[]", "must contain a JSON object"),
+            (r#"{"data_dir":{}}"#, "has a data_dir of type object, expected string"),
+            (r#"{"autosync":"true"}"#, "has a autosync of type string, expected boolean"),
+        ] {
+            std::fs::write(client_config_path(), body)?;
+            for error in [open_store().err(), open_store_with_profile().err()] {
+                let error = error.context("invalid config did not block normal store open")?;
+                assert!(error.to_string().contains(message), "{error:#}");
+            }
+            assert!(!isolation.path().join("rsrs.db").exists());
+        }
+        Ok(())
     }
 
     #[test]
