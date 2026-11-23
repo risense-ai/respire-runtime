@@ -52,16 +52,11 @@ pub struct DeepenAuto<'a> {
 impl<'a> DeepenAuto<'a> {
     pub fn open(store: &'a LocalStore) -> Result<(Vec<DeepenRoot>, Self)> {
         let before = store.memory_revision().ok();
-        // The initial full read preserves catalog decoding errors, root order,
-        // and root titles, including when no planner ever runs.
-        let rows = store.all(false)?;
-        let roots = rows
-            .iter()
-            .filter(|row| row.local_parent_id.is_empty())
-            .map(|row| DeepenRoot {
-                id: row.id.clone(),
-                title: row.local_title.clone(),
-            })
+        let catalog = store.active_tree_catalog()?;
+        let roots = catalog
+            .roots
+            .into_iter()
+            .map(|(id, title)| DeepenRoot { id, title })
             .collect();
         let snapshot = before
             .filter(|revision| {
@@ -70,9 +65,7 @@ impl<'a> DeepenAuto<'a> {
                     .is_ok_and(|current| &current == revision)
             })
             .map(|revision| {
-                let links =
-                    TreeLinks::new(rows.into_iter().map(|row| (row.id, row.local_parent_id)));
-                (revision, links)
+                (revision, TreeLinks::new(catalog.links.into_iter()))
             });
         Ok((roots, Self { store, snapshot }))
     }
