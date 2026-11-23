@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalEntry, cacheKey, archiveCacheKey, observeSdkArchive, TARGETS} from './sdk-ci-cache.mjs';
 import {gzipSync} from 'node:zlib';
-import {downloadPrivateSdk as standalone} from './private-sdk-download.mjs';
-import {downloadPrivateSdk as packaged} from '../crates/core-sdk/private-sdk-download.mjs';
+import {downloadPrivateSdk} from '../crates/core-sdk/private-sdk-download.mjs';
 const target='x86_64-unknown-linux-gnu', bytes=Buffer.from('synthetic SDK bytes');
 const digest=createHash('sha256').update(bytes).digest('hex');
 function entry(version,t=target) {
@@ -19,25 +18,40 @@ for (const version of ['1.0.2-dev.24','1.1.0-dev.1','2.0.0-dev.1']) {
   assert.notEqual(archiveCacheKey(target,entry(version)),cacheKey(target,entry(version)));
   assert.equal(new Set(TARGETS.map(t=>archiveCacheKey(t,entry(version,t)))).size,TARGETS.length);
  });
- for(const [name,download] of [['standalone',standalone],['packaged',packaged]]) {
-  test(`${name} accepts ${version} only with pinned bytes and trusted context`,async()=>{
+ test(`packaged downloader accepts ${version} on all release targets only with pinned bytes and trusted context`,async()=>{
+  for(const target of TARGETS) {
    for(const kind of ['manifest','archive']) {
     let calls=0;
     const transport=async(url)=>{calls++; return url.includes('/releases/tags/')
      ? new Response(JSON.stringify({id:1,tag_name:`sdk-v${version}`,draft:false,prerelease:true,assets:[{id:123,name:`respire-core-sdk-${target}.${kind==='manifest'?'manifest.json':'tar.gz'}`,size:bytes.length,digest:`sha256:${digest}`}]}))
      : new Response(bytes);};
     const options={env:{CORE_SDK_READ_TOKEN:'synthetic-fixture-token'},transport};
-    assert.deepEqual(await download(entry(version),target,kind,options),bytes);
+    assert.deepEqual(await downloadPrivateSdk(entry(version,target),target,kind,options),bytes);
     assert.equal(calls,2);
-    const broken=entry(version);broken[kind==='manifest'?'manifest_sha256':'archive_sha256']='c'.repeat(64);
-    await assert.rejects(download(broken,target,kind,options));
-    calls=0;
-    await assert.rejects(download(entry(version),target,kind,{...options,env:{...options.env,GITHUB_EVENT_NAME:'pull_request'}}),/forbidden in PR/);
-    assert.equal(calls,0);
+    const broken=entry(version,target);broken[kind==='manifest'?'manifest_sha256':'archive_sha256']='c'.repeat(64);
+    await assert.rejects(downloadPrivateSdk(broken,target,kind,options),/integrity metadata mismatch/);
+    for(const event of ['pull_request','pull_request_target']) {
+     calls=0;
+     await assert.rejects(downloadPrivateSdk(entry(version,target),target,kind,{...options,env:{...options.env,GITHUB_EVENT_NAME:event}}),/forbidden in PR/);
+     assert.equal(calls,0);
+    }
    }
-  });
- }
+  }
+ });
 }
+
+test('untrusted Actions contexts cannot use the packaged downloader transport',async()=>{
+ const trusted={CORE_SDK_READ_TOKEN:'synthetic-fixture-token',GITHUB_ACTIONS:'true',
+  GITHUB_REPOSITORY:'risense-ai/respire-runtime',GITHUB_REF:'refs/heads/main',GITHUB_EVENT_NAME:'workflow_dispatch'};
+ for(const override of [{GITHUB_REF:'refs/heads/unreviewed'},{GITHUB_REPOSITORY:'another-org/respire-runtime'},{GITHUB_EVENT_NAME:'schedule'}]) {
+  let calls=0;
+  await assert.rejects(downloadPrivateSdk(entry('2.0.0-dev.5'),target,'manifest',{
+   env:{...trusted,...override},transport:async()=>{calls++;}
+  }),/requires a trusted main-branch runtime workflow/);
+  assert.equal(calls,0);
+ }
+});
+
 function archiveFixture(manifest={target,sdk_version:'1.1.0-dev.1'},name='manifest.json') {
  const manifestBytes=Buffer.from(JSON.stringify(manifest)),header=Buffer.alloc(512);
  header.write(name);header.write(manifestBytes.length.toString(8).padStart(11,'0')+'\0',124);
@@ -66,10 +80,8 @@ test('SDK evidence cannot substitute lock values for different embedded SDK byte
 for(const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1','2.0.0','2.0.0-dev.0','2.0.0-dev.01','2.0.0-rc.1','2.0.0-dev.1+metadata','2.0.1-dev.1']) {
  test(`unsupported SDK ${version} cannot reach cache or network`,async()=>{
   assert.throws(()=>canonicalEntry(target,entry(version)),/tag\/version/);
-  for(const download of [standalone,packaged]) {
-   let calls=0;
-   await assert.rejects(download(entry(version),target,'manifest',{env:{},transport:async()=>{calls++;}}),/version/);
-   assert.equal(calls,0);
-  }
+  let calls=0;
+  await assert.rejects(downloadPrivateSdk(entry(version),target,'manifest',{env:{},transport:async()=>{calls++;}}),/version/);
+  assert.equal(calls,0);
  });
 }
